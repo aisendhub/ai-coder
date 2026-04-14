@@ -8,7 +8,9 @@ export default defineConfig({
     react({
       babel: {
         plugins: [
+          // Order matters: decorators MUST run before class-properties.
           ["@babel/plugin-proposal-decorators", { version: "legacy" }],
+          ["@babel/plugin-transform-class-properties", { loose: true }],
         ],
       },
     }),
