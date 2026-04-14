@@ -152,6 +152,7 @@ export function ChatPanel() {
     } finally {
       setStreaming(false)
       streamingRef.current = false
+      window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
       const next = queueRef.current.shift()
       setQueued([...queueRef.current])
       if (next) {

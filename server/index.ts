@@ -12,10 +12,100 @@ import { streamSSE } from "hono/streaming"
 import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
 import { query } from "@anthropic-ai/claude-agent-sdk"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { resolve } from "node:path"
+
+const execFileP = promisify(execFile)
+
+// Working directory for the agent (and for git status). Dev: local repo you
+// point to; prod: swapped per-conversation to the E2B sandbox cwd.
+const WORKSPACE_DIR = resolve(process.env.WORKSPACE_DIR ?? process.cwd())
 
 const app = new Hono()
 
-app.get("/api/health", (c) => c.json({ ok: true }))
+app.get("/api/health", (c) => c.json({ ok: true, workspace: WORKSPACE_DIR }))
+
+// Parsed git status + diff for the current workspace.
+// Returns: { workspace, files: [{ path, status, diff, oldPath? }] }
+app.get("/api/changes", async (c) => {
+  try {
+    const { stdout: porcelain } = await execFileP(
+      "git",
+      ["status", "--porcelain=v1", "-z"],
+      { cwd: WORKSPACE_DIR, maxBuffer: 5 * 1024 * 1024 }
+    )
+    const files = parsePorcelain(porcelain)
+
+    const withDiffs = await Promise.all(
+      files.map(async (f) => {
+        const diff = await fileDiff(f)
+        return { ...f, diff }
+      })
+    )
+
+    return c.json({ workspace: WORKSPACE_DIR, files: withDiffs })
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      500
+    )
+  }
+})
+
+type ChangedFile = {
+  path: string
+  status: "added" | "modified" | "deleted" | "renamed" | "untracked"
+  oldPath?: string
+}
+
+function parsePorcelain(z: string): ChangedFile[] {
+  const files: ChangedFile[] = []
+  const entries = z.split("\0").filter(Boolean)
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]
+    const xy = entry.slice(0, 2)
+    const path = entry.slice(3)
+    const code = xy.trim()
+    let status: ChangedFile["status"]
+    let oldPath: string | undefined
+    if (code === "??") status = "untracked"
+    else if (code.startsWith("A")) status = "added"
+    else if (code.startsWith("D") || xy[1] === "D") status = "deleted"
+    else if (code.startsWith("R")) {
+      status = "renamed"
+      // For renames the "from" path follows in the next entry (NUL-separated)
+      oldPath = entries[i + 1]
+      i += 1
+    } else status = "modified"
+    files.push({ path, status, oldPath })
+  }
+  return files
+}
+
+async function fileDiff(f: ChangedFile): Promise<string> {
+  try {
+    if (f.status === "untracked") {
+      // Synthesize a diff-like blob so the viewer can render it
+      const { stdout } = await execFileP("cat", [f.path], {
+        cwd: WORKSPACE_DIR,
+        maxBuffer: 5 * 1024 * 1024,
+      }).catch(() => ({ stdout: "" }))
+      return stdout
+    }
+    const args =
+      f.status === "renamed" && f.oldPath
+        ? ["diff", "HEAD", "--", f.oldPath, f.path]
+        : ["diff", "HEAD", "--", f.path]
+    const { stdout } = await execFileP("git", args, {
+      cwd: WORKSPACE_DIR,
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    return stdout
+  } catch {
+    return ""
+  }
+}
 
 app.post("/api/chat", async (c) => {
   const body = await c.req.json<{ prompt?: string; sessionId?: string }>()
@@ -42,6 +132,7 @@ app.post("/api/chat", async (c) => {
         prompt,
         options: {
           resume: sessionId,
+          cwd: WORKSPACE_DIR,
           permissionMode: "bypassPermissions",
           settingSources: [],
           includePartialMessages: false,

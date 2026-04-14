@@ -26,7 +26,7 @@ export function AppSidebar() {
     <Sidebar side="left" collapsible="offcanvas">
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-1">
-          <Button size="sm" className="flex-1 justify-start gap-2">
+          <Button className="flex-1 justify-start gap-2">
             <Plus className="size-4" />
             New chat
           </Button>
