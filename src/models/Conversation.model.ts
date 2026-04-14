@@ -264,9 +264,13 @@ export class Conversation extends BaseModel {
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
+      console.log("[runTurn] starting SSE read loop")
       while (true) {
         const { value, done } = await reader.read()
-        if (done) break
+        if (done) {
+          console.log("[runTurn] SSE stream done")
+          break
+        }
         buffer += decoder.decode(value, { stream: true })
         const parts = buffer.split("\n\n")
         buffer = parts.pop() ?? ""
@@ -318,6 +322,7 @@ export class Conversation extends BaseModel {
         }
       }
     } catch (err) {
+      console.log("[runTurn] caught error:", (err as Error)?.name, (err as Error)?.message)
       if ((err as Error)?.name !== "AbortError") {
         const message = err instanceof Error ? err.message : String(err)
         runInAction(() => {
@@ -341,7 +346,11 @@ export class Conversation extends BaseModel {
         })
         window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
         // Play a short chime so the user knows the AI finished
-        import("../lib/sounds").then((s) => s.playDoneSound()).catch(() => {})
+        console.log("[runTurn] playing done sound")
+        import("../lib/sounds").then((s) => {
+          console.log("[runTurn] sound module loaded, calling playDoneSound")
+          s.playDoneSound()
+        }).catch((e) => console.error("[runTurn] sound error:", e))
       }
     }
   }

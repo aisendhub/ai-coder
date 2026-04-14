@@ -62,19 +62,21 @@ export function RightPanelTrigger({
 
   return (
     <Tooltip>
-      <TooltipTrigger>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => onOpenChange(!open)}
-          aria-label={open ? "Close changes" : "Open changes"}
-        >
-          {open ? (
-            <PanelRightClose className="size-5" />
-          ) : (
-            <PanelRightOpen className="size-5" />
-          )}
-        </Button>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenChange(!open)}
+            aria-label={open ? "Close changes" : "Open changes"}
+          />
+        }
+      >
+        {open ? (
+          <PanelRightClose className="size-5" />
+        ) : (
+          <PanelRightOpen className="size-5" />
+        )}
       </TooltipTrigger>
       <TooltipContent>{open ? "Close changes" : "Open changes"}</TooltipContent>
     </Tooltip>

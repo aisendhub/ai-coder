@@ -23,6 +23,10 @@ export const SUPPORTED_IMAGE_TYPES = [
   "image/webp",
 ]
 
+export const SUPPORTED_DOCUMENT_TYPES = [
+  "application/pdf",
+]
+
 export const SUPPORTED_TEXT_TYPES = [
   "text/plain",
   "text/markdown",
@@ -40,8 +44,13 @@ export const SUPPORTED_TEXT_TYPES = [
 
 export const ACCEPTED_MIME_TYPES = [
   ...SUPPORTED_IMAGE_TYPES,
+  ...SUPPORTED_DOCUMENT_TYPES,
   ...SUPPORTED_TEXT_TYPES,
 ]
+
+export function isDocumentAttachment(a: { mimeType: string }): boolean {
+  return SUPPORTED_DOCUMENT_TYPES.includes(a.mimeType)
+}
 
 export function isImageAttachment(a: { mimeType: string }): boolean {
   return SUPPORTED_IMAGE_TYPES.includes(a.mimeType)
@@ -55,7 +64,7 @@ export function readFileAsAttachment(file: File): Promise<Attachment> {
       return
     }
 
-    // Determine mime type — fall back to text/plain for code-like extensions
+    // Determine mime type — fall back based on extension
     let mimeType = file.type
     if (!mimeType || !ACCEPTED_MIME_TYPES.includes(mimeType)) {
       const ext = file.name.split(".").pop()?.toLowerCase()
@@ -67,7 +76,9 @@ export function readFileAsAttachment(file: File): Promise<Attachment> {
         "sql", "graphql", "prisma", "env", "gitignore",
         "dockerfile", "makefile",
       ]
-      if (ext && textExts.includes(ext)) {
+      if (ext === "pdf") {
+        mimeType = "application/pdf"
+      } else if (ext && textExts.includes(ext)) {
         mimeType = "text/plain"
       } else if (!mimeType) {
         reject(new Error(`Unsupported file type: ${file.name}`))

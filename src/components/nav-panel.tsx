@@ -60,18 +60,14 @@ export const NavPanel = observer(function NavPanel({
     return (
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
         <Tooltip>
-          <TooltipTrigger>
-            <Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew}>
-              <Plus className="size-4" />
-            </Button>
+          <TooltipTrigger render={<Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew} />}>
+            <Plus className="size-4" />
           </TooltipTrigger>
           <TooltipContent side="right">New chat</TooltipContent>
         </Tooltip>
         <Tooltip>
-          <TooltipTrigger>
-            <Button size="icon" variant="ghost" aria-label="Search">
-              <Search className="size-4" />
-            </Button>
+          <TooltipTrigger render={<Button size="icon" variant="ghost" aria-label="Search" />}>
+            <Search className="size-4" />
           </TooltipTrigger>
           <TooltipContent side="right">Search</TooltipContent>
         </Tooltip>
@@ -96,28 +92,32 @@ export const NavPanel = observer(function NavPanel({
         </div>
         <div className="border-t w-full pt-1 flex flex-col items-center gap-1">
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={toggleTheme}
-                aria-label="Toggle theme"
-              >
-                {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={toggleTheme}
+                  aria-label="Toggle theme"
+                />
+              }
+            >
+              {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             </TooltipTrigger>
             <TooltipContent side="right">{dark ? "Light mode" : "Dark mode"}</TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={onToggle}
-                aria-label="Expand nav"
-              >
-                <PanelLeftOpen className="size-4" />
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={onToggle}
+                  aria-label="Expand nav"
+                />
+              }
+            >
+              <PanelLeftOpen className="size-4" />
             </TooltipTrigger>
             <TooltipContent side="right">Expand nav</TooltipContent>
           </Tooltip>
@@ -176,30 +176,34 @@ export const NavPanel = observer(function NavPanel({
         <div className="text-xs text-muted-foreground px-1">ai-coder · v0.1</div>
         <div className="flex items-center gap-0.5">
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={toggleTheme}
-                aria-label="Toggle theme"
-                className="size-7"
-              >
-                {dark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={toggleTheme}
+                  aria-label="Toggle theme"
+                  className="size-7"
+                />
+              }
+            >
+              {dark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
             </TooltipTrigger>
             <TooltipContent>{dark ? "Light mode" : "Dark mode"}</TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={onToggle}
-                aria-label="Collapse nav"
-                className="size-7"
-              >
-                <PanelLeftClose className="size-4" />
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={onToggle}
+                  aria-label="Collapse nav"
+                  className="size-7"
+                />
+              }
+            >
+              <PanelLeftClose className="size-4" />
             </TooltipTrigger>
             <TooltipContent>Collapse nav</TooltipContent>
           </Tooltip>

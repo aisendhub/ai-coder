@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from "react"
+import { createContext, useCallback, useContext, useState, type ReactNode } from "react"
 
 export type FileChange = {
   path: string
@@ -18,7 +18,7 @@ const ChatContext = createContext<ChatState | null>(null)
 export function ChatStateProvider({ children }: { children: ReactNode }) {
   const [files, setFiles] = useState<FileChange[]>([])
 
-  const recordFileTouch = (path: string, tool: string) => {
+  const recordFileTouch = useCallback((path: string, tool: string) => {
     setFiles((curr) => {
       const existing = curr.find((f) => f.path === path)
       if (existing) {
@@ -38,9 +38,9 @@ export function ChatStateProvider({ children }: { children: ReactNode }) {
         { path, toolCount: 1, lastTool: tool, lastAt: Date.now() },
       ]
     })
-  }
+  }, [])
 
-  const clearFiles = () => setFiles([])
+  const clearFiles = useCallback(() => setFiles([]), [])
 
   return (
     <ChatContext.Provider value={{ files, recordFileTouch, clearFiles }}>

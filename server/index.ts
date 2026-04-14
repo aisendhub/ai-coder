@@ -195,8 +195,19 @@ async function startRunner(args: {
                 data: att.base64,
               },
             })
+          } else if (att.mimeType === "application/pdf") {
+            // PDFs: use DocumentBlockParam with base64 source
+            contentBlocks.push({
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: att.base64,
+              },
+              title: att.filename,
+            } as never) // cast needed — agent SDK types lag behind API support
           } else {
-            // Decode base64 to text for text-based files
+            // Text-based files: decode base64 to text
             const textContent = Buffer.from(att.base64, "base64").toString("utf-8")
             contentBlocks.push({
               type: "text",
