@@ -1,18 +1,24 @@
 import { useState } from "react"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable"
 import { AppSidebar } from "@/components/app-sidebar"
+import { NavPanel } from "@/components/nav-panel"
 import { ChatPanel } from "@/components/chat-panel"
-import { RightPanel } from "@/components/right-panel"
+import { CodePanel } from "@/components/code-panel"
+import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { TopBar } from "@/components/top-bar"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { AuthProvider, useAuth } from "@/lib/auth"
 import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
 
 export default function App() {
-  if (!isSupabaseConfigured) {
-    return <SetupNotice />
-  }
+  if (!isSupabaseConfigured) return <SetupNotice />
   return (
     <AuthProvider>
       <AuthGate />
@@ -24,7 +30,7 @@ function AuthGate() {
   const { session, loading } = useAuth()
   if (loading) {
     return (
-      <div className="min-h-svh flex items-center justify-center text-sm text-muted-foreground">
+      <div className="h-svh flex items-center justify-center text-sm text-muted-foreground">
         Loading…
       </div>
     )
@@ -34,19 +40,69 @@ function AuthGate() {
 }
 
 function Workspace() {
+  const isMobile = useIsMobile()
+  if (isMobile) return <MobileLayout />
+  return <DesktopLayout />
+}
+
+function DesktopLayout() {
   const [rightOpen, setRightOpen] = useState(true)
   return (
     <ChatStateProvider>
-      <SidebarProvider>
+      <div className="h-svh w-screen overflow-hidden">
+        <ResizablePanelGroup
+          orientation="horizontal"
+          id="ai-coder-main-3pane"
+          className="h-full w-full"
+        >
+          <ResizablePanel defaultSize={18} minSize={15} maxSize={30}>
+            <div className="h-full min-h-0 overflow-hidden border-r">
+              <NavPanel />
+            </div>
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel
+            defaultSize={rightOpen ? 50 : 82}
+            minSize={30}
+          >
+            <div className="h-full min-h-0 overflow-hidden flex flex-col">
+              <TopBar
+                rightOpen={rightOpen}
+                onRightOpenChange={setRightOpen}
+              />
+              <div className="flex-1 min-h-0 overflow-hidden">
+                <ChatPanel />
+              </div>
+            </div>
+          </ResizablePanel>
+          {rightOpen && (
+            <>
+              <ResizableHandle withHandle />
+              <ResizablePanel defaultSize={32} minSize={20} maxSize={70}>
+                <div className="h-full min-h-0 overflow-hidden border-l">
+                  <CodePanel />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
+        </ResizablePanelGroup>
+      </div>
+    </ChatStateProvider>
+  )
+}
+
+function MobileLayout() {
+  const [rightOpen, setRightOpen] = useState(false)
+  return (
+    <ChatStateProvider>
+      <SidebarProvider style={{ height: "100svh" } as React.CSSProperties}>
         <AppSidebar />
-        <SidebarInset className="flex min-h-svh min-w-0 flex-1 flex-row">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <TopBar rightOpen={rightOpen} onRightOpenChange={setRightOpen} />
-            <main className="min-h-0 flex-1">
-              <ChatPanel />
-            </main>
+        <SidebarInset className="h-svh min-w-0 flex-1 flex flex-col overflow-hidden">
+          <TopBar rightOpen={rightOpen} onRightOpenChange={setRightOpen} />
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <ChatPanel />
           </div>
-          <RightPanel open={rightOpen} />
+          <MobileRightPanel open={rightOpen} />
         </SidebarInset>
       </SidebarProvider>
     </ChatStateProvider>
@@ -55,7 +111,7 @@ function Workspace() {
 
 function SetupNotice() {
   return (
-    <div className="min-h-svh flex items-center justify-center p-6">
+    <div className="h-svh flex items-center justify-center p-6">
       <div className="max-w-md text-sm text-muted-foreground space-y-3">
         <h1 className="text-xl font-semibold text-foreground">
           Supabase not configured

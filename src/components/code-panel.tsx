@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil } from "lucide-react"
-import { DiffView, DiffModeEnum } from "@git-diff-view/react"
-import "@git-diff-view/react/styles/diff-view.css"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -39,12 +37,30 @@ export function CodePanel() {
     }
   }, [])
 
+  // Live updates: subscribe to /api/changes/stream (SSE).
+  // Server pings on every file change in WORKSPACE_DIR; we refetch debounced.
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const debouncedRefetch = useCallback(() => {
+    if (refetchTimer.current) clearTimeout(refetchTimer.current)
+    refetchTimer.current = setTimeout(() => fetchChanges(), 150)
+  }, [fetchChanges])
+
   useEffect(() => {
     fetchChanges()
+    const es = new EventSource("/api/changes/stream")
+    es.addEventListener("ready", debouncedRefetch)
+    es.addEventListener("changed", debouncedRefetch)
+    es.onerror = () => {
+      // EventSource auto-reconnects; nothing to do
+    }
     const onTurnDone = () => fetchChanges()
     window.addEventListener("ai-coder:turn-done", onTurnDone)
-    return () => window.removeEventListener("ai-coder:turn-done", onTurnDone)
-  }, [fetchChanges])
+    return () => {
+      es.close()
+      window.removeEventListener("ai-coder:turn-done", onTurnDone)
+      if (refetchTimer.current) clearTimeout(refetchTimer.current)
+    }
+  }, [fetchChanges, debouncedRefetch])
 
   const files = data?.files ?? []
 
@@ -141,28 +157,48 @@ function Diff({ file }: { file: ChangedFile }) {
   const hunks = extractHunks(file.diff)
   if (hunks.length === 0) {
     return (
-      <div className="p-3 text-xs text-muted-foreground">
-        {file.status === "untracked" ? (
-          <pre className="whitespace-pre-wrap font-mono">{file.diff || "(empty)"}</pre>
+      <div className="p-3">
+        {file.diff ? (
+          <pre className="whitespace-pre-wrap font-mono text-[12px] leading-snug">
+            {file.diff}
+          </pre>
         ) : (
-          "No diff."
+          <span className="text-xs text-muted-foreground">No diff.</span>
         )}
       </div>
     )
   }
+  // Simple, reliable renderer — colors added/removed lines; no external CSS.
+  return <SimpleDiff hunks={hunks} />
+}
+
+function SimpleDiff({ hunks }: { hunks: string[] }) {
   return (
-    <DiffView
-      data={{
-        hunks,
-        oldFile: { fileName: file.oldPath ?? file.path, fileLang: detectLang(file.path) },
-        newFile: { fileName: file.path, fileLang: detectLang(file.path) },
-      }}
-      diffViewMode={DiffModeEnum.Unified}
-      diffViewTheme="light"
-      diffViewFontSize={12}
-      diffViewHighlight
-      diffViewWrap
-    />
+    <div className="font-mono text-[12px] leading-snug">
+      {hunks.map((hunk, i) => (
+        <div key={i} className="border-b last:border-b-0">
+          {hunk.split("\n").map((line, j) => {
+            const first = line[0]
+            const cls =
+              line.startsWith("@@")
+                ? "bg-muted text-muted-foreground"
+                : first === "+"
+                  ? "bg-green-500/10 text-green-800 dark:text-green-300"
+                  : first === "-"
+                    ? "bg-red-500/10 text-red-800 dark:text-red-300"
+                    : ""
+            return (
+              <div
+                key={j}
+                className={cn("px-3 whitespace-pre overflow-x-auto", cls)}
+              >
+                {line || "\u00A0"}
+              </div>
+            )
+          })}
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -175,29 +211,6 @@ function extractHunks(rawDiff: string): string[] {
   const body = idx === -1 ? rawDiff.slice(first) : rawDiff.slice(first)
   const parts = body.split(/\n(?=@@)/g).map((p) => p.trim()).filter(Boolean)
   return parts
-}
-
-function detectLang(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? ""
-  const map: Record<string, string> = {
-    ts: "typescript",
-    tsx: "tsx",
-    js: "javascript",
-    jsx: "jsx",
-    json: "json",
-    md: "markdown",
-    css: "css",
-    html: "html",
-    sh: "bash",
-    py: "python",
-    rs: "rust",
-    go: "go",
-    sql: "sql",
-    yml: "yaml",
-    yaml: "yaml",
-    toml: "toml",
-  }
-  return map[ext] ?? "plaintext"
 }
 
 function StatusIcon({ status }: { status: ChangedFile["status"] }) {

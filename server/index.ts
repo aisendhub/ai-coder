@@ -15,6 +15,8 @@ import { query } from "@anthropic-ai/claude-agent-sdk"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { resolve } from "node:path"
+import chokidar from "chokidar"
+import { EventEmitter } from "node:events"
 
 const execFileP = promisify(execFile)
 
@@ -22,9 +24,58 @@ const execFileP = promisify(execFile)
 // point to; prod: swapped per-conversation to the E2B sandbox cwd.
 const WORKSPACE_DIR = resolve(process.env.WORKSPACE_DIR ?? process.cwd())
 
+// Filesystem watcher → emits "changed" events when any tracked file mutates.
+const fsBus = new EventEmitter()
+fsBus.setMaxListeners(100)
+
+const watcher = chokidar.watch(WORKSPACE_DIR, {
+  ignored: [
+    /(^|[/\\])\.git([/\\]|$)/,
+    /(^|[/\\])node_modules([/\\]|$)/,
+    /(^|[/\\])dist([/\\]|$)/,
+    /(^|[/\\])\.next([/\\]|$)/,
+    /(^|[/\\])\.cache([/\\]|$)/,
+  ],
+  ignoreInitial: true,
+  awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+})
+
+let debounce: NodeJS.Timeout | null = null
+const notify = (path: string) => {
+  if (debounce) clearTimeout(debounce)
+  debounce = setTimeout(() => {
+    fsBus.emit("changed", { path, at: Date.now() })
+  }, 200)
+}
+watcher.on("add", notify).on("change", notify).on("unlink", notify).on("addDir", notify).on("unlinkDir", notify)
+
 const app = new Hono()
 
 app.get("/api/health", (c) => c.json({ ok: true, workspace: WORKSPACE_DIR }))
+
+// SSE stream that pings whenever a file in WORKSPACE_DIR changes.
+// Frontend listens, then refetches /api/changes.
+app.get("/api/changes/stream", (c) => {
+  return streamSSE(c, async (stream) => {
+    const onChanged = (data: { path: string; at: number }) => {
+      void stream.writeSSE({ event: "changed", data: JSON.stringify(data) })
+    }
+    fsBus.on("changed", onChanged)
+    // Initial ping so client refetches once on connect
+    await stream.writeSSE({ event: "ready", data: "{}" })
+    // Heartbeat to keep proxies happy
+    const hb = setInterval(() => {
+      void stream.writeSSE({ event: "ping", data: "{}" })
+    }, 25_000)
+    await new Promise<void>((resolveStream) => {
+      stream.onAbort(() => {
+        clearInterval(hb)
+        fsBus.off("changed", onChanged)
+        resolveStream()
+      })
+    })
+  })
+})
 
 // Parsed git status + diff for the current workspace.
 // Returns: { workspace, files: [{ path, status, diff, oldPath? }] }
