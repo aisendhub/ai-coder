@@ -1,4 +1,4 @@
-import { MessageSquare, Plus, Search } from "lucide-react"
+import { MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -10,7 +10,12 @@ const conversations = [
   { id: "4", title: "Fix flaky E2E test", updated: "2d" },
 ]
 
-export function NavPanel({ collapsed = false }: { collapsed?: boolean }) {
+type Props = {
+  collapsed?: boolean
+  onToggle?: () => void
+}
+
+export function NavPanel({ collapsed = false, onToggle }: Props) {
   if (collapsed) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
@@ -21,17 +26,29 @@ export function NavPanel({ collapsed = false }: { collapsed?: boolean }) {
           <Search className="size-4" />
         </Button>
         <div className="my-1 h-px w-6 bg-border" />
-        {conversations.map((c) => (
+        <div className="flex-1 flex flex-col gap-1 overflow-y-auto w-full items-center">
+          {conversations.map((c) => (
+            <Button
+              key={c.id}
+              size="icon"
+              variant="ghost"
+              aria-label={c.title}
+              title={c.title}
+            >
+              <MessageSquare className="size-4" />
+            </Button>
+          ))}
+        </div>
+        <div className="border-t w-full pt-1 flex justify-center">
           <Button
-            key={c.id}
             size="icon"
             variant="ghost"
-            aria-label={c.title}
-            title={c.title}
+            onClick={onToggle}
+            aria-label="Expand nav"
           >
-            <MessageSquare className="size-4" />
+            <PanelLeftOpen className="size-4" />
           </Button>
-        ))}
+        </div>
       </div>
     )
   }
@@ -67,8 +84,17 @@ export function NavPanel({ collapsed = false }: { collapsed?: boolean }) {
           ))}
         </div>
       </ScrollArea>
-      <div className="text-xs text-muted-foreground px-3 py-2 border-t">
-        ai-coder · v0.1
+      <div className="border-t flex items-center justify-between px-2 py-1.5">
+        <div className="text-xs text-muted-foreground px-1">ai-coder · v0.1</div>
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={onToggle}
+          aria-label="Collapse nav"
+          className="size-7"
+        >
+          <PanelLeftClose className="size-4" />
+        </Button>
       </div>
     </div>
   )

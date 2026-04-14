@@ -1,7 +1,5 @@
 import { useRef, useState } from "react"
 import type { ImperativePanelHandle } from "react-resizable-panels"
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import {
   ResizableHandle,
@@ -79,21 +77,8 @@ function DesktopLayout() {
               setNavCollapsed(typeof size === "number" ? size < 6 : false)
             }
           >
-            <div className="relative h-full min-h-0 overflow-hidden border-r">
-              <NavPanel collapsed={navCollapsed} />
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={toggleNav}
-                aria-label={navCollapsed ? "Expand nav" : "Collapse nav"}
-                className="absolute bottom-2 right-2 size-7 rounded-md bg-background/80 backdrop-blur hover:bg-accent shadow-xs border"
-              >
-                {navCollapsed ? (
-                  <PanelLeftOpen className="size-4" />
-                ) : (
-                  <PanelLeftClose className="size-4" />
-                )}
-              </Button>
+            <div className="h-full min-h-0 overflow-hidden border-r">
+              <NavPanel collapsed={navCollapsed} onToggle={toggleNav} />
             </div>
           </ResizablePanel>
           <ResizableHandle />
