@@ -95,7 +95,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
 
   return (
     <div className="flex h-full flex-col min-h-0">
-      <div className="flex items-center justify-between p-3 border-b">
+      <div className="flex h-14 shrink-0 items-center justify-between px-3 border-b">
         <div className="flex items-center gap-2 min-w-0">
           <FileCode className="size-4 shrink-0" />
           <h2 className="text-sm font-medium">Changes</h2>

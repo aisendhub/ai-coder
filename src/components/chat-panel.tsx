@@ -48,6 +48,8 @@ type Message = {
 let idCounter = 0
 const nextId = () => `${Date.now()}-${++idCounter}`
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([])
   const [streaming, setStreaming] = useState(false)
@@ -118,14 +120,14 @@ export function ChatPanel() {
           }
           const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
           setMessages((m) => {
-            // De-dupe: row already present (we already swapped) → ignore
+            // Already swapped via earlier realtime echo
             if (m.some((x) => x.id === row.id)) return m
-            // Try to match an optimistic placeholder of same role with similar
-            // text (or empty placeholder for assistant)
+            // Optimistic local rows have non-UUID ids (we use timestamp-counter)
+            const isOptimistic = (id: string) => !UUID_RE.test(id)
             const idx = m.findIndex(
               (x) =>
+                isOptimistic(x.id) &&
                 x.role === row.role &&
-                !x.id.startsWith("temp-") === false && // optimistic ids start with timestamp-
                 ((row.role === "user" && x.text === row.text) ||
                   (row.role === "assistant" && x.text === ""))
             )
@@ -207,8 +209,23 @@ export function ChatPanel() {
     setStreaming(true)
     streamingRef.current = true
 
+    // Update the most recent assistant message — its id may have been swapped
+    // by a realtime INSERT for the canonical DB row, so we can't match by
+    // assistantId. There's only ever one streaming turn at a time so the
+    // last assistant entry is unambiguous.
     const updateAssistant = (fn: (msg: Message) => Message) =>
-      setMessages((m) => m.map((msg) => (msg.id === assistantId ? fn(msg) : msg)))
+      setMessages((m) => {
+        const lastAssistantIdx = (() => {
+          for (let i = m.length - 1; i >= 0; i--) {
+            if (m[i].role === "assistant") return i
+          }
+          return -1
+        })()
+        if (lastAssistantIdx === -1) return m
+        const next = m.slice()
+        next[lastAssistantIdx] = fn(next[lastAssistantIdx])
+        return next
+      })
 
     try {
       const res = await fetch("/api/chat", {
