@@ -7,6 +7,7 @@ delete process.env.ANTHROPIC_API_KEY
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import { serve } from "@hono/node-server"
+import { serveStatic } from "@hono/node-server/serve-static"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 
 const app = new Hono()
@@ -126,6 +127,12 @@ app.post("/api/chat", async (c) => {
     }
   })
 })
+
+// Serve the built Vite app in production (single-origin deploy).
+if (process.env.NODE_ENV === "production") {
+  app.use("/*", serveStatic({ root: "./dist" }))
+  app.get("*", serveStatic({ path: "./dist/index.html" }))
+}
 
 const port = Number(process.env.PORT ?? 3001)
 serve({ fetch: app.fetch, port }, ({ port }) => {

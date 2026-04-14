@@ -1,0 +1,17 @@
+# Railway / Nixpacks build config
+providers = ["node"]
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "git"]
+
+[phases.install]
+cmds = ["npm ci"]
+
+[phases.build]
+cmds = [
+  "npm i -g @anthropic-ai/claude-code",
+  "npm run build"
+]
+
+[start]
+cmd = "npm run start"

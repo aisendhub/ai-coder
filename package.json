@@ -7,9 +7,13 @@
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
+    "start": "NODE_ENV=production tsx server/index.ts",
     "lint": "eslint .",
     "preview": "vite preview"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.105",
