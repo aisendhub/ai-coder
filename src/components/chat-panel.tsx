@@ -55,14 +55,19 @@ export function ChatPanel() {
   const [streaming, setStreaming] = useState(false)
   const [queued, setQueued] = useState<string[]>([])
   const sessionIdRef = useRef<string | undefined>(undefined)
-  const streamingRef = useRef(false)
-  const queueRef = useRef<string[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
   const { recordFileTouch } = useChatState()
   const conversation = useActiveConversation()
   const { createNew, setSessionId, updateTitle } = useConversations()
   const conversationIdRef = useRef<string | null>(null)
   const loadedConvIdRef = useRef<string | null>(null)
+
+  // Per-conversation: which convs have a local stream in flight, and what
+  // prompts are queued for each.
+  const runningConvsRef = useRef<Set<string>>(new Set())
+  const queuesRef = useRef<Map<string, string[]>>(new Map())
+  // Abort the SSE stream when user switches conversations (server keeps running).
+  const sseAbortByConvRef = useRef<Map<string, AbortController>>(new Map())
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
@@ -72,6 +77,14 @@ export function ChatPanel() {
   useEffect(() => {
     conversationIdRef.current = conversation?.id ?? null
     sessionIdRef.current = conversation?.session_id ?? undefined
+    // Sync the UI flags to whatever this conversation has in flight locally.
+    if (conversation) {
+      setStreaming(runningConvsRef.current.has(conversation.id))
+      setQueued([...(queuesRef.current.get(conversation.id) ?? [])])
+    } else {
+      setStreaming(false)
+      setQueued([])
+    }
     if (!conversation) {
       loadedConvIdRef.current = null
       setMessages([])
@@ -168,75 +181,76 @@ export function ChatPanel() {
     }
   }, [conversation])
 
-  const runPrompt = useCallback(async (prompt: string) => {
-    // Ensure we have an active conversation; create one if not.
-    let convId = conversationIdRef.current
-    if (!convId) {
-      try {
-        const c = await createNew()
-        convId = c.id
-        conversationIdRef.current = c.id
-        loadedConvIdRef.current = c.id   // skip the auto-fetch on this id
-        sessionIdRef.current = undefined
-      } catch (err) {
-        console.error("createNew failed", err)
-        return
-      }
-    }
+  const runPrompt = useCallback(async (
+    prompt: string,
+    targetConvId: string,
+    targetSessionId: string | undefined,
+    isFirstMessage: boolean
+  ) => {
+    runningConvsRef.current.add(targetConvId)
+    if (targetConvId === conversationIdRef.current) setStreaming(true)
 
     // Title the conversation from the first user prompt
-    const isFirstMessage = messages.length === 0
-    if (isFirstMessage && convId) {
+    if (isFirstMessage) {
       const title = prompt.split("\n")[0].slice(0, 60)
-      void updateTitle(convId, title || "New chat")
+      void updateTitle(targetConvId, title || "New chat")
     }
 
-    // Optimistic local rows. Server is the source of truth and inserts the
-    // canonical rows into Supabase; on next conversation load these are
-    // replaced by DB rows.
-    const userMsg: Message = {
-      id: nextId(),
-      role: "user",
-      text: prompt,
-      events: [],
-    }
+    // Optimistic local rows — only render if the user is still viewing this
+    // conversation. Server inserts the canonical rows; realtime swaps ids.
     const assistantId = nextId()
-    setMessages((m) => [
-      ...m,
-      userMsg,
-      { id: assistantId, role: "assistant", text: "", events: [] },
-    ])
-    setStreaming(true)
-    streamingRef.current = true
+    if (conversationIdRef.current === targetConvId) {
+      const userMsg: Message = {
+        id: nextId(),
+        role: "user",
+        text: prompt,
+        events: [],
+      }
+      setMessages((m) => [
+        ...m,
+        userMsg,
+        { id: assistantId, role: "assistant", text: "", events: [] },
+      ])
+    }
 
-    // Update the most recent assistant message — its id may have been swapped
-    // by a realtime INSERT for the canonical DB row, so we can't match by
-    // assistantId. There's only ever one streaming turn at a time so the
-    // last assistant entry is unambiguous.
-    const updateAssistant = (fn: (msg: Message) => Message) =>
+    // Updates only apply if user is still viewing the target conversation.
+    // Otherwise events are dropped here — realtime UPDATEs on the row will
+    // sync the latest text when the user comes back.
+    const updateAssistant = (fn: (msg: Message) => Message) => {
+      if (conversationIdRef.current !== targetConvId) return
       setMessages((m) => {
-        const lastAssistantIdx = (() => {
-          for (let i = m.length - 1; i >= 0; i--) {
-            if (m[i].role === "assistant") return i
+        let lastAssistantIdx = -1
+        for (let i = m.length - 1; i >= 0; i--) {
+          if (m[i].role === "assistant") {
+            lastAssistantIdx = i
+            break
           }
-          return -1
-        })()
+        }
         if (lastAssistantIdx === -1) return m
         const next = m.slice()
         next[lastAssistantIdx] = fn(next[lastAssistantIdx])
         return next
       })
+    }
+
+    const controller = new AbortController()
+    sseAbortByConvRef.current.set(targetConvId, controller)
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversationId: convId,
+          conversationId: targetConvId,
           prompt,
-          sessionId: sessionIdRef.current,
+          sessionId: targetSessionId,
         }),
+        signal: controller.signal,
       })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
       if (!res.body) throw new Error("no body")
 
       const reader = res.body.getReader()
@@ -256,10 +270,11 @@ export function ChatPanel() {
           const payload = JSON.parse(data)
 
           if (event === "session") {
-            sessionIdRef.current = payload.sessionId
-            // Persist on the conversation so resume works after reload
-            if (convId && payload.sessionId) {
-              void setSessionId(convId, payload.sessionId)
+            if (conversationIdRef.current === targetConvId) {
+              sessionIdRef.current = payload.sessionId
+            }
+            if (payload.sessionId) {
+              void setSessionId(targetConvId, payload.sessionId)
             }
           } else if (event === "text") {
             updateAssistant((msg) => ({
@@ -311,35 +326,74 @@ export function ChatPanel() {
         }
       }
     } catch (err) {
-      updateAssistant((msg) => ({
-        ...msg,
-        text:
-          msg.text +
-          `\n⚠️ ${err instanceof Error ? err.message : String(err)}`,
-      }))
+      // Aborted = user switched away; suppress
+      if ((err as Error)?.name !== "AbortError") {
+        updateAssistant((msg) => ({
+          ...msg,
+          text:
+            msg.text +
+            `\n⚠️ ${err instanceof Error ? err.message : String(err)}`,
+        }))
+      }
     } finally {
-      setStreaming(false)
-      streamingRef.current = false
+      runningConvsRef.current.delete(targetConvId)
+      sseAbortByConvRef.current.delete(targetConvId)
+      if (targetConvId === conversationIdRef.current) setStreaming(false)
       window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
 
-      const next = queueRef.current.shift()
-      setQueued([...queueRef.current])
+      // Drain queue for THIS conversation
+      const queue = queuesRef.current.get(targetConvId) ?? []
+      const next = queue.shift()
+      queuesRef.current.set(targetConvId, queue)
+      if (targetConvId === conversationIdRef.current) {
+        setQueued([...queue])
+      }
       if (next) {
-        void runPrompt(next)
+        // Recurse with the same target conv; it may differ from active now
+        void runPrompt(next, targetConvId, sessionIdRef.current, false)
       }
     }
-  }, [createNew, messages.length, recordFileTouch, setSessionId, updateTitle])
+  }, [recordFileTouch, setSessionId, updateTitle])
 
   const sendPrompt = useCallback(
-    (prompt: string) => {
-      if (streamingRef.current) {
-        queueRef.current.push(prompt)
-        setQueued([...queueRef.current])
+    async (prompt: string) => {
+      // Resolve the conversation we're sending to RIGHT NOW.
+      let convId = conversationIdRef.current
+      let isFirstMessage = false
+      if (!convId) {
+        try {
+          const c = await createNew()
+          convId = c.id
+          conversationIdRef.current = c.id
+          loadedConvIdRef.current = c.id
+          sessionIdRef.current = undefined
+          isFirstMessage = true
+        } catch (err) {
+          console.error("createNew failed", err)
+          return
+        }
+      } else {
+        // First message in this convo iff there are no existing rows
+        isFirstMessage = messages.length === 0
+      }
+
+      // If a runner is already in flight for THIS conversation, queue.
+      if (runningConvsRef.current.has(convId)) {
+        const q = queuesRef.current.get(convId) ?? []
+        q.push(prompt)
+        queuesRef.current.set(convId, q)
+        if (convId === conversationIdRef.current) setQueued([...q])
         return
       }
-      void runPrompt(prompt)
+
+      const targetSessionId =
+        convId === conversationIdRef.current
+          ? sessionIdRef.current
+          : conversation?.session_id ?? undefined
+
+      void runPrompt(prompt, convId, targetSessionId, isFirstMessage)
     },
-    [runPrompt]
+    [createNew, messages.length, conversation, runPrompt]
   )
 
   // Allow other components to send prompts via custom events
