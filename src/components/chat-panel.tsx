@@ -32,14 +32,17 @@ const nextId = () => `${Date.now()}-${++idCounter}`
 export function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [queued, setQueued] = useState<string[]>([])
   const sessionIdRef = useRef<string | undefined>(undefined)
+  const streamingRef = useRef(false)
+  const queueRef = useRef<string[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages])
 
-  const sendPrompt = useCallback(async (prompt: string) => {
+  const runPrompt = useCallback(async (prompt: string) => {
     const userMsg: Message = {
       id: nextId(),
       role: "user",
@@ -53,6 +56,7 @@ export function ChatPanel() {
       { id: assistantId, role: "assistant", text: "", events: [] },
     ])
     setStreaming(true)
+    streamingRef.current = true
 
     const updateAssistant = (fn: (msg: Message) => Message) =>
       setMessages((m) => m.map((msg) => (msg.id === assistantId ? fn(msg) : msg)))
@@ -137,8 +141,26 @@ export function ChatPanel() {
       }))
     } finally {
       setStreaming(false)
+      streamingRef.current = false
+      const next = queueRef.current.shift()
+      setQueued([...queueRef.current])
+      if (next) {
+        void runPrompt(next)
+      }
     }
   }, [])
+
+  const sendPrompt = useCallback(
+    (prompt: string) => {
+      if (streamingRef.current) {
+        queueRef.current.push(prompt)
+        setQueued([...queueRef.current])
+        return
+      }
+      void runPrompt(prompt)
+    },
+    [runPrompt]
+  )
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -161,12 +183,23 @@ export function ChatPanel() {
               />
             )
           })}
+          {queued.map((q, idx) => (
+            <div
+              key={`q-${idx}`}
+              className="self-end max-w-[85%] rounded-2xl bg-primary/60 text-primary-foreground px-4 py-2 opacity-70"
+            >
+              <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                {q}
+              </div>
+              <div className="text-[10px] mt-1 opacity-80">queued</div>
+            </div>
+          ))}
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
       <div className="border-t p-3">
         <div className="mx-auto w-full max-w-2xl">
-          <Composer onSend={sendPrompt} disabled={streaming} />
+          <Composer onSend={sendPrompt} />
         </div>
       </div>
     </div>
@@ -287,13 +320,7 @@ function Dot({ delay }: { delay: string }) {
   )
 }
 
-function Composer({
-  onSend,
-  disabled,
-}: {
-  onSend: (prompt: string) => void
-  disabled: boolean
-}) {
+function Composer({ onSend }: { onSend: (prompt: string) => void }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [value, setValue] = useState("")
@@ -317,7 +344,7 @@ function Composer({
 
   function submit() {
     const trimmed = value.trim()
-    if (!trimmed || disabled) return
+    if (!trimmed) return
     onSend(trimmed)
     setValue("")
     if (textareaRef.current) {
@@ -355,7 +382,7 @@ function Composer({
           className="shrink-0"
           aria-label="Send"
           onClick={submit}
-          disabled={!value.trim() || disabled}
+          disabled={!value.trim()}
         >
           <Send className="size-4" />
         </Button>
