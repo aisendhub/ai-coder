@@ -1,20 +1,21 @@
+import { observer } from "mobx-react-lite"
 import { Sparkles } from "lucide-react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import { RightPanelTrigger } from "@/components/right-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { workspace } from "@/models"
 
 type Props = {
-  title?: string
   rightOpen: boolean
   onRightOpenChange: (open: boolean) => void
 }
 
-export function TopBar({
-  title = "New chat",
+export const TopBar = observer(function TopBar({
   rightOpen,
   onRightOpenChange,
 }: Props) {
+  const title = workspace.active?.title ?? "New chat"
   const isMobile = useIsMobile()
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
@@ -38,4 +39,4 @@ export function TopBar({
       <RightPanelTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
     </header>
   )
-}
+})
