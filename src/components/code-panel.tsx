@@ -15,6 +15,7 @@ type ChangedFile = {
 type ChangesResponse = {
   workspace: string
   files: ChangedFile[]
+  unpushedCount: number
 }
 
 function dispatchPrompt(prompt: string) {
@@ -121,6 +122,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
                 size="sm"
                 variant="outline"
                 onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
+                disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
               >
                 <ArrowUpFromLine className="size-3.5" />
                 Push
