@@ -10,7 +10,31 @@ const conversations = [
   { id: "4", title: "Fix flaky E2E test", updated: "2d" },
 ]
 
-export function NavPanel() {
+export function NavPanel({ collapsed = false }: { collapsed?: boolean }) {
+  if (collapsed) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
+        <Button size="icon" variant="ghost" aria-label="New chat">
+          <Plus className="size-4" />
+        </Button>
+        <Button size="icon" variant="ghost" aria-label="Search">
+          <Search className="size-4" />
+        </Button>
+        <div className="my-1 h-px w-6 bg-border" />
+        {conversations.map((c) => (
+          <Button
+            key={c.id}
+            size="icon"
+            variant="ghost"
+            aria-label={c.title}
+            title={c.title}
+          >
+            <MessageSquare className="size-4" />
+          </Button>
+        ))}
+      </div>
+    )
+  }
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground">
       <div className="p-2 flex flex-col gap-2 border-b">

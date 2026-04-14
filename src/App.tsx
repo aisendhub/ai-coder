@@ -47,6 +47,8 @@ function Workspace() {
 
 function DesktopLayout() {
   const [rightOpen, setRightOpen] = useState(true)
+  const [navCollapsed, setNavCollapsed] = useState(false)
+  const [codeCollapsed, setCodeCollapsed] = useState(false)
   return (
     <ChatStateProvider>
       <div className="h-svh w-screen overflow-hidden">
@@ -55,16 +57,23 @@ function DesktopLayout() {
           id="ai-coder-main-3pane"
           className="h-full w-full"
         >
-          <ResizablePanel defaultSize={18} minSize={15} maxSize={30}>
+          <ResizablePanel
+            id="nav"
+            defaultSize={18}
+            minSize={15}
+            maxSize={30}
+            collapsible
+            collapsedSize={4}
+            onResize={(size) =>
+              setNavCollapsed(typeof size === "number" ? size < 6 : false)
+            }
+          >
             <div className="h-full min-h-0 overflow-hidden border-r">
-              <NavPanel />
+              <NavPanel collapsed={navCollapsed} />
             </div>
           </ResizablePanel>
           <ResizableHandle withHandle />
-          <ResizablePanel
-            defaultSize={rightOpen ? 50 : 82}
-            minSize={30}
-          >
+          <ResizablePanel id="chat" defaultSize={50} minSize={30}>
             <div className="h-full min-h-0 overflow-hidden flex flex-col">
               <TopBar
                 rightOpen={rightOpen}
@@ -78,9 +87,19 @@ function DesktopLayout() {
           {rightOpen && (
             <>
               <ResizableHandle withHandle />
-              <ResizablePanel defaultSize={32} minSize={20} maxSize={70}>
+              <ResizablePanel
+                id="code"
+                defaultSize={32}
+                minSize={20}
+                maxSize={70}
+                collapsible
+                collapsedSize={4}
+                onResize={(size) =>
+                  setCodeCollapsed(typeof size === "number" ? size < 6 : false)
+                }
+              >
                 <div className="h-full min-h-0 overflow-hidden border-l">
-                  <CodePanel />
+                  <CodePanel collapsed={codeCollapsed} />
                 </div>
               </ResizablePanel>
             </>

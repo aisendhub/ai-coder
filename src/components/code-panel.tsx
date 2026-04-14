@@ -16,11 +16,11 @@ type ChangesResponse = {
   files: ChangedFile[]
 }
 
-export function CodePanel() {
+export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
   const [data, setData] = useState<ChangesResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
 
   const fetchChanges = useCallback(async () => {
     setLoading(true)
@@ -64,6 +64,27 @@ export function CodePanel() {
 
   const files = data?.files ?? []
 
+  if (collapsed) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center py-2 gap-1">
+        <FileCode className="size-4 text-muted-foreground" />
+        <div className="text-[10px] tabular-nums text-muted-foreground">
+          {files.length}
+        </div>
+        <div className="my-1 h-px w-6 bg-border" />
+        {files.slice(0, 12).map((f) => (
+          <div
+            key={f.path}
+            title={`${f.status}: ${f.path}`}
+            className="size-7 rounded-md hover:bg-accent flex items-center justify-center"
+          >
+            <StatusIcon status={f.status} />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full flex-col min-h-0">
       <div className="flex items-center justify-between p-3 border-b">
@@ -97,9 +118,9 @@ export function CodePanel() {
             <FileCard
               key={f.path}
               file={f}
-              collapsed={collapsed[f.path] ?? false}
+              collapsed={openCards[f.path] ?? false}
               onToggle={() =>
-                setCollapsed((c) => ({ ...c, [f.path]: !c[f.path] }))
+                setOpenCards((c) => ({ ...c, [f.path]: !c[f.path] }))
               }
             />
           ))}
