@@ -10,7 +10,10 @@ Chat UI for Claude Code running per-user sandboxes with repo cloning + agentic e
 - **Sandboxes**: E2B microVM per conversation
 - **LLM**: `@anthropic-ai/claude-agent-sdk` spawning the `claude` CLI
 
-Full architecture, deployment, migrations, and secrets reference: see [docs/STACK.md](docs/STACK.md).
+Docs:
+- [docs/PLAN.md](docs/PLAN.md) — what we're building and why
+- [docs/PROGRESS.md](docs/PROGRESS.md) — live checklist of what's done and next
+- [docs/STACK.md](docs/STACK.md) — architecture, migrations, deployment, secrets
 
 ## Quick links
 
