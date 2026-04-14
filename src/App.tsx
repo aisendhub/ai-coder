@@ -19,6 +19,7 @@ import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { workspace } from "@/models"
+import { useUrlSync } from "@/lib/url-sync"
 
 export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
@@ -39,6 +40,9 @@ function AuthGate() {
     if (user?.id) void workspace.signIn(user.id)
     else workspace.signOut()
   }, [user?.id])
+
+  // Bind URL ↔ active conversation
+  useUrlSync()
 
   if (loading) {
     return (
