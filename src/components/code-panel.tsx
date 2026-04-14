@@ -105,7 +105,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
             <TooltipTrigger>
               <Button
                 size="sm"
-                variant="ghost"
+                variant="outline"
                 onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
                 disabled={files.length === 0}
               >
@@ -119,7 +119,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
             <TooltipTrigger>
               <Button
                 size="sm"
-                variant="ghost"
+                variant="outline"
                 onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
               >
                 <ArrowUpFromLine className="size-3.5" />
