@@ -72,7 +72,7 @@ function DesktopLayout() {
               <NavPanel collapsed={navCollapsed} />
             </div>
           </ResizablePanel>
-          <ResizableHandle withHandle />
+          <ResizableHandle />
           <ResizablePanel id="chat" defaultSize={50} minSize={30}>
             <div className="h-full min-h-0 overflow-hidden flex flex-col">
               <TopBar
@@ -86,7 +86,7 @@ function DesktopLayout() {
           </ResizablePanel>
           {rightOpen && (
             <>
-              <ResizableHandle withHandle />
+              <ResizableHandle />
               <ResizablePanel
                 id="code"
                 defaultSize={32}
