@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitHorizontal, Upload } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -14,6 +14,12 @@ type ChangedFile = {
 type ChangesResponse = {
   workspace: string
   files: ChangedFile[]
+}
+
+function dispatchPrompt(prompt: string) {
+  window.dispatchEvent(
+    new CustomEvent("ai-coder:send-prompt", { detail: { prompt } })
+  )
 }
 
 export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
@@ -93,14 +99,34 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
           <h2 className="text-sm font-medium">Changes</h2>
           <span className="text-xs text-muted-foreground">{files.length}</span>
         </div>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={fetchChanges}
-          disabled={loading}
-        >
-          <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
+            disabled={files.length === 0}
+            title="Commit changes"
+          >
+            <GitCommitHorizontal className="size-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
+            title="Push to remote"
+          >
+            <Upload className="size-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={fetchChanges}
+            disabled={loading}
+            title="Refresh"
+          >
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+          </Button>
+        </div>
       </div>
       <ScrollArea className="flex-1 min-h-0">
         {error && (
@@ -147,7 +173,7 @@ function FileCard({
       <button
         type="button"
         onClick={onToggle}
-        className="w-full flex items-center gap-2 px-2 py-1.5 text-left hover:bg-accent/40"
+        className="w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer hover:bg-accent/40"
       >
         {collapsed ? (
           <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />

@@ -27,7 +27,7 @@ import {
 
 const MAX_TEXTAREA_HEIGHT = 240
 
-type Event =
+type StreamEvent =
   | { kind: "thinking"; text: string }
   | { kind: "tool_use"; id: string; name: string; input: unknown }
   | { kind: "tool_result"; toolUseId: string; isError: boolean; output: string }
@@ -37,7 +37,7 @@ type Message = {
   id: string
   role: "user" | "assistant"
   text: string
-  events: Event[]
+  events: StreamEvent[]
 }
 
 let idCounter = 0
@@ -77,7 +77,7 @@ export function ChatPanel() {
             id: r.id,
             role: r.role,
             text: r.text,
-            events: Array.isArray(r.events) ? (r.events as Event[]) : [],
+            events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
           }))
         )
       })
@@ -268,6 +268,16 @@ export function ChatPanel() {
     [runPrompt]
   )
 
+  // Allow other components to send prompts via custom events
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ prompt: string }>).detail
+      if (detail?.prompt) sendPrompt(detail.prompt)
+    }
+    window.addEventListener("ai-coder:send-prompt", handler)
+    return () => window.removeEventListener("ai-coder:send-prompt", handler)
+  }, [sendPrompt])
+
   return (
     <div className="flex flex-col h-full min-h-0">
       <ScrollArea className="flex-1 min-h-0">
@@ -354,7 +364,7 @@ function MessageBubble({
   )
 }
 
-function ActivityRow({ event }: { event: Event }) {
+function ActivityRow({ event }: { event: StreamEvent }) {
   if (event.kind === "thinking") {
     return (
       <div className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1">
