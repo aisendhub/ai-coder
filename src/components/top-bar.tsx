@@ -22,7 +22,7 @@ export const TopBar = observer(function TopBar({
       {isMobile && (
         <>
           <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-1 h-5" />
+          <Separator orientation="vertical" className="mr-1 self-stretch" />
         </>
       )}
       <div className="flex items-center gap-2 min-w-0 flex-1">

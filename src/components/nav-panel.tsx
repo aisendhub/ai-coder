@@ -39,6 +39,7 @@ export const NavPanel = observer(function NavPanel({
   const activeId = workspace.activeId
   const loading = workspace.loading
   const runningIds = workspace.runningServerIds
+  const unreadIds = workspace.unreadIds
   const [query, setQuery] = useState("")
   const { dark, toggle: toggleTheme } = useTheme()
 
@@ -79,14 +80,23 @@ export const NavPanel = observer(function NavPanel({
               size="icon"
               variant={c.id === activeId ? "secondary" : "ghost"}
               aria-label={c.title}
-              title={c.title + (runningIds.has(c.id) ? " (running)" : "")}
+              title={
+                c.title +
+                (runningIds.has(c.id)
+                  ? " (running)"
+                  : unreadIds.has(c.id)
+                    ? " (new)"
+                    : "")
+              }
               onClick={() => workspace.setActive(c.id)}
               className="relative"
             >
               <MessageSquare className="size-4" />
-              {runningIds.has(c.id) && (
+              {runningIds.has(c.id) ? (
                 <span className="absolute top-1 right-1 size-2 rounded-full bg-emerald-500 ring-2 ring-sidebar animate-pulse" />
-              )}
+              ) : unreadIds.has(c.id) ? (
+                <span className="absolute top-1 right-1 size-2 rounded-full bg-sky-500 ring-2 ring-sidebar" />
+              ) : null}
             </Button>
           ))}
         </div>
@@ -164,6 +174,7 @@ export const NavPanel = observer(function NavPanel({
               updated={c.updatedAt}
               active={c.id === activeId}
               running={runningIds.has(c.id)}
+              unread={unreadIds.has(c.id)}
               onClick={() => workspace.setActive(c.id)}
               onDelete={() => {
                 if (confirm("Delete this conversation?")) void workspace.remove(c.id)
@@ -218,6 +229,7 @@ function ConversationRow({
   updated,
   active,
   running,
+  unread,
   onClick,
   onDelete,
 }: {
@@ -225,6 +237,7 @@ function ConversationRow({
   updated: string
   active: boolean
   running: boolean
+  unread: boolean
   onClick: () => void
   onDelete: () => void
 }) {
@@ -238,15 +251,19 @@ function ConversationRow({
     >
       <div className="relative shrink-0">
         <MessageSquare className="size-4 mt-0.5" />
-        {running && (
+        {running ? (
           <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-emerald-500 ring-2 ring-sidebar animate-pulse" />
-        )}
+        ) : unread ? (
+          <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-sky-500 ring-2 ring-sidebar" />
+        ) : null}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="truncate text-sm">{title}</div>
+        <div className={cn("truncate text-sm", unread && !active && "font-semibold")}>{title}</div>
         <div className="text-xs text-muted-foreground flex items-center gap-1">
           {running && <span className="text-emerald-600">running</span>}
           {running && <span>·</span>}
+          {unread && !running && <span className="text-sky-600">new</span>}
+          {unread && !running && <span>·</span>}
           <span>{formatRelative(updated)}</span>
         </div>
       </div>

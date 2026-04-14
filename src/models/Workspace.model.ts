@@ -15,6 +15,9 @@ export class Workspace extends BaseModel {
   @observable activeId: string | null = null
   /** Conversation ids the SERVER reports as having an in-flight runner. */
   @observable runningServerIds = new Set<string>()
+  /** Conversation ids whose AI turn finished while they were NOT active —
+   *  cleared when the user activates the conversation. */
+  @observable unreadIds = new Set<string>()
   @observable loading = false
 
   conversations = ConversationList.create()
@@ -42,6 +45,11 @@ export class Workspace extends BaseModel {
     if (next) {
       if (!next.loaded) void next.loadMessages()
       next.subscribe()
+      if (this.unreadIds.has(next.id)) {
+        const updated = new Set(this.unreadIds)
+        updated.delete(next.id)
+        this.unreadIds = updated
+      }
     }
   }
 
@@ -72,6 +80,7 @@ export class Workspace extends BaseModel {
       this.activeId = null
       this.conversations.setItems([])
       this.runningServerIds = new Set()
+      this.unreadIds = new Set()
     })
   }
 
@@ -176,7 +185,19 @@ export class Workspace extends BaseModel {
         if (!res.ok) return
         const json = (await res.json()) as { runners: string[] }
         runInAction(() => {
-          this.runningServerIds = new Set(json.runners)
+          const next = new Set(json.runners)
+          // Any conversation that was running last tick but isn't now, and
+          // isn't currently active, is freshly "unread".
+          const newlyDone: string[] = []
+          for (const id of this.runningServerIds) {
+            if (!next.has(id) && id !== this.activeId) newlyDone.push(id)
+          }
+          if (newlyDone.length > 0) {
+            const unread = new Set(this.unreadIds)
+            for (const id of newlyDone) unread.add(id)
+            this.unreadIds = unread
+          }
+          this.runningServerIds = next
         })
       } catch {
         // ignore
