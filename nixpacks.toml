@@ -2,7 +2,7 @@
 providers = ["node"]
 
 [phases.setup]
-nixPkgs = ["nodejs_20", "git"]
+nixPkgs = ["nodejs_22", "git"]
 
 [phases.install]
 cmds = ["npm ci"]

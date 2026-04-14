@@ -13,7 +13,6 @@ type AuthState = {
   user: User | null
   loading: boolean
   signInWithGithub: () => Promise<void>
-  signInWithGoogle: () => Promise<void>
   signOut: () => Promise<void>
 }
 
@@ -45,12 +44,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           redirectTo: window.location.origin,
           scopes: "read:user user:email repo",
         },
-      })
-    },
-    signInWithGoogle: async () => {
-      await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: { redirectTo: window.location.origin },
       })
     },
     signOut: async () => {
