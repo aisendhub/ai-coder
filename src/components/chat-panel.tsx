@@ -15,6 +15,15 @@ import {
   isEditingTool,
   useChatState,
 } from "@/lib/chat-context"
+import {
+  useActiveConversation,
+  useConversations,
+} from "@/lib/conversation-context"
+import {
+  insertMessage,
+  listMessages,
+  updateMessage,
+} from "@/lib/conversations"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -43,12 +52,63 @@ export function ChatPanel() {
   const queueRef = useRef<string[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
   const { recordFileTouch } = useChatState()
+  const conversation = useActiveConversation()
+  const { createNew, setSessionId, updateTitle } = useConversations()
+  const conversationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages])
 
+  // Load history when active conversation changes
+  useEffect(() => {
+    conversationIdRef.current = conversation?.id ?? null
+    sessionIdRef.current = conversation?.session_id ?? undefined
+    if (!conversation) {
+      setMessages([])
+      return
+    }
+    let cancelled = false
+    listMessages(conversation.id)
+      .then((rows) => {
+        if (cancelled) return
+        setMessages(
+          rows.map((r) => ({
+            id: r.id,
+            role: r.role,
+            text: r.text,
+            events: Array.isArray(r.events) ? (r.events as Event[]) : [],
+          }))
+        )
+      })
+      .catch((err) => console.error("listMessages failed", err))
+    return () => {
+      cancelled = true
+    }
+  }, [conversation])
+
   const runPrompt = useCallback(async (prompt: string) => {
+    // Ensure we have an active conversation; create one if not.
+    let convId = conversationIdRef.current
+    if (!convId) {
+      try {
+        const c = await createNew()
+        convId = c.id
+        conversationIdRef.current = c.id
+        sessionIdRef.current = undefined
+      } catch (err) {
+        console.error("createNew failed", err)
+        return
+      }
+    }
+
+    // Title the conversation from the first user prompt
+    const isFirstMessage = messages.length === 0
+    if (isFirstMessage && convId) {
+      const title = prompt.split("\n")[0].slice(0, 60)
+      void updateTitle(convId, title || "New chat")
+    }
+
     const userMsg: Message = {
       id: nextId(),
       role: "user",
@@ -64,8 +124,33 @@ export function ChatPanel() {
     setStreaming(true)
     streamingRef.current = true
 
+    // Persist user message; capture DB ids to swap into local state and so
+    // we can update the assistant row when the turn finishes.
+    let userDbId: string | null = null
+    let assistantDbId: string | null = null
+    try {
+      const uRow = await insertMessage(convId, "user", prompt, [])
+      userDbId = uRow.id
+      const aRow = await insertMessage(convId, "assistant", "", [])
+      assistantDbId = aRow.id
+      setMessages((m) =>
+        m.map((msg) => {
+          if (msg.id === userMsg.id && userDbId)
+            return { ...msg, id: userDbId }
+          if (msg.id === assistantId && assistantDbId)
+            return { ...msg, id: assistantDbId }
+          return msg
+        })
+      )
+    } catch (err) {
+      console.error("insertMessage failed", err)
+    }
+    const localAssistantId = assistantDbId ?? assistantId
+
     const updateAssistant = (fn: (msg: Message) => Message) =>
-      setMessages((m) => m.map((msg) => (msg.id === assistantId ? fn(msg) : msg)))
+      setMessages((m) =>
+        m.map((msg) => (msg.id === localAssistantId ? fn(msg) : msg))
+      )
 
     try {
       const res = await fetch("/api/chat", {
@@ -93,6 +178,10 @@ export function ChatPanel() {
 
           if (event === "session") {
             sessionIdRef.current = payload.sessionId
+            // Persist on the conversation so resume works after reload
+            if (convId && payload.sessionId) {
+              void setSessionId(convId, payload.sessionId)
+            }
           } else if (event === "text") {
             updateAssistant((msg) => ({
               ...msg,
@@ -153,13 +242,32 @@ export function ChatPanel() {
       setStreaming(false)
       streamingRef.current = false
       window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
+
+      // Persist the final assistant text + events to the DB
+      if (assistantDbId) {
+        const finalMsg = (
+          await new Promise<Message | undefined>((resolveMsg) => {
+            setMessages((m) => {
+              resolveMsg(m.find((x) => x.id === localAssistantId))
+              return m
+            })
+          })
+        )
+        if (finalMsg) {
+          void updateMessage(assistantDbId, {
+            text: finalMsg.text,
+            events: finalMsg.events,
+          })
+        }
+      }
+
       const next = queueRef.current.shift()
       setQueued([...queueRef.current])
       if (next) {
         void runPrompt(next)
       }
     }
-  }, [])
+  }, [createNew, messages.length, recordFileTouch, setSessionId, updateTitle])
 
   const sendPrompt = useCallback(
     (prompt: string) => {

@@ -1,14 +1,10 @@
-import { MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search } from "lucide-react"
+import { useState } from "react"
+import { MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-
-const conversations = [
-  { id: "1", title: "Refactor auth middleware", updated: "2m" },
-  { id: "2", title: "Add dark mode to settings", updated: "1h" },
-  { id: "3", title: "Migrate to Tailwind v4", updated: "yesterday" },
-  { id: "4", title: "Fix flaky E2E test", updated: "2d" },
-]
+import { useConversations } from "@/lib/conversation-context"
+import { cn } from "@/lib/utils"
 
 type Props = {
   collapsed?: boolean
@@ -16,10 +12,28 @@ type Props = {
 }
 
 export function NavPanel({ collapsed = false, onToggle }: Props) {
+  const { conversations, activeId, setActive, createNew, remove, loading } =
+    useConversations()
+  const [query, setQuery] = useState("")
+
+  const filtered = query
+    ? conversations.filter((c) =>
+        c.title.toLowerCase().includes(query.toLowerCase())
+      )
+    : conversations
+
+  const handleNew = async () => {
+    try {
+      await createNew()
+    } catch (err) {
+      console.error("createNew failed", err)
+    }
+  }
+
   if (collapsed) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
-        <Button size="icon" variant="ghost" aria-label="New chat">
+        <Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew}>
           <Plus className="size-4" />
         </Button>
         <Button size="icon" variant="ghost" aria-label="Search">
@@ -27,13 +41,14 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
         </Button>
         <div className="my-1 h-px w-6 bg-border" />
         <div className="flex-1 flex flex-col gap-1 overflow-y-auto w-full items-center">
-          {conversations.map((c) => (
+          {conversations.slice(0, 16).map((c) => (
             <Button
               key={c.id}
               size="icon"
-              variant="ghost"
+              variant={c.id === activeId ? "secondary" : "ghost"}
               aria-label={c.title}
               title={c.title}
+              onClick={() => setActive(c.id)}
             >
               <MessageSquare className="size-4" />
             </Button>
@@ -52,35 +67,49 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
       </div>
     )
   }
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground">
       <div className="p-2 flex flex-col gap-2 border-b">
-        <Button className="w-full justify-start gap-2">
+        <Button
+          className="w-full justify-start gap-2"
+          onClick={handleNew}
+        >
           <Plus className="size-4" />
           New chat
         </Button>
         <div className="relative">
           <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input placeholder="Search" className="pl-8" />
+          <Input
+            placeholder="Search"
+            className="pl-8"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
         </div>
       </div>
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-2 flex flex-col gap-0.5">
-          <div className="text-xs text-muted-foreground px-2 py-1">
-            Conversations
+          <div className="text-xs text-muted-foreground px-2 py-1 flex items-center justify-between">
+            <span>Conversations</span>
+            {loading && <span className="text-[10px]">loading…</span>}
           </div>
-          {conversations.map((c) => (
-            <button
+          {filtered.length === 0 && !loading && (
+            <div className="px-2 py-3 text-xs text-muted-foreground">
+              {query ? "No matches." : "No conversations yet."}
+            </div>
+          )}
+          {filtered.map((c) => (
+            <ConversationRow
               key={c.id}
-              type="button"
-              className="text-left rounded-md px-2 py-1.5 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex items-start gap-2 min-w-0"
-            >
-              <MessageSquare className="size-4 mt-0.5 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="truncate text-sm">{c.title}</div>
-                <div className="text-xs text-muted-foreground">{c.updated}</div>
-              </div>
-            </button>
+              title={c.title}
+              updated={c.updated_at}
+              active={c.id === activeId}
+              onClick={() => setActive(c.id)}
+              onDelete={() => {
+                if (confirm("Delete this conversation?")) void remove(c.id)
+              }}
+            />
           ))}
         </div>
       </ScrollArea>
@@ -98,4 +127,60 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
       </div>
     </div>
   )
+}
+
+function ConversationRow({
+  title,
+  updated,
+  active,
+  onClick,
+  onDelete,
+}: {
+  title: string
+  updated: string
+  active: boolean
+  onClick: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div
+      className={cn(
+        "group flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground cursor-pointer min-w-0",
+        active && "bg-sidebar-accent text-sidebar-accent-foreground"
+      )}
+      onClick={onClick}
+    >
+      <MessageSquare className="size-4 mt-0.5 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="truncate text-sm">{title}</div>
+        <div className="text-xs text-muted-foreground">
+          {formatRelative(updated)}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onDelete()
+        }}
+        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-600 shrink-0"
+        aria-label="Delete conversation"
+      >
+        <Trash2 className="size-3.5" />
+      </button>
+    </div>
+  )
+}
+
+function formatRelative(iso: string): string {
+  const d = new Date(iso).getTime()
+  const diff = Date.now() - d
+  const m = Math.floor(diff / 60_000)
+  if (m < 1) return "just now"
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  const days = Math.floor(h / 24)
+  if (days < 7) return `${days}d`
+  return new Date(d).toLocaleDateString()
 }

@@ -17,6 +17,7 @@ import { AuthProvider, useAuth } from "@/lib/auth"
 import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
+import { ConversationProvider } from "@/lib/conversation-context"
 
 export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
@@ -37,7 +38,11 @@ function AuthGate() {
     )
   }
   if (!session) return <SignIn />
-  return <Workspace />
+  return (
+    <ConversationProvider>
+      <Workspace />
+    </ConversationProvider>
+  )
 }
 
 function Workspace() {
