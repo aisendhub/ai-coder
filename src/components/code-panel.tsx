@@ -121,7 +121,9 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
+                onClick={() => dispatchPrompt(files.length > 0
+                  ? "Commit the latest changes with a concise message and then push."
+                  : "Push the latest commits to the remote repository.")}
                 disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
               >
                 <ArrowUpFromLine className="size-3.5" />
