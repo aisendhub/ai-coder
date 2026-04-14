@@ -28,6 +28,7 @@ import {
   useConversations,
 } from "@/lib/conversation-context"
 import { listMessages } from "@/lib/conversations"
+import { supabase } from "@/lib/supabase"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -65,8 +66,7 @@ export function ChatPanel() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages])
 
-  // Load history when active conversation changes — but skip if we've already
-  // loaded this conversation locally (e.g. just created via runPrompt).
+  // Load history + subscribe to realtime when active conversation changes.
   useEffect(() => {
     conversationIdRef.current = conversation?.id ?? null
     sessionIdRef.current = conversation?.session_id ?? undefined
@@ -75,24 +75,94 @@ export function ChatPanel() {
       setMessages([])
       return
     }
-    if (loadedConvIdRef.current === conversation.id) return
-    loadedConvIdRef.current = conversation.id
     let cancelled = false
-    listMessages(conversation.id)
-      .then((rows) => {
-        if (cancelled) return
-        setMessages(
-          rows.map((r) => ({
-            id: r.id,
-            role: r.role,
-            text: r.text,
-            events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
-          }))
-        )
-      })
-      .catch((err) => console.error("listMessages failed", err))
+
+    // Skip the fetch if this conversation was just created locally (we already
+    // have the optimistic placeholder rows in state). Realtime still subscribes.
+    if (loadedConvIdRef.current !== conversation.id) {
+      loadedConvIdRef.current = conversation.id
+      listMessages(conversation.id)
+        .then((rows) => {
+          if (cancelled) return
+          setMessages(
+            rows.map((r) => ({
+              id: r.id,
+              role: r.role,
+              text: r.text,
+              events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
+            }))
+          )
+        })
+        .catch((err) => console.error("listMessages failed", err))
+    }
+
+    // Realtime — INSERT appends, UPDATE replaces by id. We also try to swap
+    // the id of an optimistic local row that matches role+text within the
+    // last few seconds, so the SSE-streamed bubble doesn't duplicate.
+    const channel = supabase
+      .channel(`messages:${conversation.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${conversation.id}`,
+        },
+        (payload) => {
+          const row = payload.new as {
+            id: string
+            role: "user" | "assistant"
+            text: string
+            events: unknown
+          }
+          const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
+          setMessages((m) => {
+            // De-dupe: row already present (we already swapped) → ignore
+            if (m.some((x) => x.id === row.id)) return m
+            // Try to match an optimistic placeholder of same role with similar
+            // text (or empty placeholder for assistant)
+            const idx = m.findIndex(
+              (x) =>
+                x.role === row.role &&
+                !x.id.startsWith("temp-") === false && // optimistic ids start with timestamp-
+                ((row.role === "user" && x.text === row.text) ||
+                  (row.role === "assistant" && x.text === ""))
+            )
+            if (idx !== -1) {
+              const next = m.slice()
+              next[idx] = { ...next[idx], id: row.id, events }
+              return next
+            }
+            return [...m, { id: row.id, role: row.role, text: row.text, events }]
+          })
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${conversation.id}`,
+        },
+        (payload) => {
+          const row = payload.new as {
+            id: string
+            text: string
+            events: unknown
+          }
+          const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
+          setMessages((m) =>
+            m.map((x) => (x.id === row.id ? { ...x, text: row.text, events } : x))
+          )
+        }
+      )
+      .subscribe()
+
     return () => {
       cancelled = true
+      void supabase.removeChannel(channel)
     }
   }, [conversation])
 

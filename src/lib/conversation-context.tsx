@@ -14,11 +14,13 @@ import {
   updateConversation,
 } from "@/lib/conversations"
 import { useAuth } from "@/lib/auth"
+import { supabase } from "@/lib/supabase"
 
 type State = {
   conversations: Conversation[]
   activeId: string | null
   loading: boolean
+  runningIds: Set<string>
   setActive: (id: string | null) => void
   refresh: () => Promise<void>
   createNew: () => Promise<Conversation>
@@ -34,6 +36,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [runningIds, setRunningIds] = useState<Set<string>>(new Set())
 
   const refresh = useCallback(async () => {
     if (!user) {
@@ -52,6 +55,71 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // Realtime: keep the conversations list reactive (server-side runners may
+  // bump updated_at on a conversation we're not viewing).
+  useEffect(() => {
+    if (!user) return
+    const channel = supabase
+      .channel("conversations:user")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "conversations",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            const c = payload.new as Conversation
+            setConversations((prev) =>
+              prev.some((x) => x.id === c.id) ? prev : [c, ...prev]
+            )
+          } else if (payload.eventType === "UPDATE") {
+            const c = payload.new as Conversation
+            setConversations((prev) => {
+              const exists = prev.some((x) => x.id === c.id)
+              const merged = exists
+                ? prev.map((x) => (x.id === c.id ? { ...x, ...c } : x))
+                : [c, ...prev]
+              return [...merged].sort((a, b) =>
+                b.updated_at.localeCompare(a.updated_at)
+              )
+            })
+          } else if (payload.eventType === "DELETE") {
+            const c = payload.old as { id: string }
+            setConversations((prev) => prev.filter((x) => x.id !== c.id))
+          }
+        }
+      )
+      .subscribe()
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [user])
+
+  // Poll which conversations have a server-side runner active.
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const res = await fetch("/api/runners")
+        if (!res.ok) return
+        const json = (await res.json()) as { runners: string[] }
+        if (cancelled) return
+        setRunningIds(new Set(json.runners))
+      } catch {
+        // ignore
+      }
+    }
+    void tick()
+    const interval = setInterval(tick, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
 
   const createNew = useCallback(async () => {
     if (!user) throw new Error("not signed in")
@@ -90,6 +158,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
         conversations,
         activeId,
         loading,
+        runningIds,
         setActive: setActiveId,
         refresh,
         createNew,
