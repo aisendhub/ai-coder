@@ -18,13 +18,16 @@ import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
 import { ConversationProvider } from "@/lib/conversation-context"
+import { TooltipProvider } from "@/components/ui/tooltip"
 
 export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
   return (
-    <AuthProvider>
-      <AuthGate />
-    </AuthProvider>
+    <TooltipProvider delay={300}>
+      <AuthProvider>
+        <AuthGate />
+      </AuthProvider>
+    </TooltipProvider>
   )
 }
 

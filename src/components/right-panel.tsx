@@ -1,6 +1,7 @@
 import { PanelRightClose, PanelRightOpen } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { CodePanel } from "@/components/code-panel"
 import { cn } from "@/lib/utils"
@@ -60,17 +61,22 @@ export function RightPanelTrigger({
   }
 
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      onClick={() => onOpenChange(!open)}
-      aria-label={open ? "Close changes" : "Open changes"}
-    >
-      {open ? (
-        <PanelRightClose className="size-5" />
-      ) : (
-        <PanelRightOpen className="size-5" />
-      )}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => onOpenChange(!open)}
+          aria-label={open ? "Close changes" : "Open changes"}
+        >
+          {open ? (
+            <PanelRightClose className="size-5" />
+          ) : (
+            <PanelRightOpen className="size-5" />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{open ? "Close changes" : "Open changes"}</TooltipContent>
+    </Tooltip>
   )
 }

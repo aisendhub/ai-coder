@@ -3,6 +3,7 @@ import { MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Trash2 } fr
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { useConversations } from "@/lib/conversation-context"
 import { cn } from "@/lib/utils"
 
@@ -33,12 +34,22 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
   if (collapsed) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
-        <Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew}>
-          <Plus className="size-4" />
-        </Button>
-        <Button size="icon" variant="ghost" aria-label="Search">
-          <Search className="size-4" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew}>
+              <Plus className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">New chat</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="icon" variant="ghost" aria-label="Search">
+              <Search className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Search</TooltipContent>
+        </Tooltip>
         <div className="my-1 h-px w-6 bg-border" />
         <div className="flex-1 flex flex-col gap-1 overflow-y-auto w-full items-center">
           {conversations.slice(0, 16).map((c) => (
@@ -55,14 +66,19 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
           ))}
         </div>
         <div className="border-t w-full pt-1 flex justify-center">
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={onToggle}
-            aria-label="Expand nav"
-          >
-            <PanelLeftOpen className="size-4" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={onToggle}
+                aria-label="Expand nav"
+              >
+                <PanelLeftOpen className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Expand nav</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     )
@@ -115,15 +131,20 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
       </ScrollArea>
       <div className="border-t flex items-center justify-between px-2 py-1.5">
         <div className="text-xs text-muted-foreground px-1">ai-coder · v0.1</div>
-        <Button
-          size="icon"
-          variant="ghost"
-          onClick={onToggle}
-          aria-label="Collapse nav"
-          className="size-7"
-        >
-          <PanelLeftClose className="size-4" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={onToggle}
+              aria-label="Collapse nav"
+              className="size-7"
+            >
+              <PanelLeftClose className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Collapse nav</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   )

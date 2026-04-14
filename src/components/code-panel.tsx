@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitHorizontal, Upload } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
 type ChangedFile = {
@@ -100,32 +101,44 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
           <span className="text-xs text-muted-foreground">{files.length}</span>
         </div>
         <div className="flex items-center gap-1">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
-            disabled={files.length === 0}
-            title="Commit changes"
-          >
-            <GitCommitHorizontal className="size-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
-            title="Push to remote"
-          >
-            <Upload className="size-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={fetchChanges}
-            disabled={loading}
-            title="Refresh"
-          >
-            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
+                disabled={files.length === 0}
+              >
+                <GitCommitHorizontal className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Commit changes</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
+              >
+                <Upload className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Push to remote</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={fetchChanges}
+                disabled={loading}
+              >
+                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Refresh changes</TooltipContent>
+          </Tooltip>
         </div>
       </div>
       <ScrollArea className="flex-1 min-h-0">

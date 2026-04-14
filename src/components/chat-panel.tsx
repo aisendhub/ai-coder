@@ -9,6 +9,7 @@ import {
 import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { Markdown } from "@/components/markdown"
 import {
   extractFilePath,
@@ -481,27 +482,37 @@ function Composer({ onSend }: { onSend: (prompt: string) => void }) {
         style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
       />
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="shrink-0"
-          aria-label="Upload files"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <Paperclip className="size-4" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="shrink-0"
+              aria-label="Upload files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Paperclip className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Upload files</TooltipContent>
+        </Tooltip>
         <input ref={fileInputRef} type="file" multiple className="hidden" />
-        <Button
-          type="button"
-          size="icon"
-          className="shrink-0"
-          aria-label="Send"
-          onClick={submit}
-          disabled={!value.trim()}
-        >
-          <Send className="size-4" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              size="icon"
+              className="shrink-0"
+              aria-label="Send"
+              onClick={submit}
+              disabled={!value.trim()}
+            >
+              <Send className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Send message</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   )
