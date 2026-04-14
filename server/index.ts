@@ -1,8 +1,11 @@
 import "dotenv/config"
 
-// Force Claude Code subscription OAuth (via `claude /login`) instead of API billing.
-// If ANTHROPIC_API_KEY is set, the CLI prefers it and bills API credits.
-delete process.env.ANTHROPIC_API_KEY
+// Dev: use Claude Code subscription OAuth (via `claude /login`) — no API billing.
+// Prod: let ANTHROPIC_API_KEY through so the CLI authenticates with paid API credits.
+// The CLI prefers the env var when set, so unsetting it in dev forces OAuth.
+if (process.env.NODE_ENV !== "production") {
+  delete process.env.ANTHROPIC_API_KEY
+}
 
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
