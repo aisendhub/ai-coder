@@ -124,33 +124,20 @@ export function ChatPanel() {
     setStreaming(true)
     streamingRef.current = true
 
-    // Persist user message; capture DB ids to swap into local state and so
-    // we can update the assistant row when the turn finishes.
-    let userDbId: string | null = null
+    // Persist user + (placeholder) assistant rows. Keep DB ids separate from
+    // the in-memory ids so the SSE stream can update local state immediately
+    // (no async setState swap to race against).
     let assistantDbId: string | null = null
     try {
-      const uRow = await insertMessage(convId, "user", prompt, [])
-      userDbId = uRow.id
+      await insertMessage(convId, "user", prompt, [])
       const aRow = await insertMessage(convId, "assistant", "", [])
       assistantDbId = aRow.id
-      setMessages((m) =>
-        m.map((msg) => {
-          if (msg.id === userMsg.id && userDbId)
-            return { ...msg, id: userDbId }
-          if (msg.id === assistantId && assistantDbId)
-            return { ...msg, id: assistantDbId }
-          return msg
-        })
-      )
     } catch (err) {
       console.error("insertMessage failed", err)
     }
-    const localAssistantId = assistantDbId ?? assistantId
 
     const updateAssistant = (fn: (msg: Message) => Message) =>
-      setMessages((m) =>
-        m.map((msg) => (msg.id === localAssistantId ? fn(msg) : msg))
-      )
+      setMessages((m) => m.map((msg) => (msg.id === assistantId ? fn(msg) : msg)))
 
     try {
       const res = await fetch("/api/chat", {
@@ -248,7 +235,7 @@ export function ChatPanel() {
         const finalMsg = (
           await new Promise<Message | undefined>((resolveMsg) => {
             setMessages((m) => {
-              resolveMsg(m.find((x) => x.id === localAssistantId))
+              resolveMsg(m.find((x) => x.id === assistantId))
               return m
             })
           })
