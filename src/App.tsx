@@ -7,6 +7,7 @@ import { TopBar } from "@/components/top-bar"
 import { AuthProvider, useAuth } from "@/lib/auth"
 import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
+import { ChatStateProvider } from "@/lib/chat-context"
 
 export default function App() {
   if (!isSupabaseConfigured) {
@@ -35,18 +36,20 @@ function AuthGate() {
 function Workspace() {
   const [rightOpen, setRightOpen] = useState(true)
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset className="flex min-h-svh min-w-0 flex-1 flex-row">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar rightOpen={rightOpen} onRightOpenChange={setRightOpen} />
-          <main className="min-h-0 flex-1">
-            <ChatPanel />
-          </main>
-        </div>
-        <RightPanel open={rightOpen} />
-      </SidebarInset>
-    </SidebarProvider>
+    <ChatStateProvider>
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset className="flex min-h-svh min-w-0 flex-1 flex-row">
+          <div className="flex min-w-0 flex-1 flex-col">
+            <TopBar rightOpen={rightOpen} onRightOpenChange={setRightOpen} />
+            <main className="min-h-0 flex-1">
+              <ChatPanel />
+            </main>
+          </div>
+          <RightPanel open={rightOpen} />
+        </SidebarInset>
+      </SidebarProvider>
+    </ChatStateProvider>
   )
 }
 

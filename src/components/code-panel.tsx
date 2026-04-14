@@ -1,71 +1,72 @@
-import { FileCode, Check, Plus, Minus } from "lucide-react"
+import { FileCode, FileText } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { Separator } from "@/components/ui/separator"
-
-type Change = {
-  file: string
-  additions: number
-  deletions: number
-  status: "pending" | "applied"
-}
-
-const changes: Change[] = [
-  { file: "src/middleware/auth.ts", additions: 24, deletions: 18, status: "applied" },
-  { file: "src/middleware/auth.test.ts", additions: 6, deletions: 2, status: "applied" },
-  { file: "src/routes/login.ts", additions: 3, deletions: 3, status: "pending" },
-]
+import { useChatState } from "@/lib/chat-context"
 
 export function CodePanel() {
+  const { files, clearFiles } = useChatState()
+
   return (
     <div className="flex h-full flex-col min-h-0">
       <div className="flex items-center justify-between p-3 border-b">
         <div className="flex items-center gap-2">
           <FileCode className="size-4" />
-          <h2 className="text-sm font-medium">Changes</h2>
+          <h2 className="text-sm font-medium">Changed files</h2>
           <span className="text-xs text-muted-foreground">
-            {changes.length} files
+            {files.length}
           </span>
         </div>
-        <Button size="sm" variant="outline">
-          Apply all
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={clearFiles}
+          disabled={files.length === 0}
+        >
+          Clear
         </Button>
       </div>
       <ScrollArea className="flex-1 min-h-0">
-        <div className="p-3 flex flex-col gap-2">
-          {changes.map((c) => (
-            <div
-              key={c.file}
-              className="rounded-md border p-3 flex flex-col gap-2 hover:bg-accent/40 cursor-pointer"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="truncate text-sm font-mono">{c.file}</div>
-                {c.status === "applied" ? (
-                  <Check className="size-4 text-green-600 shrink-0" />
-                ) : (
-                  <span className="text-xs text-amber-600 shrink-0">
-                    pending
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-3 text-xs">
-                <span className="flex items-center gap-0.5 text-green-600">
-                  <Plus className="size-3" />
-                  {c.additions}
-                </span>
-                <span className="flex items-center gap-0.5 text-red-600">
-                  <Minus className="size-3" />
-                  {c.deletions}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-        <Separator />
-        <div className="p-3 text-xs text-muted-foreground">
-          Tool calls and diffs appear here as Claude edits.
-        </div>
+        {files.length === 0 ? (
+          <div className="p-6 text-center text-xs text-muted-foreground">
+            Files Claude edits will appear here as the agent works.
+          </div>
+        ) : (
+          <div className="p-2 flex flex-col gap-1">
+            {files
+              .slice()
+              .sort((a, b) => b.lastAt - a.lastAt)
+              .map((f) => (
+                <FileRow key={f.path} file={f} />
+              ))}
+          </div>
+        )}
       </ScrollArea>
+    </div>
+  )
+}
+
+function FileRow({
+  file,
+}: {
+  file: { path: string; toolCount: number; lastTool: string }
+}) {
+  const name = file.path.split("/").pop() ?? file.path
+  const dir = file.path.slice(0, file.path.length - name.length).replace(/\/$/, "")
+  return (
+    <div className="group rounded-md px-2 py-1.5 hover:bg-accent/40 flex items-center gap-2 text-sm min-w-0">
+      <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+      <div className="flex-1 min-w-0">
+        <div className="truncate font-mono text-[13px]">{name}</div>
+        {dir && (
+          <div className="truncate text-[11px] text-muted-foreground font-mono">
+            {dir}
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+        {file.lastTool}
+        {file.toolCount > 1 ? ` ×${file.toolCount}` : ""}
+      </div>
     </div>
   )
 }

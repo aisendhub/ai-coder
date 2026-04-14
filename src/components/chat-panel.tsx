@@ -10,6 +10,11 @@ import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle } from "luc
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Markdown } from "@/components/markdown"
+import {
+  extractFilePath,
+  isEditingTool,
+  useChatState,
+} from "@/lib/chat-context"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -37,6 +42,7 @@ export function ChatPanel() {
   const streamingRef = useRef(false)
   const queueRef = useRef<string[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
+  const { recordFileTouch } = useChatState()
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
@@ -99,6 +105,10 @@ export function ChatPanel() {
               events: [...msg.events, { kind: "thinking", text: payload.text }],
             }))
           } else if (event === "tool_use") {
+            const path = extractFilePath(payload.name, payload.input)
+            if (path && isEditingTool(payload.name)) {
+              recordFileTouch(path, payload.name)
+            }
             updateAssistant((msg) => ({
               ...msg,
               events: [

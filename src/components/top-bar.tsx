@@ -13,7 +13,7 @@ export function TopBar({ title = "New chat", rightOpen, onRightOpenChange }: Pro
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
       <SidebarTrigger className="-ml-1" />
-      <Separator orientation="vertical" className="mr-1 h-5" />
+      <Separator orientation="vertical" className="mr-1 h-full" />
       <div className="flex items-center gap-2 min-w-0 flex-1">
         <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
           <Sparkles className="size-4" />
