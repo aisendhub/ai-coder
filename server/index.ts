@@ -438,10 +438,12 @@ app.post("/api/chat", async (c) => {
   const body = await c.req.json<{
     conversationId?: string
     prompt?: string
+    attachments?: AttachmentPayload[]
     sessionId?: string
   }>()
   const conversationId = body.conversationId
   const prompt = body.prompt
+  const attachments = body.attachments
   const sessionId = body.sessionId
 
   if (!conversationId || typeof conversationId !== "string") {
@@ -459,6 +461,7 @@ app.post("/api/chat", async (c) => {
   runner = await startRunner({
     conversationId,
     prompt,
+    attachments,
     resumeSessionId: sessionId,
   })
 

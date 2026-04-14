@@ -6,7 +6,7 @@ import {
   type KeyboardEvent,
 } from "react"
 import { observer } from "mobx-react-lite"
-import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle } from "lucide-react"
+import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Markdown } from "@/components/markdown"
@@ -17,6 +17,12 @@ import {
 } from "@/lib/chat-context"
 import { workspace } from "@/models"
 import type { Conversation, Message, StreamEvent } from "@/models"
+import {
+  type Attachment,
+  readFileAsAttachment,
+  isImageAttachment,
+  MAX_TOTAL_SIZE,
+} from "@/lib/attachment"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -46,7 +52,7 @@ export const ChatPanel = observer(function ChatPanel() {
     }
   }, [conversation, conversation?.lastAssistant?.events.length, recordFileTouch])
 
-  const handleSend = async (prompt: string) => {
+  const handleSend = async (prompt: string, attachments?: Attachment[]) => {
     // Always read the latest active from the store — never the closure value,
     // which may be stale if the user just switched conversations.
     let target = workspace.active
@@ -62,9 +68,10 @@ export const ChatPanel = observer(function ChatPanel() {
       "[chat] send",
       target.id.slice(0, 6),
       "streaming=" + target.streaming,
-      "queueLen=" + target.queue.length
+      "queueLen=" + target.queue.length,
+      "attachments=" + (attachments?.length ?? 0)
     )
-    void target.send(prompt)
+    void target.send(prompt, attachments)
   }
 
   return (
@@ -93,8 +100,18 @@ export const ChatPanel = observer(function ChatPanel() {
               key={`q-${idx}`}
               className="self-end max-w-[85%] rounded-2xl bg-primary/60 text-primary-foreground px-4 py-2 opacity-70"
             >
+              {q.attachments && q.attachments.length > 0 && (
+                <div className="flex flex-wrap gap-1 mb-1">
+                  {q.attachments.map((a) => (
+                    <span key={a.id} className="inline-flex items-center gap-1 text-[10px] bg-primary-foreground/20 rounded px-1.5 py-0.5">
+                      <Paperclip className="size-2.5" />
+                      {a.filename}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                {q}
+                {q.prompt}
               </div>
               <div className="text-[10px] mt-1 opacity-80">queued</div>
             </div>
@@ -121,6 +138,23 @@ const MessageBubble = observer(function MessageBubble({
   if (message.role === "user") {
     return (
       <div className="self-end max-w-[85%] rounded-2xl bg-primary text-primary-foreground px-4 py-2">
+        {message.attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5">
+            {message.attachments.map((a, i) => (
+              <span
+                key={i}
+                className="inline-flex items-center gap-1 text-xs bg-primary-foreground/20 rounded px-1.5 py-0.5"
+              >
+                {isImageAttachment(a) ? (
+                  <ImageIcon className="size-3" />
+                ) : (
+                  <FileText className="size-3" />
+                )}
+                {a.filename}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="text-sm leading-relaxed whitespace-pre-wrap">
           {message.text}
         </div>
@@ -225,10 +259,16 @@ function Dot({ delay }: { delay: string }) {
   )
 }
 
-function Composer({ onSend }: { onSend: (prompt: string) => void }) {
+function Composer({
+  onSend,
+}: {
+  onSend: (prompt: string, attachments?: Attachment[]) => void
+}) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [value, setValue] = useState("")
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [fileError, setFileError] = useState<string | null>(null)
 
   function autosize(el: HTMLTextAreaElement) {
     el.style.height = "auto"
@@ -247,18 +287,92 @@ function Composer({ onSend }: { onSend: (prompt: string) => void }) {
     }
   }
 
+  async function handleFileSelect(e: ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    setFileError(null)
+
+    const newAttachments: Attachment[] = []
+    for (const file of Array.from(files)) {
+      try {
+        const att = await readFileAsAttachment(file)
+        newAttachments.push(att)
+      } catch (err) {
+        setFileError(err instanceof Error ? err.message : "Failed to read file")
+      }
+    }
+
+    setAttachments((prev) => {
+      const combined = [...prev, ...newAttachments]
+      const totalSize = combined.reduce((sum, a) => sum + a.sizeBytes, 0)
+      if (totalSize > MAX_TOTAL_SIZE) {
+        setFileError(`Total attachment size exceeds ${MAX_TOTAL_SIZE / 1024 / 1024} MB limit`)
+        return prev
+      }
+      return combined
+    })
+
+    // Reset the input so the same file can be re-selected
+    if (fileInputRef.current) fileInputRef.current.value = ""
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((a) => a.id !== id))
+    setFileError(null)
+  }
+
   function submit() {
     const trimmed = value.trim()
-    if (!trimmed) return
-    onSend(trimmed)
+    if (!trimmed && attachments.length === 0) return
+    onSend(trimmed || "(attached files)", attachments.length > 0 ? attachments : undefined)
     setValue("")
+    setAttachments([])
+    setFileError(null)
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto"
     }
   }
 
+  const canSend = value.trim().length > 0 || attachments.length > 0
+
   return (
     <div className="rounded-xl border bg-background shadow-xs focus-within:ring-2 focus-within:ring-ring">
+      {/* Attachment preview strip */}
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-3 pt-3">
+          {attachments.map((att) => (
+            <div
+              key={att.id}
+              className="group relative flex items-center gap-1.5 rounded-lg border bg-muted/50 px-2.5 py-1.5 text-xs"
+            >
+              {isImageAttachment(att) ? (
+                <ImageIcon className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span className="max-w-[120px] truncate">{att.filename}</span>
+              <span className="text-muted-foreground">
+                {att.sizeBytes < 1024
+                  ? `${att.sizeBytes} B`
+                  : att.sizeBytes < 1024 * 1024
+                    ? `${(att.sizeBytes / 1024).toFixed(1)} KB`
+                    : `${(att.sizeBytes / (1024 * 1024)).toFixed(1)} MB`}
+              </span>
+              <button
+                type="button"
+                className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/20"
+                onClick={() => removeAttachment(att.id)}
+                aria-label={`Remove ${att.filename}`}
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {fileError && (
+        <div className="px-3 pt-2 text-xs text-red-500">{fileError}</div>
+      )}
       <textarea
         ref={textareaRef}
         value={value}
@@ -280,14 +394,20 @@ function Composer({ onSend }: { onSend: (prompt: string) => void }) {
         >
           <Paperclip className="size-4" />
         </Button>
-        <input ref={fileInputRef} type="file" multiple className="hidden" />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFileSelect}
+        />
         <Button
           type="button"
           size="icon"
           className="shrink-0"
           aria-label="Send"
           onClick={submit}
-          disabled={!value.trim()}
+          disabled={!canSend}
         >
           <Send className="size-4" />
         </Button>
