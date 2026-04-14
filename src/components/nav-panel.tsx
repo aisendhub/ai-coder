@@ -163,7 +163,7 @@ function ConversationRow({
           e.stopPropagation()
           onDelete()
         }}
-        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-600 shrink-0"
+        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-600 shrink-0 cursor-pointer"
         aria-label="Delete conversation"
       >
         <Trash2 className="size-3.5" />
