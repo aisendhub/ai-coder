@@ -4,6 +4,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { workspace } from "@/models"
 
 type ChangedFile = {
   path: string
@@ -18,10 +19,17 @@ type ChangesResponse = {
   unpushedCount: number
 }
 
-function dispatchPrompt(prompt: string) {
-  window.dispatchEvent(
-    new CustomEvent("ai-coder:send-prompt", { detail: { prompt } })
-  )
+async function dispatchPrompt(prompt: string) {
+  let target = workspace.active
+  if (!target) {
+    try {
+      target = await workspace.createNew()
+    } catch (err) {
+      console.error("dispatchPrompt: createNew failed", err)
+      return
+    }
+  }
+  void target.send(prompt)
 }
 
 export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
@@ -45,6 +53,24 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
     }
   }, [])
 
+  // Auto-retry on error with exponential backoff (2s, 4s, 8s, …, max 30s)
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const backoffRef = useRef(2000)
+  useEffect(() => {
+    if (retryRef.current) clearTimeout(retryRef.current)
+    if (error) {
+      retryRef.current = setTimeout(() => {
+        fetchChanges()
+        backoffRef.current = Math.min(backoffRef.current * 2, 30_000)
+      }, backoffRef.current)
+    } else {
+      backoffRef.current = 2000 // reset on success
+    }
+    return () => {
+      if (retryRef.current) clearTimeout(retryRef.current)
+    }
+  }, [error, fetchChanges])
+
   // Live updates: subscribe to /api/changes/stream (SSE).
   // Server pings on every file change in WORKSPACE_DIR; we refetch debounced.
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -55,16 +81,28 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
 
   useEffect(() => {
     fetchChanges()
-    const es = new EventSource("/api/changes/stream")
-    es.addEventListener("ready", debouncedRefetch)
-    es.addEventListener("changed", debouncedRefetch)
-    es.onerror = () => {
-      // EventSource auto-reconnects; nothing to do
+
+    let es: EventSource | null = null
+    let esRetry: ReturnType<typeof setTimeout> | null = null
+
+    function connectSSE() {
+      es = new EventSource("/api/changes/stream")
+      es.addEventListener("ready", debouncedRefetch)
+      es.addEventListener("changed", debouncedRefetch)
+      es.onerror = () => {
+        // If the EventSource gave up (CLOSED), reconnect after a delay
+        if (es?.readyState === EventSource.CLOSED) {
+          esRetry = setTimeout(connectSSE, 5000)
+        }
+      }
     }
+    connectSSE()
+
     const onTurnDone = () => fetchChanges()
     window.addEventListener("ai-coder:turn-done", onTurnDone)
     return () => {
-      es.close()
+      es?.close()
+      if (esRetry) clearTimeout(esRetry)
       window.removeEventListener("ai-coder:turn-done", onTurnDone)
       if (refetchTimer.current) clearTimeout(refetchTimer.current)
     }
@@ -149,11 +187,12 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
       </div>
       <ScrollArea className="flex-1 min-h-0">
         {error && (
-          <div className="p-3 text-xs text-red-600 bg-red-500/10 m-3 rounded-md">
-            {error}
+          <div className="p-3 text-xs text-red-600 bg-red-500/10 m-3 rounded-md flex items-center justify-between gap-2">
+            <span>{error}</span>
+            <span className="text-red-400 shrink-0">Retrying…</span>
           </div>
         )}
-        {!error && files.length === 0 && !loading && (
+        {files.length === 0 && !loading && !error && (
           <div className="p-6 text-center text-xs text-muted-foreground">
             No uncommitted changes.
           </div>

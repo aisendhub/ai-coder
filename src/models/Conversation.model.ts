@@ -3,6 +3,7 @@ import { BaseModel } from "./Base.model"
 import { BaseList } from "./BaseList.model"
 import { Message, type StreamEvent } from "./Message.model"
 import { supabase } from "@/lib/supabase"
+import type { Attachment, AttachmentMeta } from "@/lib/attachment"
 
 class MessageList extends BaseList<typeof Message> {
   get ItemType() {
@@ -24,7 +25,7 @@ export class Conversation extends BaseModel {
   @observable streaming = false
 
   /** Prompts queued behind the active runner. */
-  @observable queue: string[] = []
+  @observable queue: { prompt: string; attachments?: Attachment[] }[] = []
 
   /** Loaded from DB on activation; populated via SSE/realtime as turns run. */
   messages = MessageList.create()
@@ -82,6 +83,7 @@ export class Conversation extends BaseModel {
           role: r.role,
           text: r.text,
           events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
+          attachments: Array.isArray(r.attachments) ? (r.attachments as AttachmentMeta[]) : [],
           createdAt: r.created_at,
         })
       )
@@ -133,6 +135,7 @@ export class Conversation extends BaseModel {
   @action private applyInsert(row: MessageRow) {
     if (this.messages.find(row.id)) return
     const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
+    const attachments = Array.isArray(row.attachments) ? (row.attachments as AttachmentMeta[]) : []
     // Try to upgrade an optimistic local row: same role, matching text (user)
     // or any optimistic assistant (its text may already be populated via SSE).
     const optimistic = this.messages.items.find(
@@ -142,7 +145,7 @@ export class Conversation extends BaseModel {
         (row.role === "assistant" || m.text === row.text)
     )
     if (optimistic) {
-      optimistic.setProps({ id: row.id, events, isOptimistic: false })
+      optimistic.setProps({ id: row.id, events, attachments, isOptimistic: false })
       return
     }
     this.messages.addItem(
@@ -152,6 +155,7 @@ export class Conversation extends BaseModel {
         role: row.role,
         text: row.text,
         events,
+        attachments,
         createdAt: row.created_at,
       })
     )
@@ -170,12 +174,12 @@ export class Conversation extends BaseModel {
 
   /** Send a user prompt. If a turn is in flight for this conversation,
    *  queue it; otherwise start a new runner. */
-  send = async (prompt: string) => {
+  send = async (prompt: string, attachments?: Attachment[]) => {
     if (this.streaming) {
-      runInAction(() => this.queue.push(prompt))
+      runInAction(() => this.queue.push({ prompt, attachments }))
       return
     }
-    void this.runTurn(prompt)
+    void this.runTurn(prompt, attachments)
   }
 
   @action cancel() {
@@ -184,7 +188,13 @@ export class Conversation extends BaseModel {
     this.streaming = false
   }
 
-  private runTurn = async (prompt: string) => {
+  private runTurn = async (prompt: string, attachments?: Attachment[]) => {
+    const attachmentMeta: AttachmentMeta[] = (attachments ?? []).map((a) => ({
+      filename: a.filename,
+      mimeType: a.mimeType,
+      sizeBytes: a.sizeBytes,
+    }))
+
     runInAction(() => {
       this.streaming = true
       this.lastError = null
@@ -196,6 +206,7 @@ export class Conversation extends BaseModel {
           role: "user",
           text: prompt,
           events: [],
+          attachments: attachmentMeta,
           isOptimistic: true,
         })
       )
@@ -239,6 +250,7 @@ export class Conversation extends BaseModel {
         body: JSON.stringify({
           conversationId: this.id,
           prompt,
+          attachments: attachments?.length ? attachments : undefined,
           sessionId: this.sessionId ?? undefined,
         }),
         signal: controller.signal,
@@ -322,12 +334,14 @@ export class Conversation extends BaseModel {
       // still actively responding.
       const next = runInAction(() => this.queue.shift())
       if (next) {
-        void this.runTurn(next)
+        void this.runTurn(next.prompt, next.attachments)
       } else {
         runInAction(() => {
           this.streaming = false
         })
         window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
+        // Play a short chime so the user knows the AI finished
+        import("../lib/sounds").then((s) => s.playDoneSound()).catch(() => {})
       }
     }
   }
@@ -348,5 +362,6 @@ type MessageRow = {
   role: "user" | "assistant"
   text: string
   events: unknown
+  attachments: unknown
   created_at: string
 }

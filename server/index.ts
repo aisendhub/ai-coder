@@ -11,7 +11,8 @@ import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
-import { query } from "@anthropic-ai/claude-agent-sdk"
+import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import type { MessageParam } from "@anthropic-ai/sdk/resources"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { resolve } from "node:path"
@@ -81,12 +82,22 @@ type Runner = {
 const runners = new Map<string, Runner>()
 const PERSIST_INTERVAL_MS = 800
 
+type AttachmentPayload = {
+  filename: string
+  mimeType: string
+  sizeBytes: number
+  base64: string
+}
+
+const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+
 async function startRunner(args: {
   conversationId: string
   prompt: string
+  attachments?: AttachmentPayload[]
   resumeSessionId?: string
 }): Promise<Runner> {
-  const { conversationId, prompt, resumeSessionId } = args
+  const { conversationId, prompt, attachments, resumeSessionId } = args
   const bus = new EventEmitter()
   bus.setMaxListeners(50)
   const runner: Runner = {
@@ -118,11 +129,17 @@ async function startRunner(args: {
     // them immediately (and any reconnecting client sees them).
     if (sb) {
       try {
+        const attachmentMeta = (attachments ?? []).map((a) => ({
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+        }))
         await sb.from("messages").insert({
           conversation_id: conversationId,
           role: "user",
           text: prompt,
           events: [],
+          attachments: attachmentMeta,
         })
         const { data } = await sb
           .from("messages")
@@ -161,8 +178,50 @@ async function startRunner(args: {
     }
 
     try {
+      // Build the prompt — either a plain string or an AsyncIterable with
+      // structured content blocks when file attachments are present.
+      let queryPrompt: string | AsyncIterable<SDKUserMessage> = prompt
+
+      if (attachments && attachments.length > 0) {
+        const contentBlocks: MessageParam["content"] = []
+
+        for (const att of attachments) {
+          if (SUPPORTED_IMAGE_TYPES.includes(att.mimeType)) {
+            contentBlocks.push({
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: att.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+                data: att.base64,
+              },
+            })
+          } else {
+            // Decode base64 to text for text-based files
+            const textContent = Buffer.from(att.base64, "base64").toString("utf-8")
+            contentBlocks.push({
+              type: "text",
+              text: `[File: ${att.filename}]\n${textContent}`,
+            })
+          }
+        }
+
+        // Add the user's text prompt
+        if (prompt) {
+          contentBlocks.push({ type: "text", text: prompt })
+        }
+
+        async function* singleMessage(): AsyncIterable<SDKUserMessage> {
+          yield {
+            type: "user",
+            message: { role: "user", content: contentBlocks },
+            parent_tool_use_id: null,
+          }
+        }
+        queryPrompt = singleMessage()
+      }
+
       const messages = query({
-        prompt,
+        prompt: queryPrompt,
         options: {
           resume: resumeSessionId,
           cwd: WORKSPACE_DIR,

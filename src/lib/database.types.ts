@@ -39,6 +39,7 @@ export type Database = {
           role: "user" | "assistant"
           text: string
           events: unknown
+          attachments: unknown
           created_at: string
         }
         Insert: {
@@ -47,11 +48,13 @@ export type Database = {
           role: "user" | "assistant"
           text?: string
           events?: unknown
+          attachments?: unknown
           created_at?: string
         }
         Update: {
           text?: string
           events?: unknown
+          attachments?: unknown
         }
       }
     }

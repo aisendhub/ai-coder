@@ -1,5 +1,6 @@
 import { observable } from "mobx"
 import { BaseModel } from "./Base.model"
+import type { AttachmentMeta } from "@/lib/attachment"
 
 export type StreamEvent =
   | { kind: "thinking"; text: string }
@@ -14,6 +15,7 @@ export class Message extends BaseModel {
   @observable role: MessageRole = "assistant"
   @observable text = ""
   @observable events: StreamEvent[] = []
+  @observable attachments: AttachmentMeta[] = []
   @observable createdAt = new Date().toISOString()
 
   /** True if this is a local-only optimistic row (not yet confirmed by the server). */
