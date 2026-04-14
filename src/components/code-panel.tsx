@@ -166,7 +166,7 @@ function FileCard({
         <StatusBadge status={file.status} />
       </button>
       {!collapsed && (
-        <div className="border-t max-h-[70vh] overflow-auto text-[12px]">
+        <div className="border-t text-[12px]">
           <Diff file={file} />
         </div>
       )}
