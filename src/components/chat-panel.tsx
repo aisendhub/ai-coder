@@ -1,424 +1,76 @@
 import {
-  useCallback,
   useEffect,
   useRef,
   useState,
   type ChangeEvent,
   type KeyboardEvent,
 } from "react"
+import { observer } from "mobx-react-lite"
 import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet"
 import { Markdown } from "@/components/markdown"
 import {
   extractFilePath,
   isEditingTool,
   useChatState,
 } from "@/lib/chat-context"
-import {
-  useActiveConversation,
-  useConversations,
-} from "@/lib/conversation-context"
-import { listMessages } from "@/lib/conversations"
-import { supabase } from "@/lib/supabase"
+import { workspace } from "@/models"
+import type { Conversation, Message, StreamEvent } from "@/models"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
-type StreamEvent =
-  | { kind: "thinking"; text: string }
-  | { kind: "tool_use"; id: string; name: string; input: unknown }
-  | { kind: "tool_result"; toolUseId: string; isError: boolean; output: string }
-  | { kind: "text"; text: string }
-
-type Message = {
-  id: string
-  role: "user" | "assistant"
-  text: string
-  events: StreamEvent[]
-}
-
-let idCounter = 0
-const nextId = () => `${Date.now()}-${++idCounter}`
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-export function ChatPanel() {
-  const [messages, setMessages] = useState<Message[]>([])
-  const [streaming, setStreaming] = useState(false)
-  const [queued, setQueued] = useState<string[]>([])
-  const sessionIdRef = useRef<string | undefined>(undefined)
-  const bottomRef = useRef<HTMLDivElement>(null)
+export const ChatPanel = observer(function ChatPanel() {
+  const conversation = workspace.active
   const { recordFileTouch } = useChatState()
-  const conversation = useActiveConversation()
-  const { createNew, setSessionId, updateTitle } = useConversations()
-  const conversationIdRef = useRef<string | null>(null)
-  const loadedConvIdRef = useRef<string | null>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
 
-  // Per-conversation: which convs have a local stream in flight, and what
-  // prompts are queued for each.
-  const runningConvsRef = useRef<Set<string>>(new Set())
-  const queuesRef = useRef<Map<string, string[]>>(new Map())
-  // Abort the SSE stream when user switches conversations (server keeps running).
-  const sseAbortByConvRef = useRef<Map<string, AbortController>>(new Map())
-
+  // Auto-scroll on new content
+  const messageCount = conversation?.messages.items.length ?? 0
+  const lastText = conversation?.lastAssistant?.text.length ?? 0
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
-  }, [messages])
+  }, [messageCount, lastText])
 
-  // Load history + subscribe to realtime when active conversation changes.
+  // Wire tool_use events into the file-touch tracker for the side panel
   useEffect(() => {
-    conversationIdRef.current = conversation?.id ?? null
-    sessionIdRef.current = conversation?.session_id ?? undefined
-    // Sync the UI flags to whatever this conversation has in flight locally.
-    if (conversation) {
-      setStreaming(runningConvsRef.current.has(conversation.id))
-      setQueued([...(queuesRef.current.get(conversation.id) ?? [])])
-    } else {
-      setStreaming(false)
-      setQueued([])
-    }
-    if (!conversation) {
-      loadedConvIdRef.current = null
-      setMessages([])
-      return
-    }
-    let cancelled = false
-
-    // Skip the fetch if this conversation was just created locally (we already
-    // have the optimistic placeholder rows in state). Realtime still subscribes.
-    if (loadedConvIdRef.current !== conversation.id) {
-      loadedConvIdRef.current = conversation.id
-      listMessages(conversation.id)
-        .then((rows) => {
-          if (cancelled) return
-          setMessages(
-            rows.map((r) => ({
-              id: r.id,
-              role: r.role,
-              text: r.text,
-              events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
-            }))
-          )
-        })
-        .catch((err) => console.error("listMessages failed", err))
-    }
-
-    // Realtime — INSERT appends, UPDATE replaces by id. We also try to swap
-    // the id of an optimistic local row that matches role+text within the
-    // last few seconds, so the SSE-streamed bubble doesn't duplicate.
-    const channel = supabase
-      .channel(`messages:${conversation.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${conversation.id}`,
-        },
-        (payload) => {
-          const row = payload.new as {
-            id: string
-            role: "user" | "assistant"
-            text: string
-            events: unknown
-          }
-          const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
-          setMessages((m) => {
-            // Already swapped via earlier realtime echo
-            if (m.some((x) => x.id === row.id)) return m
-            // Optimistic local rows have non-UUID ids (we use timestamp-counter)
-            const isOptimistic = (id: string) => !UUID_RE.test(id)
-            const idx = m.findIndex(
-              (x) =>
-                isOptimistic(x.id) &&
-                x.role === row.role &&
-                ((row.role === "user" && x.text === row.text) ||
-                  (row.role === "assistant" && x.text === ""))
-            )
-            if (idx !== -1) {
-              const next = m.slice()
-              next[idx] = { ...next[idx], id: row.id, events }
-              return next
-            }
-            return [...m, { id: row.id, role: row.role, text: row.text, events }]
-          })
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "messages",
-          filter: `conversation_id=eq.${conversation.id}`,
-        },
-        (payload) => {
-          const row = payload.new as {
-            id: string
-            text: string
-            events: unknown
-          }
-          const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
-          setMessages((m) =>
-            m.map((x) => (x.id === row.id ? { ...x, text: row.text, events } : x))
-          )
-        }
-      )
-      .subscribe()
-
-    return () => {
-      cancelled = true
-      void supabase.removeChannel(channel)
-    }
-  }, [conversation])
-
-  const runPrompt = useCallback(async (
-    prompt: string,
-    targetConvId: string,
-    targetSessionId: string | undefined,
-    isFirstMessage: boolean
-  ) => {
-    runningConvsRef.current.add(targetConvId)
-    if (targetConvId === conversationIdRef.current) setStreaming(true)
-
-    // Title the conversation from the first user prompt
-    if (isFirstMessage) {
-      const title = prompt.split("\n")[0].slice(0, 60)
-      void updateTitle(targetConvId, title || "New chat")
-    }
-
-    // Optimistic local rows — only render if the user is still viewing this
-    // conversation. Server inserts the canonical rows; realtime swaps ids.
-    const assistantId = nextId()
-    if (conversationIdRef.current === targetConvId) {
-      const userMsg: Message = {
-        id: nextId(),
-        role: "user",
-        text: prompt,
-        events: [],
-      }
-      setMessages((m) => [
-        ...m,
-        userMsg,
-        { id: assistantId, role: "assistant", text: "", events: [] },
-      ])
-    }
-
-    // Updates only apply if user is still viewing the target conversation.
-    // Otherwise events are dropped here — realtime UPDATEs on the row will
-    // sync the latest text when the user comes back.
-    const updateAssistant = (fn: (msg: Message) => Message) => {
-      if (conversationIdRef.current !== targetConvId) return
-      setMessages((m) => {
-        let lastAssistantIdx = -1
-        for (let i = m.length - 1; i >= 0; i--) {
-          if (m[i].role === "assistant") {
-            lastAssistantIdx = i
-            break
-          }
-        }
-        if (lastAssistantIdx === -1) return m
-        const next = m.slice()
-        next[lastAssistantIdx] = fn(next[lastAssistantIdx])
-        return next
-      })
-    }
-
-    const controller = new AbortController()
-    sseAbortByConvRef.current.set(targetConvId, controller)
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          conversationId: targetConvId,
-          prompt,
-          sessionId: targetSessionId,
-        }),
-        signal: controller.signal,
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.error || `HTTP ${res.status}`)
-      }
-      if (!res.body) throw new Error("no body")
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split("\n\n")
-        buffer = parts.pop() ?? ""
-        for (const part of parts) {
-          const event = /event: (.+)/.exec(part)?.[1]
-          const data = /data: (.+)/.exec(part)?.[1]
-          if (!event || !data) continue
-          const payload = JSON.parse(data)
-
-          if (event === "session") {
-            if (conversationIdRef.current === targetConvId) {
-              sessionIdRef.current = payload.sessionId
-            }
-            if (payload.sessionId) {
-              void setSessionId(targetConvId, payload.sessionId)
-            }
-          } else if (event === "text") {
-            updateAssistant((msg) => ({
-              ...msg,
-              text: msg.text + payload.text,
-              events: [...msg.events, { kind: "text", text: payload.text }],
-            }))
-          } else if (event === "thinking") {
-            updateAssistant((msg) => ({
-              ...msg,
-              events: [...msg.events, { kind: "thinking", text: payload.text }],
-            }))
-          } else if (event === "tool_use") {
-            const path = extractFilePath(payload.name, payload.input)
-            if (path && isEditingTool(payload.name)) {
-              recordFileTouch(path, payload.name)
-            }
-            updateAssistant((msg) => ({
-              ...msg,
-              events: [
-                ...msg.events,
-                {
-                  kind: "tool_use",
-                  id: payload.id,
-                  name: payload.name,
-                  input: payload.input,
-                },
-              ],
-            }))
-          } else if (event === "tool_result") {
-            updateAssistant((msg) => ({
-              ...msg,
-              events: [
-                ...msg.events,
-                {
-                  kind: "tool_result",
-                  toolUseId: payload.toolUseId,
-                  isError: payload.isError,
-                  output: payload.output,
-                },
-              ],
-            }))
-          } else if (event === "error") {
-            updateAssistant((msg) => ({
-              ...msg,
-              text: msg.text + `\n⚠️ ${payload.message}`,
-            }))
-          }
-        }
-      }
-    } catch (err) {
-      // Aborted = user switched away; suppress
-      if ((err as Error)?.name !== "AbortError") {
-        updateAssistant((msg) => ({
-          ...msg,
-          text:
-            msg.text +
-            `\n⚠️ ${err instanceof Error ? err.message : String(err)}`,
-        }))
-      }
-    } finally {
-      runningConvsRef.current.delete(targetConvId)
-      sseAbortByConvRef.current.delete(targetConvId)
-      if (targetConvId === conversationIdRef.current) setStreaming(false)
-      window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
-
-      // Drain queue for THIS conversation
-      const queue = queuesRef.current.get(targetConvId) ?? []
-      const next = queue.shift()
-      queuesRef.current.set(targetConvId, queue)
-      if (targetConvId === conversationIdRef.current) {
-        setQueued([...queue])
-      }
-      if (next) {
-        // Recurse with the same target conv; it may differ from active now
-        void runPrompt(next, targetConvId, sessionIdRef.current, false)
+    if (!conversation) return
+    const last = conversation.lastAssistant
+    if (!last) return
+    for (const ev of last.events) {
+      if (ev.kind === "tool_use" && isEditingTool(ev.name)) {
+        const path = extractFilePath(ev.name, ev.input)
+        if (path) recordFileTouch(path, ev.name)
       }
     }
-  }, [recordFileTouch, setSessionId, updateTitle])
+  }, [conversation, conversation?.lastAssistant?.events.length, recordFileTouch])
 
-  const sendPrompt = useCallback(
-    async (prompt: string) => {
-      // Resolve the conversation we're sending to RIGHT NOW.
-      let convId = conversationIdRef.current
-      let isFirstMessage = false
-      if (!convId) {
-        try {
-          const c = await createNew()
-          convId = c.id
-          conversationIdRef.current = c.id
-          loadedConvIdRef.current = c.id
-          sessionIdRef.current = undefined
-          isFirstMessage = true
-        } catch (err) {
-          console.error("createNew failed", err)
-          return
-        }
-      } else {
-        // First message in this convo iff there are no existing rows
-        isFirstMessage = messages.length === 0
-      }
-
-      // If a runner is already in flight for THIS conversation, queue.
-      if (runningConvsRef.current.has(convId)) {
-        const q = queuesRef.current.get(convId) ?? []
-        q.push(prompt)
-        queuesRef.current.set(convId, q)
-        if (convId === conversationIdRef.current) setQueued([...q])
+  const handleSend = async (prompt: string) => {
+    let target = conversation
+    if (!target) {
+      try {
+        target = await workspace.createNew()
+      } catch (err) {
+        console.error("createNew failed", err)
         return
       }
-
-      const targetSessionId =
-        convId === conversationIdRef.current
-          ? sessionIdRef.current
-          : conversation?.session_id ?? undefined
-
-      void runPrompt(prompt, convId, targetSessionId, isFirstMessage)
-    },
-    [createNew, messages.length, conversation, runPrompt]
-  )
-
-  // Allow other components to send prompts via custom events
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ prompt: string }>).detail
-      if (detail?.prompt) sendPrompt(detail.prompt)
     }
-    window.addEventListener("ai-coder:send-prompt", handler)
-    return () => window.removeEventListener("ai-coder:send-prompt", handler)
-  }, [sendPrompt])
+    void target.send(prompt)
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0">
       <ScrollArea className="flex-1 min-h-0">
         <div className="mx-auto w-full max-w-2xl px-4 py-6 flex flex-col gap-4">
-          {messages.length === 0 && (
+          {!conversation && (
             <div className="text-center text-sm text-muted-foreground py-16">
               Start a conversation with Claude.
             </div>
           )}
-          {messages.map((m, i) => {
-            const isLast = i === messages.length - 1
+          {conversation?.messages.items.map((m, i, all) => {
+            const isLast = i === all.length - 1
             const isStreamingThis =
-              streaming && isLast && m.role === "assistant"
+              conversation.streaming && isLast && m.role === "assistant"
             return (
               <MessageBubble
                 key={m.id}
@@ -427,7 +79,7 @@ export function ChatPanel() {
               />
             )
           })}
-          {queued.map((q, idx) => (
+          {conversation?.queue.map((q, idx) => (
             <div
               key={`q-${idx}`}
               className="self-end max-w-[85%] rounded-2xl bg-primary/60 text-primary-foreground px-4 py-2 opacity-70"
@@ -443,22 +95,20 @@ export function ChatPanel() {
       </ScrollArea>
       <div className="border-t p-3">
         <div className="mx-auto w-full max-w-2xl">
-          <Composer onSend={sendPrompt} />
+          <Composer onSend={handleSend} />
         </div>
       </div>
     </div>
   )
-}
+})
 
-function MessageBubble({
+const MessageBubble = observer(function MessageBubble({
   message,
   isStreaming,
 }: {
   message: Message
   isStreaming: boolean
 }) {
-  const [sheetEvent, setSheetEvent] = useState<StreamEvent | null>(null)
-
   if (message.role === "user") {
     return (
       <div className="self-end max-w-[85%] rounded-2xl bg-primary text-primary-foreground px-4 py-2">
@@ -476,7 +126,7 @@ function MessageBubble({
       {message.events
         .filter((e) => e.kind !== "text")
         .map((e, idx) => (
-          <ActivityRow key={idx} event={e} onClick={() => setSheetEvent(e)} />
+          <ActivityRow key={idx} event={e} />
         ))}
       {(message.text || (isStreaming && !hasContent)) && (
         <div className="rounded-2xl bg-muted px-4 py-2">
@@ -490,54 +140,26 @@ function MessageBubble({
         </div>
       )}
       {isStreaming && hasContent && !message.text && <ThinkingDots />}
-
-      <Sheet open={!!sheetEvent} onOpenChange={(open) => { if (!open) setSheetEvent(null) }}>
-        <SheetContent side="right" className="sm:max-w-lg overflow-hidden flex flex-col">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
-              {sheetEvent?.kind === "thinking" && <><Brain className="size-4" /> Thinking</>}
-              {sheetEvent?.kind === "tool_use" && <><Wrench className="size-4" /> {(sheetEvent as Extract<StreamEvent, {kind:"tool_use"}>).name}</>}
-              {sheetEvent?.kind === "tool_result" && (
-                (sheetEvent as Extract<StreamEvent, {kind:"tool_result"}>).isError
-                  ? <><AlertTriangle className="size-4 text-red-500" /> Tool Error</>
-                  : <><CheckCircle2 className="size-4 text-green-500" /> Tool Result</>
-              )}
-            </SheetTitle>
-            {sheetEvent?.kind === "tool_use" && (
-              <SheetDescription className="font-mono text-xs truncate">
-                {renderToolHint((sheetEvent as Extract<StreamEvent, {kind:"tool_use"}>).name, (sheetEvent as Extract<StreamEvent, {kind:"tool_use"}>).input).replace(" · ", "")}
-              </SheetDescription>
-            )}
-          </SheetHeader>
-          <div className="flex-1 min-h-0 overflow-auto px-4 pb-4">
-            <EventDetail event={sheetEvent} />
-          </div>
-        </SheetContent>
-      </Sheet>
     </div>
   )
-}
+})
 
-function ActivityRow({ event, onClick }: { event: StreamEvent; onClick?: () => void }) {
-  const clickProps = onClick
-    ? { onClick, role: "button" as const, tabIndex: 0, onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") onClick() } }
-    : {}
-
+function ActivityRow({ event }: { event: StreamEvent }) {
   if (event.kind === "thinking") {
     return (
-      <div {...clickProps} className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1 cursor-pointer hover:bg-muted/40 rounded-md transition-colors">
+      <div className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1">
         <Brain className="size-3.5 mt-0.5 shrink-0" />
-        <div className="whitespace-pre-wrap line-clamp-2">{event.text}</div>
+        <div className="whitespace-pre-wrap">{event.text}</div>
       </div>
     )
   }
   if (event.kind === "tool_use") {
     return (
-      <div {...clickProps} className="flex items-center gap-2 text-xs text-muted-foreground rounded-md bg-muted/50 px-2 py-1 cursor-pointer hover:bg-muted/70 transition-colors">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground rounded-md bg-muted/50 px-2 py-1">
         <Wrench className="size-3.5 shrink-0" />
         <span className="font-mono truncate">
           {event.name}
-          {renderToolHint(event.name, event.input)}
+          {renderToolHint(event.input)}
         </span>
       </div>
     )
@@ -545,12 +167,11 @@ function ActivityRow({ event, onClick }: { event: StreamEvent; onClick?: () => v
   if (event.kind === "tool_result") {
     return (
       <div
-        {...clickProps}
         className={
-          "flex items-start gap-2 text-xs rounded-md px-2 py-1 cursor-pointer transition-colors " +
+          "flex items-start gap-2 text-xs rounded-md px-2 py-1 " +
           (event.isError
-            ? "bg-red-500/10 text-red-700 dark:text-red-400 hover:bg-red-500/20"
-            : "bg-green-500/10 text-green-700 dark:text-green-400 hover:bg-green-500/20")
+            ? "bg-red-500/10 text-red-700 dark:text-red-400"
+            : "bg-green-500/10 text-green-700 dark:text-green-400")
         }
       >
         {event.isError ? (
@@ -567,46 +188,7 @@ function ActivityRow({ event, onClick }: { event: StreamEvent; onClick?: () => v
   return null
 }
 
-function EventDetail({ event }: { event: StreamEvent | null }) {
-  if (!event) return null
-
-  if (event.kind === "thinking") {
-    return (
-      <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
-        {event.text}
-      </pre>
-    )
-  }
-
-  if (event.kind === "tool_use") {
-    return (
-      <pre className="text-xs font-mono whitespace-pre-wrap text-foreground leading-relaxed">
-        {typeof event.input === "string"
-          ? event.input
-          : JSON.stringify(event.input, null, 2)}
-      </pre>
-    )
-  }
-
-  if (event.kind === "tool_result") {
-    return (
-      <pre
-        className={
-          "text-xs font-mono whitespace-pre-wrap leading-relaxed " +
-          (event.isError
-            ? "text-red-700 dark:text-red-400"
-            : "text-foreground")
-        }
-      >
-        {event.output || (event.isError ? "error" : "ok")}
-      </pre>
-    )
-  }
-
-  return null
-}
-
-function renderToolHint(_name: string, input: unknown): string {
+function renderToolHint(input: unknown): string {
   if (!input || typeof input !== "object") return ""
   const obj = input as Record<string, unknown>
   const hint =
@@ -679,38 +261,32 @@ function Composer({ onSend }: { onSend: (prompt: string) => void }) {
         style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
       />
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
-        <Tooltip>
-          <TooltipTrigger>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="shrink-0"
-              aria-label="Upload files"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Paperclip className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Upload files</TooltipContent>
-        </Tooltip>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="shrink-0"
+          aria-label="Upload files"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <Paperclip className="size-4" />
+        </Button>
         <input ref={fileInputRef} type="file" multiple className="hidden" />
-        <Tooltip>
-          <TooltipTrigger>
-            <Button
-              type="button"
-              size="icon"
-              className="shrink-0"
-              aria-label="Send"
-              onClick={submit}
-              disabled={!value.trim()}
-            >
-              <Send className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Send message</TooltipContent>
-        </Tooltip>
+        <Button
+          type="button"
+          size="icon"
+          className="shrink-0"
+          aria-label="Send"
+          onClick={submit}
+          disabled={!value.trim()}
+        >
+          <Send className="size-4" />
+        </Button>
       </div>
     </div>
   )
 }
+
+// Re-export so callers that imported these from chat-panel don't break.
+// (Preferred: import from "@/models" directly.)
+export type { Conversation }

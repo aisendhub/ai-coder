@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react"
+import { observer } from "mobx-react-lite"
 import { MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
-import { useConversations } from "@/lib/conversation-context"
+import { workspace } from "@/models"
 import { cn } from "@/lib/utils"
 
 type Props = {
@@ -30,9 +31,14 @@ function useTheme() {
   return { dark, toggle }
 }
 
-export function NavPanel({ collapsed = false, onToggle }: Props) {
-  const { conversations, activeId, setActive, createNew, remove, loading, runningIds } =
-    useConversations()
+export const NavPanel = observer(function NavPanel({
+  collapsed = false,
+  onToggle,
+}: Props) {
+  const conversations = workspace.sortedConversations
+  const activeId = workspace.activeId
+  const loading = workspace.loading
+  const runningIds = workspace.runningServerIds
   const [query, setQuery] = useState("")
   const { dark, toggle: toggleTheme } = useTheme()
 
@@ -44,7 +50,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
 
   const handleNew = async () => {
     try {
-      await createNew()
+      await workspace.createNew()
     } catch (err) {
       console.error("createNew failed", err)
     }
@@ -78,7 +84,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
               variant={c.id === activeId ? "secondary" : "ghost"}
               aria-label={c.title}
               title={c.title + (runningIds.has(c.id) ? " (running)" : "")}
-              onClick={() => setActive(c.id)}
+              onClick={() => workspace.setActive(c.id)}
               className="relative"
             >
               <MessageSquare className="size-4" />
@@ -155,12 +161,12 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
             <ConversationRow
               key={c.id}
               title={c.title}
-              updated={c.updated_at}
+              updated={c.updatedAt}
               active={c.id === activeId}
               running={runningIds.has(c.id)}
-              onClick={() => setActive(c.id)}
+              onClick={() => workspace.setActive(c.id)}
               onDelete={() => {
-                if (confirm("Delete this conversation?")) void remove(c.id)
+                if (confirm("Delete this conversation?")) void workspace.remove(c.id)
               }}
             />
           ))}
@@ -201,7 +207,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
       </div>
     </div>
   )
-}
+})
 
 function ConversationRow({
   title,

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import {
@@ -17,8 +17,8 @@ import { AuthProvider, useAuth } from "@/lib/auth"
 import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
-import { ConversationProvider } from "@/lib/conversation-context"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { workspace } from "@/models"
 
 export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
@@ -32,7 +32,14 @@ export default function App() {
 }
 
 function AuthGate() {
-  const { session, loading } = useAuth()
+  const { session, loading, user } = useAuth()
+
+  // Wire user → workspace store
+  useEffect(() => {
+    if (user?.id) void workspace.signIn(user.id)
+    else workspace.signOut()
+  }, [user?.id])
+
   if (loading) {
     return (
       <div className="h-svh flex items-center justify-center text-sm text-muted-foreground">
@@ -41,11 +48,7 @@ function AuthGate() {
     )
   }
   if (!session) return <SignIn />
-  return (
-    <ConversationProvider>
-      <Workspace />
-    </ConversationProvider>
-  )
+  return <Workspace />
 }
 
 function Workspace() {

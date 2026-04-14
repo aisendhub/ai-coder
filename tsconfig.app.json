@@ -18,8 +18,11 @@
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
+
+    /* MobX legacy decorators */
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
 
     "paths": {
       "@/*": ["./src/*"]
