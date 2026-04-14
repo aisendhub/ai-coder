@@ -143,6 +143,11 @@ export function ChatPanel() {
       console.error("insertMessage failed", err)
     }
 
+    // Mirror what's accumulated for the assistant message so we can persist
+    // the final value at the end without trying to read it back from React state.
+    let assistantText = ""
+    const assistantEvents: StreamEvent[] = []
+
     const updateAssistant = (fn: (msg: Message) => Message) =>
       setMessages((m) => m.map((msg) => (msg.id === assistantId ? fn(msg) : msg)))
 
@@ -177,12 +182,15 @@ export function ChatPanel() {
               void setSessionId(convId, payload.sessionId)
             }
           } else if (event === "text") {
+            assistantText += payload.text
+            assistantEvents.push({ kind: "text", text: payload.text })
             updateAssistant((msg) => ({
               ...msg,
               text: msg.text + payload.text,
               events: [...msg.events, { kind: "text", text: payload.text }],
             }))
           } else if (event === "thinking") {
+            assistantEvents.push({ kind: "thinking", text: payload.text })
             updateAssistant((msg) => ({
               ...msg,
               events: [...msg.events, { kind: "thinking", text: payload.text }],
@@ -192,35 +200,35 @@ export function ChatPanel() {
             if (path && isEditingTool(payload.name)) {
               recordFileTouch(path, payload.name)
             }
+            const ev: StreamEvent = {
+              kind: "tool_use",
+              id: payload.id,
+              name: payload.name,
+              input: payload.input,
+            }
+            assistantEvents.push(ev)
             updateAssistant((msg) => ({
               ...msg,
-              events: [
-                ...msg.events,
-                {
-                  kind: "tool_use",
-                  id: payload.id,
-                  name: payload.name,
-                  input: payload.input,
-                },
-              ],
+              events: [...msg.events, ev],
             }))
           } else if (event === "tool_result") {
+            const ev: StreamEvent = {
+              kind: "tool_result",
+              toolUseId: payload.toolUseId,
+              isError: payload.isError,
+              output: payload.output,
+            }
+            assistantEvents.push(ev)
             updateAssistant((msg) => ({
               ...msg,
-              events: [
-                ...msg.events,
-                {
-                  kind: "tool_result",
-                  toolUseId: payload.toolUseId,
-                  isError: payload.isError,
-                  output: payload.output,
-                },
-              ],
+              events: [...msg.events, ev],
             }))
           } else if (event === "error") {
+            const append = `\n⚠️ ${payload.message}`
+            assistantText += append
             updateAssistant((msg) => ({
               ...msg,
-              text: msg.text + `\n⚠️ ${payload.message}`,
+              text: msg.text + append,
             }))
           }
         }
@@ -239,19 +247,13 @@ export function ChatPanel() {
 
       // Persist the final assistant text + events to the DB
       if (assistantDbId) {
-        const finalMsg = (
-          await new Promise<Message | undefined>((resolveMsg) => {
-            setMessages((m) => {
-              resolveMsg(m.find((x) => x.id === assistantId))
-              return m
-            })
+        try {
+          await updateMessage(assistantDbId, {
+            text: assistantText,
+            events: assistantEvents,
           })
-        )
-        if (finalMsg) {
-          void updateMessage(assistantDbId, {
-            text: finalMsg.text,
-            events: finalMsg.events,
-          })
+        } catch (err) {
+          console.error("updateMessage failed", err)
         }
       }
 

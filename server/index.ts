@@ -95,7 +95,20 @@ app.get("/api/changes", async (c) => {
       })
     )
 
-    return c.json({ workspace: WORKSPACE_DIR, files: withDiffs })
+    // Count commits ahead of upstream (unpushed)
+    let unpushedCount = 0
+    try {
+      const { stdout } = await execFileP(
+        "git",
+        ["rev-list", "--count", "@{u}..HEAD"],
+        { cwd: WORKSPACE_DIR }
+      )
+      unpushedCount = parseInt(stdout.trim(), 10) || 0
+    } catch {
+      // No upstream configured — treat as nothing to push
+    }
+
+    return c.json({ workspace: WORKSPACE_DIR, files: withDiffs, unpushedCount })
   } catch (err) {
     return c.json(
       { error: err instanceof Error ? err.message : String(err) },
