@@ -1,5 +1,5 @@
-import { useState } from "react"
-import { MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
+import { MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -12,10 +12,29 @@ type Props = {
   onToggle?: () => void
 }
 
+function useTheme() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"))
+  const toggle = useCallback(() => {
+    const next = !dark
+    document.documentElement.classList.toggle("dark", next)
+    localStorage.setItem("theme", next ? "dark" : "light")
+    setDark(next)
+  }, [dark])
+  // Sync on mount (e.g. from localStorage or system preference)
+  useEffect(() => {
+    const saved = localStorage.getItem("theme")
+    const prefersDark = saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    document.documentElement.classList.toggle("dark", prefersDark)
+    setDark(prefersDark)
+  }, [])
+  return { dark, toggle }
+}
+
 export function NavPanel({ collapsed = false, onToggle }: Props) {
   const { conversations, activeId, setActive, createNew, remove, loading } =
     useConversations()
   const [query, setQuery] = useState("")
+  const { dark, toggle: toggleTheme } = useTheme()
 
   const filtered = query
     ? conversations.filter((c) =>
@@ -65,7 +84,20 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
             </Button>
           ))}
         </div>
-        <div className="border-t w-full pt-1 flex justify-center">
+        <div className="border-t w-full pt-1 flex flex-col items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={toggleTheme}
+                aria-label="Toggle theme"
+              >
+                {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{dark ? "Light mode" : "Dark mode"}</TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger>
               <Button
@@ -131,20 +163,36 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
       </ScrollArea>
       <div className="border-t flex items-center justify-between px-2 py-1.5">
         <div className="text-xs text-muted-foreground px-1">ai-coder · v0.1</div>
-        <Tooltip>
-          <TooltipTrigger>
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={onToggle}
-              aria-label="Collapse nav"
-              className="size-7"
-            >
-              <PanelLeftClose className="size-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Collapse nav</TooltipContent>
-        </Tooltip>
+        <div className="flex items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={toggleTheme}
+                aria-label="Toggle theme"
+                className="size-7"
+              >
+                {dark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{dark ? "Light mode" : "Dark mode"}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={onToggle}
+                aria-label="Collapse nav"
+                className="size-7"
+              >
+                <PanelLeftClose className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Collapse nav</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
     </div>
   )

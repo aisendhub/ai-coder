@@ -10,6 +10,13 @@ import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle } from "luc
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet"
 import { Markdown } from "@/components/markdown"
 import {
   extractFilePath,
@@ -20,11 +27,7 @@ import {
   useActiveConversation,
   useConversations,
 } from "@/lib/conversation-context"
-import {
-  insertMessage,
-  listMessages,
-  updateMessage,
-} from "@/lib/conversations"
+import { listMessages } from "@/lib/conversations"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -116,6 +119,9 @@ export function ChatPanel() {
       void updateTitle(convId, title || "New chat")
     }
 
+    // Optimistic local rows. Server is the source of truth and inserts the
+    // canonical rows into Supabase; on next conversation load these are
+    // replaced by DB rows.
     const userMsg: Message = {
       id: nextId(),
       role: "user",
@@ -131,23 +137,6 @@ export function ChatPanel() {
     setStreaming(true)
     streamingRef.current = true
 
-    // Persist user + (placeholder) assistant rows. Keep DB ids separate from
-    // the in-memory ids so the SSE stream can update local state immediately
-    // (no async setState swap to race against).
-    let assistantDbId: string | null = null
-    try {
-      await insertMessage(convId, "user", prompt, [])
-      const aRow = await insertMessage(convId, "assistant", "", [])
-      assistantDbId = aRow.id
-    } catch (err) {
-      console.error("insertMessage failed", err)
-    }
-
-    // Mirror what's accumulated for the assistant message so we can persist
-    // the final value at the end without trying to read it back from React state.
-    let assistantText = ""
-    const assistantEvents: StreamEvent[] = []
-
     const updateAssistant = (fn: (msg: Message) => Message) =>
       setMessages((m) => m.map((msg) => (msg.id === assistantId ? fn(msg) : msg)))
 
@@ -155,7 +144,11 @@ export function ChatPanel() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, sessionId: sessionIdRef.current }),
+        body: JSON.stringify({
+          conversationId: convId,
+          prompt,
+          sessionId: sessionIdRef.current,
+        }),
       })
       if (!res.body) throw new Error("no body")
 
@@ -182,15 +175,12 @@ export function ChatPanel() {
               void setSessionId(convId, payload.sessionId)
             }
           } else if (event === "text") {
-            assistantText += payload.text
-            assistantEvents.push({ kind: "text", text: payload.text })
             updateAssistant((msg) => ({
               ...msg,
               text: msg.text + payload.text,
               events: [...msg.events, { kind: "text", text: payload.text }],
             }))
           } else if (event === "thinking") {
-            assistantEvents.push({ kind: "thinking", text: payload.text })
             updateAssistant((msg) => ({
               ...msg,
               events: [...msg.events, { kind: "thinking", text: payload.text }],
@@ -200,35 +190,35 @@ export function ChatPanel() {
             if (path && isEditingTool(payload.name)) {
               recordFileTouch(path, payload.name)
             }
-            const ev: StreamEvent = {
-              kind: "tool_use",
-              id: payload.id,
-              name: payload.name,
-              input: payload.input,
-            }
-            assistantEvents.push(ev)
             updateAssistant((msg) => ({
               ...msg,
-              events: [...msg.events, ev],
+              events: [
+                ...msg.events,
+                {
+                  kind: "tool_use",
+                  id: payload.id,
+                  name: payload.name,
+                  input: payload.input,
+                },
+              ],
             }))
           } else if (event === "tool_result") {
-            const ev: StreamEvent = {
-              kind: "tool_result",
-              toolUseId: payload.toolUseId,
-              isError: payload.isError,
-              output: payload.output,
-            }
-            assistantEvents.push(ev)
             updateAssistant((msg) => ({
               ...msg,
-              events: [...msg.events, ev],
+              events: [
+                ...msg.events,
+                {
+                  kind: "tool_result",
+                  toolUseId: payload.toolUseId,
+                  isError: payload.isError,
+                  output: payload.output,
+                },
+              ],
             }))
           } else if (event === "error") {
-            const append = `\n⚠️ ${payload.message}`
-            assistantText += append
             updateAssistant((msg) => ({
               ...msg,
-              text: msg.text + append,
+              text: msg.text + `\n⚠️ ${payload.message}`,
             }))
           }
         }
@@ -244,18 +234,6 @@ export function ChatPanel() {
       setStreaming(false)
       streamingRef.current = false
       window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
-
-      // Persist the final assistant text + events to the DB
-      if (assistantDbId) {
-        try {
-          await updateMessage(assistantDbId, {
-            text: assistantText,
-            events: assistantEvents,
-          })
-        } catch (err) {
-          console.error("updateMessage failed", err)
-        }
-      }
 
       const next = queueRef.current.shift()
       setQueued([...queueRef.current])
@@ -338,6 +316,8 @@ function MessageBubble({
   message: Message
   isStreaming: boolean
 }) {
+  const [sheetEvent, setSheetEvent] = useState<StreamEvent | null>(null)
+
   if (message.role === "user") {
     return (
       <div className="self-end max-w-[85%] rounded-2xl bg-primary text-primary-foreground px-4 py-2">
@@ -355,7 +335,7 @@ function MessageBubble({
       {message.events
         .filter((e) => e.kind !== "text")
         .map((e, idx) => (
-          <ActivityRow key={idx} event={e} />
+          <ActivityRow key={idx} event={e} onClick={() => setSheetEvent(e)} />
         ))}
       {(message.text || (isStreaming && !hasContent)) && (
         <div className="rounded-2xl bg-muted px-4 py-2">
@@ -369,22 +349,50 @@ function MessageBubble({
         </div>
       )}
       {isStreaming && hasContent && !message.text && <ThinkingDots />}
+
+      <Sheet open={!!sheetEvent} onOpenChange={(open) => { if (!open) setSheetEvent(null) }}>
+        <SheetContent side="right" className="sm:max-w-lg overflow-hidden flex flex-col">
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2">
+              {sheetEvent?.kind === "thinking" && <><Brain className="size-4" /> Thinking</>}
+              {sheetEvent?.kind === "tool_use" && <><Wrench className="size-4" /> {(sheetEvent as Extract<StreamEvent, {kind:"tool_use"}>).name}</>}
+              {sheetEvent?.kind === "tool_result" && (
+                (sheetEvent as Extract<StreamEvent, {kind:"tool_result"}>).isError
+                  ? <><AlertTriangle className="size-4 text-red-500" /> Tool Error</>
+                  : <><CheckCircle2 className="size-4 text-green-500" /> Tool Result</>
+              )}
+            </SheetTitle>
+            {sheetEvent?.kind === "tool_use" && (
+              <SheetDescription className="font-mono text-xs truncate">
+                {renderToolHint((sheetEvent as Extract<StreamEvent, {kind:"tool_use"}>).name, (sheetEvent as Extract<StreamEvent, {kind:"tool_use"}>).input).replace(" · ", "")}
+              </SheetDescription>
+            )}
+          </SheetHeader>
+          <div className="flex-1 min-h-0 overflow-auto px-4 pb-4">
+            <EventDetail event={sheetEvent} />
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   )
 }
 
-function ActivityRow({ event }: { event: StreamEvent }) {
+function ActivityRow({ event, onClick }: { event: StreamEvent; onClick?: () => void }) {
+  const clickProps = onClick
+    ? { onClick, role: "button" as const, tabIndex: 0, onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") onClick() } }
+    : {}
+
   if (event.kind === "thinking") {
     return (
-      <div className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1">
+      <div {...clickProps} className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1 cursor-pointer hover:bg-muted/40 rounded-md transition-colors">
         <Brain className="size-3.5 mt-0.5 shrink-0" />
-        <div className="whitespace-pre-wrap">{event.text}</div>
+        <div className="whitespace-pre-wrap line-clamp-2">{event.text}</div>
       </div>
     )
   }
   if (event.kind === "tool_use") {
     return (
-      <div className="flex items-center gap-2 text-xs text-muted-foreground rounded-md bg-muted/50 px-2 py-1">
+      <div {...clickProps} className="flex items-center gap-2 text-xs text-muted-foreground rounded-md bg-muted/50 px-2 py-1 cursor-pointer hover:bg-muted/70 transition-colors">
         <Wrench className="size-3.5 shrink-0" />
         <span className="font-mono truncate">
           {event.name}
@@ -396,11 +404,12 @@ function ActivityRow({ event }: { event: StreamEvent }) {
   if (event.kind === "tool_result") {
     return (
       <div
+        {...clickProps}
         className={
-          "flex items-start gap-2 text-xs rounded-md px-2 py-1 " +
+          "flex items-start gap-2 text-xs rounded-md px-2 py-1 cursor-pointer transition-colors " +
           (event.isError
-            ? "bg-red-500/10 text-red-700 dark:text-red-400"
-            : "bg-green-500/10 text-green-700 dark:text-green-400")
+            ? "bg-red-500/10 text-red-700 dark:text-red-400 hover:bg-red-500/20"
+            : "bg-green-500/10 text-green-700 dark:text-green-400 hover:bg-green-500/20")
         }
       >
         {event.isError ? (
@@ -414,6 +423,45 @@ function ActivityRow({ event }: { event: StreamEvent }) {
       </div>
     )
   }
+  return null
+}
+
+function EventDetail({ event }: { event: StreamEvent | null }) {
+  if (!event) return null
+
+  if (event.kind === "thinking") {
+    return (
+      <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground leading-relaxed">
+        {event.text}
+      </pre>
+    )
+  }
+
+  if (event.kind === "tool_use") {
+    return (
+      <pre className="text-xs font-mono whitespace-pre-wrap text-foreground leading-relaxed">
+        {typeof event.input === "string"
+          ? event.input
+          : JSON.stringify(event.input, null, 2)}
+      </pre>
+    )
+  }
+
+  if (event.kind === "tool_result") {
+    return (
+      <pre
+        className={
+          "text-xs font-mono whitespace-pre-wrap leading-relaxed " +
+          (event.isError
+            ? "text-red-700 dark:text-red-400"
+            : "text-foreground")
+        }
+      >
+        {event.output || (event.isError ? "error" : "ok")}
+      </pre>
+    )
+  }
+
   return null
 }
 
