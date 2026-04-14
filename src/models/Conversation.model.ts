@@ -75,18 +75,21 @@ export class Conversation extends BaseModel {
       return
     }
     runInAction(() => {
-      this.messages.setItems(
-        (data ?? []).map((r) =>
-          Message.fromProps({
-            id: r.id,
-            conversationId: this.id,
-            role: r.role,
-            text: r.text,
-            events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
-            createdAt: r.created_at,
-          })
-        )
+      const dbMessages = (data ?? []).map((r) =>
+        Message.fromProps({
+          id: r.id,
+          conversationId: this.id,
+          role: r.role,
+          text: r.text,
+          events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
+          createdAt: r.created_at,
+        })
       )
+      // Preserve any optimistic local messages already added by an in-flight
+      // runTurn — placing them at the end keeps the order sane until realtime
+      // upgrades them to canonical DB rows.
+      const optimistic = this.messages.items.filter((m) => m.isOptimistic)
+      this.messages.setItems([...dbMessages, ...optimistic])
       this.loaded = true
     })
   }
@@ -205,8 +208,8 @@ export class Conversation extends BaseModel {
           isOptimistic: true,
         })
       )
-      // First user prompt becomes the title
-      if (this.messages.items.length === 2) {
+      // First user prompt becomes the title (still default).
+      if (!this.title || this.title === "New chat") {
         const t = prompt.split("\n")[0].slice(0, 60)
         if (t) {
           this.title = t
@@ -214,6 +217,9 @@ export class Conversation extends BaseModel {
             .from("conversations")
             .update({ title: t })
             .eq("id", this.id)
+            .then(({ error }) => {
+              if (error) console.error("title update failed", error)
+            })
         }
       }
     })
