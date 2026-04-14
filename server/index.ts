@@ -321,6 +321,7 @@ async function startRunner(args: {
       runner.done = true
       runners.delete(conversationId)
       emit("closed", {})
+      bus.emit("closed")
     }
   })()
 
