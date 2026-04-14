@@ -50,7 +50,10 @@ One-page reference for every moving part: what runs where, how to connect, how t
 | **Anthropic** | LLM — via Claude Code CLI | `ANTHROPIC_API_KEY` (prod) or `claude /login` (dev) | https://console.anthropic.com |
 | **GitHub** | OAuth + repo cloning | Via Supabase GitHub provider | https://github.com/settings/developers |
 | **Google** | OAuth (secondary) | Via Supabase Google provider | https://console.cloud.google.com |
-| **GitHub (repo)** | Source code | — | https://github.com/fijiwebdesign/ai-coder |
+| **GitHub (repo)** | Source code | — | https://github.com/aisendhub/ai-coder |
+| **Railway** | Backend hosting | env vars in dashboard | https://railway.com/project/586773a1-919d-46bf-9dd0-1d7833287eb1 |
+
+**Production URL**: https://ai-coder-production-2cf1.up.railway.app
 
 All secrets live in `.env` (local) or the host's secret store (prod). `.env` is gitignored — never commit.
 

@@ -57,7 +57,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · 🚫 blocked
 - ✅ `nixpacks.toml` for Railway build (installs `claude` CLI)
 - ✅ Hono serves Vite dist in production (single-origin)
 - ✅ Railway project created
-- 🟡 Reconnect Railway source to `aisendhub/ai-coder`
+- ✅ Railway source connected to `aisendhub/ai-coder`
+- ✅ Public domain generated: https://ai-coder-production-2cf1.up.railway.app
 - ⬜ Set Railway env vars (`E2B_API_KEY`, Supabase keys, `ANTHROPIC_API_KEY`, `NODE_ENV=production`)
 - ⬜ First successful production deploy
 - ⬜ Generate Railway public domain

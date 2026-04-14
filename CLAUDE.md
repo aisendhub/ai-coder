@@ -17,7 +17,9 @@ Docs:
 
 ## Quick links
 
-- Project on GitHub: https://github.com/fijiwebdesign/ai-coder
+- **Production**: https://ai-coder-production-2cf1.up.railway.app
+- Repo: https://github.com/aisendhub/ai-coder
+- Railway project: https://railway.com/project/586773a1-919d-46bf-9dd0-1d7833287eb1
 - Supabase project: https://supabase.com/dashboard/project/ferkiusbpvgeyefdrdnp
 - E2B dashboard: https://e2b.dev/dashboard
 
