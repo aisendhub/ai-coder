@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { workspace } from "@/models"
 import { cn } from "@/lib/utils"
+import { useSidebarOptional } from "@/components/ui/sidebar"
 
 type Props = {
   collapsed?: boolean
@@ -35,6 +36,10 @@ export const NavPanel = observer(function NavPanel({
   collapsed = false,
   onToggle,
 }: Props) {
+  const sidebar = useSidebarOptional()
+  const closeMobileNav = () => {
+    if (sidebar?.isMobile) sidebar.setOpenMobile(false)
+  }
   const conversations = workspace.sortedConversations
   const activeId = workspace.activeId
   const loading = workspace.loading
@@ -52,6 +57,7 @@ export const NavPanel = observer(function NavPanel({
   const handleNew = async () => {
     try {
       await workspace.createNew()
+      closeMobileNav()
     } catch (err) {
       console.error("createNew failed", err)
     }
@@ -88,7 +94,7 @@ export const NavPanel = observer(function NavPanel({
                     ? " (new)"
                     : "")
               }
-              onClick={() => workspace.setActive(c.id)}
+              onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
               className="relative"
             >
               <MessageSquare className="size-4" />
@@ -175,7 +181,7 @@ export const NavPanel = observer(function NavPanel({
               active={c.id === activeId}
               running={runningIds.has(c.id)}
               unread={unreadIds.has(c.id)}
-              onClick={() => workspace.setActive(c.id)}
+              onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
               onDelete={() => {
                 if (confirm("Delete this conversation?")) void workspace.remove(c.id)
               }}

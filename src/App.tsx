@@ -18,8 +18,10 @@ import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { Toaster } from "@/components/ui/sonner"
 import { workspace } from "@/models"
 import { useUrlSync } from "@/lib/url-sync"
+import { useTurnNotifications } from "@/hooks/use-turn-notifications"
 
 export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
@@ -27,6 +29,7 @@ export default function App() {
     <TooltipProvider delay={300}>
       <AuthProvider>
         <AuthGate />
+        <Toaster position="top-right" expand={false} richColors closeButton />
       </AuthProvider>
     </TooltipProvider>
   )
@@ -43,6 +46,9 @@ function AuthGate() {
 
   // Bind URL ↔ active conversation
   useUrlSync()
+
+  // Show toast notifications for background AI turn completions
+  useTurnNotifications()
 
   if (loading) {
     return (

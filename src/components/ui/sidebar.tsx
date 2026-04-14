@@ -51,6 +51,12 @@ function useSidebar() {
   return context
 }
 
+/** Like useSidebar but returns null when no provider is present — for
+ *  components rendered in both desktop (no provider) and mobile (provider). */
+function useSidebarOptional() {
+  return React.useContext(SidebarContext)
+}
+
 function SidebarProvider({
   defaultOpen = true,
   open: openProp,
@@ -718,4 +724,5 @@ export {
   SidebarSeparator,
   SidebarTrigger,
   useSidebar,
+  useSidebarOptional,
 }

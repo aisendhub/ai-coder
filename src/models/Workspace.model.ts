@@ -196,6 +196,12 @@ export class Workspace extends BaseModel {
             const unread = new Set(this.unreadIds)
             for (const id of newlyDone) unread.add(id)
             this.unreadIds = unread
+            // Notify UI so it can show toast notifications
+            window.dispatchEvent(
+              new CustomEvent("ai-coder:background-done", {
+                detail: { ids: newlyDone },
+              })
+            )
           }
           this.runningServerIds = next
         })

@@ -227,7 +227,7 @@ function FileCard({
   const dir = file.path.slice(0, file.path.length - name.length).replace(/\/$/, "")
 
   return (
-    <div className="rounded-md border bg-card overflow-hidden">
+    <div className="rounded-md border border-border/50 bg-card overflow-hidden">
       <button
         type="button"
         onClick={onToggle}
@@ -250,7 +250,7 @@ function FileCard({
         <StatusBadge status={file.status} />
       </button>
       {!collapsed && (
-        <div className="border-t text-[12px]">
+        <div className="border-t border-border/50 text-[12px]">
           <Diff file={file} />
         </div>
       )}
@@ -281,7 +281,7 @@ function SimpleDiff({ hunks }: { hunks: string[] }) {
   return (
     <div className="font-mono text-[12px] leading-snug">
       {hunks.map((hunk, i) => (
-        <div key={i} className="border-b last:border-b-0">
+        <div key={i} className="border-b border-border/40 last:border-b-0">
           {hunk.split("\n").map((line, j) => {
             const first = line[0]
             const cls =
