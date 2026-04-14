@@ -1,4 +1,7 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
+import type { ImperativePanelHandle } from "react-resizable-panels"
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import {
   ResizableHandle,
@@ -49,6 +52,13 @@ function DesktopLayout() {
   const [rightOpen, setRightOpen] = useState(true)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
+  const navRef = useRef<ImperativePanelHandle>(null)
+  const toggleNav = () => {
+    const panel = navRef.current
+    if (!panel) return
+    if (panel.isCollapsed()) panel.expand()
+    else panel.collapse()
+  }
   return (
     <ChatStateProvider>
       <div className="h-svh w-screen overflow-hidden">
@@ -58,6 +68,7 @@ function DesktopLayout() {
           className="h-full w-full"
         >
           <ResizablePanel
+            ref={navRef}
             id="nav"
             defaultSize={18}
             minSize={15}
@@ -68,8 +79,21 @@ function DesktopLayout() {
               setNavCollapsed(typeof size === "number" ? size < 6 : false)
             }
           >
-            <div className="h-full min-h-0 overflow-hidden border-r">
+            <div className="relative h-full min-h-0 overflow-hidden border-r">
               <NavPanel collapsed={navCollapsed} />
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleNav}
+                aria-label={navCollapsed ? "Expand nav" : "Collapse nav"}
+                className="absolute bottom-2 right-2 size-7 rounded-md bg-background/80 backdrop-blur hover:bg-accent shadow-xs border"
+              >
+                {navCollapsed ? (
+                  <PanelLeftOpen className="size-4" />
+                ) : (
+                  <PanelLeftClose className="size-4" />
+                )}
+              </Button>
             </div>
           </ResizablePanel>
           <ResizableHandle />
