@@ -455,7 +455,8 @@ app.post("/api/chat", async (c) => {
 
   let runner = runners.get(conversationId)
   if (runner && !runner.done) {
-    return c.json({ error: "conversation is busy" }, 409)
+    // Wait for the active runner to finish instead of rejecting.
+    await runner.promise.catch(() => {})
   }
 
   runner = await startRunner({
