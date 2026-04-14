@@ -131,16 +131,15 @@ export class Conversation extends BaseModel {
     if (this.messages.find(row.id)) return
     const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
     // Try to upgrade an optimistic local row: same role, matching text (user)
-    // or empty placeholder (assistant).
+    // or any optimistic assistant (its text may already be populated via SSE).
     const optimistic = this.messages.items.find(
       (m) =>
         m.isOptimistic &&
         m.role === row.role &&
-        ((row.role === "user" && m.text === row.text) ||
-          (row.role === "assistant" && m.text === ""))
+        (row.role === "assistant" || m.text === row.text)
     )
     if (optimistic) {
-      optimistic.setProps({ id: row.id, events })
+      optimistic.setProps({ id: row.id, events, isOptimistic: false })
       return
     }
     this.messages.addItem(
@@ -194,6 +193,7 @@ export class Conversation extends BaseModel {
           role: "user",
           text: prompt,
           events: [],
+          isOptimistic: true,
         })
       )
       this.messages.addItem(
@@ -202,6 +202,7 @@ export class Conversation extends BaseModel {
           role: "assistant",
           text: "",
           events: [],
+          isOptimistic: true,
         })
       )
       // First user prompt becomes the title

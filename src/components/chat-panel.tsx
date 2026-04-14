@@ -46,7 +46,9 @@ export const ChatPanel = observer(function ChatPanel() {
   }, [conversation, conversation?.lastAssistant?.events.length, recordFileTouch])
 
   const handleSend = async (prompt: string) => {
-    let target = conversation
+    // Always read the latest active from the store — never the closure value,
+    // which may be stale if the user just switched conversations.
+    let target = workspace.active
     if (!target) {
       try {
         target = await workspace.createNew()
@@ -55,6 +57,12 @@ export const ChatPanel = observer(function ChatPanel() {
         return
       }
     }
+    console.log(
+      "[chat] send",
+      target.id.slice(0, 6),
+      "streaming=" + target.streaming,
+      "queueLen=" + target.queue.length
+    )
     void target.send(prompt)
   }
 
