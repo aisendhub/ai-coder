@@ -31,21 +31,13 @@ export const ChatPanel = observer(function ChatPanel() {
   const { recordFileTouch } = useChatState()
   const bottomRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll on new content (text, events, or new messages).
-  // When the conversation itself changes (user clicked a different chat),
-  // scroll instantly; for incremental updates within the same chat, smooth.
+  // Auto-scroll instantly on conversation open, new messages, or streaming content.
   const activeId = conversation?.id
-  const prevActiveId = useRef(activeId)
   const messageCount = conversation?.messages.items.length ?? 0
   const lastText = conversation?.lastAssistant?.text.length ?? 0
   const lastEvents = conversation?.lastAssistant?.events.length ?? 0
   useEffect(() => {
-    const switched = prevActiveId.current !== activeId
-    prevActiveId.current = activeId
-    bottomRef.current?.scrollIntoView({
-      behavior: switched ? "instant" : "smooth",
-      block: "end",
-    })
+    bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" })
   }, [activeId, messageCount, lastText, lastEvents])
 
   // Wire tool_use events into the file-touch tracker for the side panel
