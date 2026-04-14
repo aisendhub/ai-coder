@@ -53,8 +53,8 @@ function DesktopLayout() {
     <ChatStateProvider>
       <div className="h-svh w-screen overflow-hidden">
         <ResizablePanelGroup
-          orientation="horizontal"
-          id="ai-coder-main-3pane"
+          direction="horizontal"
+          autoSaveId="ai-coder-main-3pane"
           className="h-full w-full"
         >
           <ResizablePanel
