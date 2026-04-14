@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitHorizontal, Upload } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -102,32 +102,34 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
         </div>
         <div className="flex items-center gap-1">
           <Tooltip>
-            <TooltipTrigger asChild>
+            <TooltipTrigger>
               <Button
                 size="sm"
                 variant="ghost"
                 onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
                 disabled={files.length === 0}
               >
-                <GitCommitHorizontal className="size-3.5" />
+                <GitCommitVertical className="size-3.5" />
+                Commit
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Commit changes</TooltipContent>
+            <TooltipContent>Commit all current changes</TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger asChild>
+            <TooltipTrigger>
               <Button
                 size="sm"
                 variant="ghost"
                 onClick={() => dispatchPrompt("Push the latest commits to the remote repository.")}
               >
-                <Upload className="size-3.5" />
+                <ArrowUpFromLine className="size-3.5" />
+                Push
               </Button>
             </TooltipTrigger>
             <TooltipContent>Push to remote</TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger asChild>
+            <TooltipTrigger>
               <Button
                 size="sm"
                 variant="ghost"

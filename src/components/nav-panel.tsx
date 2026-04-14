@@ -35,7 +35,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
         <Tooltip>
-          <TooltipTrigger asChild>
+          <TooltipTrigger>
             <Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew}>
               <Plus className="size-4" />
             </Button>
@@ -43,7 +43,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
           <TooltipContent side="right">New chat</TooltipContent>
         </Tooltip>
         <Tooltip>
-          <TooltipTrigger asChild>
+          <TooltipTrigger>
             <Button size="icon" variant="ghost" aria-label="Search">
               <Search className="size-4" />
             </Button>
@@ -67,7 +67,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
         </div>
         <div className="border-t w-full pt-1 flex justify-center">
           <Tooltip>
-            <TooltipTrigger asChild>
+            <TooltipTrigger>
               <Button
                 size="icon"
                 variant="ghost"
@@ -132,7 +132,7 @@ export function NavPanel({ collapsed = false, onToggle }: Props) {
       <div className="border-t flex items-center justify-between px-2 py-1.5">
         <div className="text-xs text-muted-foreground px-1">ai-coder · v0.1</div>
         <Tooltip>
-          <TooltipTrigger asChild>
+          <TooltipTrigger>
             <Button
               size="icon"
               variant="ghost"

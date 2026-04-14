@@ -56,19 +56,24 @@ export function ChatPanel() {
   const conversation = useActiveConversation()
   const { createNew, setSessionId, updateTitle } = useConversations()
   const conversationIdRef = useRef<string | null>(null)
+  const loadedConvIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages])
 
-  // Load history when active conversation changes
+  // Load history when active conversation changes — but skip if we've already
+  // loaded this conversation locally (e.g. just created via runPrompt).
   useEffect(() => {
     conversationIdRef.current = conversation?.id ?? null
     sessionIdRef.current = conversation?.session_id ?? undefined
     if (!conversation) {
+      loadedConvIdRef.current = null
       setMessages([])
       return
     }
+    if (loadedConvIdRef.current === conversation.id) return
+    loadedConvIdRef.current = conversation.id
     let cancelled = false
     listMessages(conversation.id)
       .then((rows) => {
@@ -96,6 +101,7 @@ export function ChatPanel() {
         const c = await createNew()
         convId = c.id
         conversationIdRef.current = c.id
+        loadedConvIdRef.current = c.id   // skip the auto-fetch on this id
         sessionIdRef.current = undefined
       } catch (err) {
         console.error("createNew failed", err)
@@ -483,7 +489,7 @@ function Composer({ onSend }: { onSend: (prompt: string) => void }) {
       />
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <Tooltip>
-          <TooltipTrigger asChild>
+          <TooltipTrigger>
             <Button
               type="button"
               variant="ghost"
@@ -499,7 +505,7 @@ function Composer({ onSend }: { onSend: (prompt: string) => void }) {
         </Tooltip>
         <input ref={fileInputRef} type="file" multiple className="hidden" />
         <Tooltip>
-          <TooltipTrigger asChild>
+          <TooltipTrigger>
             <Button
               type="button"
               size="icon"

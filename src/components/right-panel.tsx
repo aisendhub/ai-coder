@@ -62,7 +62,7 @@ export function RightPanelTrigger({
 
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
+      <TooltipTrigger>
         <Button
           variant="ghost"
           size="icon"
