@@ -316,14 +316,19 @@ export class Conversation extends BaseModel {
         })
       }
     } finally {
-      runInAction(() => {
-        this.streaming = false
-      })
       this.abortController = null
-      window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
-      // Drain queue
-      const next = this.queue.shift()
-      if (next) void this.runTurn(next)
+      // Drain queue – if another message is waiting, hand off directly
+      // without clearing the streaming flag so listeners know the AI is
+      // still actively responding.
+      const next = runInAction(() => this.queue.shift())
+      if (next) {
+        void this.runTurn(next)
+      } else {
+        runInAction(() => {
+          this.streaming = false
+        })
+        window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
+      }
     }
   }
 
