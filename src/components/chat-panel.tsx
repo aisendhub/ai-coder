@@ -337,7 +337,7 @@ function Composer({
   const canSend = value.trim().length > 0 || attachments.length > 0
 
   return (
-    <div className="rounded-xl border bg-background shadow-xs focus-within:ring-2 focus-within:ring-ring">
+    <div className="rounded-xl border bg-muted/40 shadow-xs focus-within:ring-2 focus-within:ring-ring">
       {/* Attachment preview strip */}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 px-3 pt-3">
