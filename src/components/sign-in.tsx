@@ -13,7 +13,7 @@ export function SignIn() {
         <div>
           <h1 className="text-2xl font-semibold">ai-coder</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Chat with Claude Code in a sandboxed workspace.
+            Chat with Claude Code on your host, scoped to your project.
           </p>
         </div>
         <Button className="w-full" onClick={signInWithGithub}>
@@ -21,7 +21,7 @@ export function SignIn() {
           Continue with GitHub
         </Button>
         <p className="text-xs text-muted-foreground">
-          GitHub grants access to clone your repos into sandboxes.
+          Sign in to create projects and keep conversations organized.
         </p>
       </div>
     </div>

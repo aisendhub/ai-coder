@@ -1,13 +1,13 @@
 # ai-coder
 
-Chat UI for Claude Code running per-user sandboxes with repo cloning + agentic editing.
+Chat UI for Claude Code running on the host VM with per-project working directories and agentic editing.
 
 ## Stack at a glance
 
 - **Frontend**: Vite + React + TypeScript + Tailwind v4 + shadcn
 - **Backend**: Node + Hono, streams SSE from the Claude Agent SDK
-- **Database**: Supabase Postgres (auth, conversations, messages) with RLS
-- **Sandboxes**: E2B microVM per conversation
+- **Database**: Supabase Postgres (auth, projects, conversations, messages) with RLS
+- **Execution**: Agent SDK runs on the host VM; each **project** has its own `cwd` on disk and scopes conversations. Container isolation (E2B / Firecracker) is **postponed** — revisit when multi-tenant isolation is needed.
 - **LLM**: `@anthropic-ai/claude-agent-sdk` spawning the `claude` CLI
 
 Docs:
@@ -21,7 +21,6 @@ Docs:
 - Repo: https://github.com/aisendhub/ai-coder
 - Railway project: https://railway.com/project/586773a1-919d-46bf-9dd0-1d7833287eb1
 - Supabase project: https://supabase.com/dashboard/project/ferkiusbpvgeyefdrdnp
-- E2B dashboard: https://e2b.dev/dashboard
 
 ## Local dev
 
@@ -39,7 +38,8 @@ Environment variables live in `.env` (gitignored) — copy from `.env.example`.
 - **Agent SDK must run in Node** with `child_process` + filesystem. Not compatible with Cloudflare Workers.
 - **RLS is on for every table.** Never use the service-role key in the browser. Anon key only client-side.
 - **One Supabase session per user, one Agent SDK session per conversation.** Session id lives in `conversations.session_id`.
-- **One E2B sandbox per conversation.** Sandbox id lives in `conversations.sandbox_id`. Paused on idle, resumed on next message.
+- **Projects own the cwd.** `projects.cwd` is an absolute path on the host; all conversations in a project inherit it. `PROJECTS_ROOT` env var (defaults to `dirname(process.cwd())`) sandboxes the directory browser.
+- **E2B / container isolation is postponed.** Schema keeps `conversations.sandbox_id` as a placeholder, unused at runtime. Don't wire sandbox code yet — host cwd only.
 
 ## Layout
 

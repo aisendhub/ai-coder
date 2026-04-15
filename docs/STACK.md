@@ -17,26 +17,25 @@ One-page reference for every moving part: what runs where, how to connect, how t
                 ┌──────────────────────────┐
                 │   Node service (Hono)    │
                 │   server/index.ts        │
-                │   - validates JWT        │
+                │   - resolves project.cwd │
                 │   - persists to Supabase │
-                │   - runs Agent SDK       │
-                │     (spawns `claude`     │
-                │      CLI in sandbox)     │
+                │   - runs Agent SDK on    │
+                │     host with that cwd   │
                 └───┬───────────────┬──────┘
                     │               │
                     ▼               ▼
          ┌──────────────┐   ┌──────────────────┐
-         │  Supabase    │   │  E2B sandbox     │
-         │  - Auth      │   │  (one per convo) │
-         │  - Postgres  │   │  - cloned repo   │
+         │  Supabase    │   │  Host filesystem │
+         │  - Auth      │   │  project.cwd     │
+         │  - Postgres  │   │  - user repo     │
          │  - Storage   │   │  - claude CLI    │
          └──────────────┘   └──────────────────┘
 ```
 
 - **Frontend**: Vite SPA. Auth via `@supabase/supabase-js`. Talks to `/api/*` over `fetch` + SSE.
-- **Backend**: Hono on Node. Verifies the Supabase session JWT, reads/writes `conversations` + `messages`, spawns/resumes E2B sandboxes, streams Agent SDK events back as SSE.
-- **Database**: Supabase Postgres with RLS. Single source of truth for users, conversations, messages.
-- **Sandbox**: E2B microVM per conversation. The `claude` CLI runs **inside** the sandbox so it has direct FS access to the cloned repo.
+- **Backend**: Hono on Node. Reads/writes `conversations` + `messages` via service-role, spawns the Agent SDK on the host with `cwd = project.cwd`, streams events back as SSE.
+- **Database**: Supabase Postgres with RLS. Source of truth for users, projects, conversations, messages.
+- **Execution**: host VM, per-project cwd. `PROJECTS_ROOT` env var sandboxes the directory browser (`GET /api/fs/list`). **Container / microVM isolation is postponed** — not wired today.
 - **LLM**: Claude Code subscription OAuth (personal) or API key (prod).
 
 ---
@@ -46,7 +45,7 @@ One-page reference for every moving part: what runs where, how to connect, how t
 | Service | Purpose | Env vars | Dashboard |
 |---|---|---|---|
 | **Supabase** | Auth + Postgres + Storage | `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `DATABASE_URL`, `DATABASE_POOLER_URL` | https://supabase.com/dashboard/project/ferkiusbpvgeyefdrdnp |
-| **E2B** | Per-user sandbox VMs | `E2B_API_KEY` | https://e2b.dev/dashboard |
+| ~~**E2B**~~ | ⏸️ Postponed — per-user microVMs (revisit for multi-tenant) | — | https://e2b.dev/dashboard |
 | **Anthropic** | LLM — via Claude Code CLI | `ANTHROPIC_API_KEY` (prod) or `claude /login` (dev) | https://console.anthropic.com |
 | **GitHub** | OAuth + repo cloning | Via Supabase GitHub provider | https://github.com/settings/developers |
 | **Google** | OAuth (secondary) | Via Supabase Google provider | https://console.cloud.google.com |
@@ -79,8 +78,9 @@ DATABASE_POOLER_URL=postgresql://postgres.ferkiusbpvgeyefdrdnp:<password>@aws-1-
 
 Source of truth: `supabase/migrations/*.sql`. Current tables:
 
-- `public.conversations` — `(id, user_id, title, session_id, sandbox_id, repo_url, created_at, updated_at)`
-- `public.messages` — `(id, conversation_id, role, text, events jsonb, created_at)`
+- `public.projects` — `(id, user_id, name, cwd, created_at, updated_at)`
+- `public.conversations` — `(id, user_id, project_id, title, session_id, sandbox_id, repo_url, created_at, updated_at)` — `sandbox_id` is a placeholder column reserved for future container isolation.
+- `public.messages` — `(id, conversation_id, role, text, events jsonb, attachments jsonb, created_at)`
 - Trigger: `messages_touch_conversation` bumps `conversations.updated_at` on each new message.
 - RLS: every policy gates on `auth.uid() = user_id` (directly or through the conversations join for messages).
 
@@ -165,33 +165,28 @@ pg_dump "$DATABASE_POOLER_URL" --no-owner --no-privileges > backup-$(date +%F).s
 
 ---
 
-## 5. Sandbox — E2B
+## 5. Execution — host cwd (projects)
 
-One sandbox per conversation. Lifecycle:
+The agent runs directly on the host VM. Each **project** owns a `cwd` path; conversations in that project inherit it.
 
-1. User starts a new conversation with a repo URL.
-2. Backend: `const sandbox = await Sandbox.create('node-git', { apiKey: E2B_API_KEY })`
-3. Backend: `await sandbox.commands.run('git clone ...')` using the user's GitHub token.
-4. Save `sandbox.id` to `conversations.sandbox_id`.
-5. Agent SDK: run `claude` **inside** the sandbox via `sandbox.commands.run("claude -p ... --output-format stream-json", { stdin, onStdout })` — stream stdout back to the browser as SSE.
-6. On conversation close / idle: `sandbox.pause()` (keeps FS, zero runtime cost). Resume on next message with `Sandbox.resume(id)`.
-7. On conversation delete: `sandbox.kill()`.
+Lifecycle:
 
-### Templates
+1. User creates a project via the nav; directory browser (`GET /api/fs/list`) walks subdirs under `PROJECTS_ROOT` (default: `dirname(process.cwd())`).
+2. Row inserted into `public.projects` with `(name, cwd)`.
+3. On a new conversation, row inserted into `public.conversations` with `project_id`.
+4. On each `POST /api/chat`, server resolves `project.cwd` for that conversation and passes it as the Agent SDK `options.cwd`.
+5. `/api/changes` (git porcelain) + the lazy `chokidar` watcher in `/api/changes/stream` also scope to the resolved cwd.
 
-E2B sandboxes run from a template image. We need one with: `git`, `node`, `claude` CLI pre-installed.
+### Env vars
 
-```sh
-e2b template init
-# edit e2b.Dockerfile — FROM node:20, RUN npm i -g @anthropic-ai/claude-code, RUN apt-get install -y git
-e2b template build --name ai-coder-node
-```
+| Var | Default | Purpose |
+|---|---|---|
+| `WORKSPACE_DIR` | `process.cwd()` | Fallback cwd for conversations whose project.cwd is `.` (legacy backfill). |
+| `PROJECTS_ROOT` | `dirname(process.cwd())` | Root of the directory browser sandbox. Users cannot pick paths outside this. |
 
-Template ID goes into the `Sandbox.create(templateId)` call.
+### ⏸️ Container isolation (postponed)
 
-### Quotas
-
-E2B pricing: ~$0.000024/sandbox-second running, cheap while paused. Watch the dashboard for runaway sandboxes — add a max-age cleanup cron.
+Originally planned: one E2B microVM per conversation, repo cloned with user's GitHub token, `claude` CLI run inside. **Deferred.** The schema keeps `conversations.sandbox_id` as a placeholder so we can wire it back in without another migration. Revisit when we need real multi-tenant isolation.
 
 ---
 
@@ -206,7 +201,7 @@ Two modes, mutually exclusive:
 
 Current setup: `server/index.ts` does `delete process.env.ANTHROPIC_API_KEY` so the CLI falls through to OAuth. For production, remove that line and set `ANTHROPIC_API_KEY` in the host's secret store.
 
-Inside E2B sandboxes: you'll set `ANTHROPIC_API_KEY` as a sandbox env var before invoking `claude`. Never mount the host's `~/.claude` OAuth token into a sandbox — that bypasses billing and breaks TOS at scale.
+When container isolation is revisited: set `ANTHROPIC_API_KEY` as a sandbox env var before invoking `claude`. Never mount the host's `~/.claude` OAuth token into a sandbox — that bypasses billing and breaks TOS at scale.
 
 ---
 
@@ -225,8 +220,9 @@ cp .env.example .env
 # Ensure `claude` CLI is logged in with your subscription
 claude /login
 
-# Run migrations (idempotent, safe to re-run)
+# Run migrations in order (idempotent, safe to re-run)
 PGPASSWORD="$DB_PASSWORD" psql "$DATABASE_POOLER_URL" -f supabase/migrations/0001_init.sql
+PGPASSWORD="$DB_PASSWORD" psql "$DATABASE_POOLER_URL" -f supabase/migrations/0002_projects.sql
 
 # Start both frontend + backend
 npm run dev
@@ -254,9 +250,9 @@ npm run dev
 | Tier | Recommended host | Notes |
 |---|---|---|
 | **Frontend** (Vite build) | Cloudflare Pages, Vercel, Netlify | Static SPA output; set `VITE_*` env vars at build time |
-| **Backend** (Hono + Agent SDK) | Fly.io Machines **or** Railway | Needs Node + `child_process` + outbound net to E2B, Anthropic, Supabase. **Not** Cloudflare Workers (no subprocess). |
+| **Backend** (Hono + Agent SDK) | Fly.io Machines **or** Railway | Needs Node + `child_process` + outbound net to Anthropic + Supabase. **Not** Cloudflare Workers (no subprocess). |
 | **Database** | Supabase (managed) | — |
-| **Sandboxes** | E2B (managed) | — |
+| ~~**Sandboxes**~~ | ⏸️ Postponed — E2B / Firecracker | Revisit for multi-tenant. |
 
 ### Recommended: Fly.io
 
@@ -273,9 +269,9 @@ fly launch --no-deploy --name ai-coder-api
 # Set secrets (not in fly.toml)
 fly secrets set \
   ANTHROPIC_API_KEY=sk-ant-... \
-  E2B_API_KEY=e2b_... \
   SUPABASE_SERVICE_ROLE_KEY=sb_secret_... \
-  DATABASE_POOLER_URL='postgresql://...'
+  DATABASE_POOLER_URL='postgresql://...' \
+  PROJECTS_ROOT=/workspaces
 
 # Deploy
 fly deploy
@@ -367,7 +363,6 @@ Never: commit, log, or send secrets to the browser unless prefixed `VITE_` **and
 Rotation:
 - Supabase DB password: dashboard → Settings → Database → Reset. Update `DATABASE_*` everywhere it's used.
 - Supabase API keys: dashboard → Settings → API → Rotate. Update `VITE_SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY`.
-- E2B: dashboard → API Keys → rotate.
 - Anthropic: https://console.anthropic.com/settings/keys.
 
 ---
@@ -376,8 +371,7 @@ Rotation:
 
 - **Fly metrics**: CPU, memory, request rate in `fly dashboard`.
 - **Supabase**: Dashboard → Logs → Postgres / API / Auth for query and auth events.
-- **E2B**: dashboard shows active sandboxes, per-sandbox runtime.
-- **App-level**: server logs every turn with `turnId`, event name, payload size — grep in Fly logs.
+- **App-level**: server logs every turn with `turnId`, event name, payload size — grep in Fly / Railway logs.
 - Add Sentry or similar on the frontend for unhandled errors once we have real users.
 
 ---
@@ -388,7 +382,6 @@ Onboarding a new developer:
 
 - [ ] GitHub push access to `fijiwebdesign/ai-coder`
 - [ ] Supabase project membership (`ferkiusbpvgeyefdrdnp`)
-- [ ] E2B team membership
 - [ ] Anthropic console access (prod key) — optional for local if using subscription
 - [ ] Fly.io team access — prod only
 - [ ] Cloudflare account access — prod only
@@ -402,7 +395,6 @@ Creating fresh infra from scratch (if we ever rebuild):
 - [ ] Supabase project + run all migrations in order
 - [ ] GitHub OAuth app → paste into Supabase
 - [ ] Google OAuth app → paste into Supabase
-- [ ] E2B account + build template image (`ai-coder-node`)
 - [ ] Anthropic API key (for prod LLM billing)
 - [ ] Fly.io app + Dockerfile + secrets
 - [ ] Cloudflare Pages site + redirects

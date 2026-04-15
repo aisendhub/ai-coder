@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { observer } from "mobx-react-lite"
 import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -32,17 +33,24 @@ async function dispatchPrompt(prompt: string) {
   void target.send(prompt)
 }
 
-export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
+export const CodePanel = observer(function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
+  const conversationId = workspace.active?.id ?? null
   const [data, setData] = useState<ChangesResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
 
   const fetchChanges = useCallback(async () => {
+    if (!conversationId) {
+      setData(null)
+      setError(null)
+      setLoading(false)
+      return
+    }
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch("/api/changes")
+      const res = await fetch(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = (await res.json()) as ChangesResponse
       setData(json)
@@ -51,7 +59,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [conversationId])
 
   // Auto-retry on error with exponential backoff (2s, 4s, 8s, …, max 30s)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -82,11 +90,13 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
   useEffect(() => {
     fetchChanges()
 
+    if (!conversationId) return
+
     let es: EventSource | null = null
     let esRetry: ReturnType<typeof setTimeout> | null = null
 
     function connectSSE() {
-      es = new EventSource("/api/changes/stream")
+      es = new EventSource(`/api/changes/stream?conversationId=${encodeURIComponent(conversationId)}`)
       es.addEventListener("ready", debouncedRefetch)
       es.addEventListener("changed", debouncedRefetch)
       es.onerror = () => {
@@ -106,7 +116,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
       window.removeEventListener("ai-coder:turn-done", onTurnDone)
       if (refetchTimer.current) clearTimeout(refetchTimer.current)
     }
-  }, [fetchChanges, debouncedRefetch])
+  }, [fetchChanges, debouncedRefetch, conversationId])
 
   const files = data?.files ?? []
 
@@ -212,7 +222,7 @@ export function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
       </ScrollArea>
     </div>
   )
-}
+})
 
 function FileCard({
   file,

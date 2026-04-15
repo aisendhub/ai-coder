@@ -13,6 +13,7 @@ class MessageList extends BaseList<typeof Message> {
 
 export class Conversation extends BaseModel {
   @observable userId = ""
+  @observable projectId = ""
   @observable title = "New chat"
   @observable sessionId: string | null = null
   @observable sandboxId: string | null = null
@@ -48,6 +49,7 @@ export class Conversation extends BaseModel {
   @action setFromRow(row: {
     id: string
     user_id: string
+    project_id: string
     title: string
     session_id: string | null
     sandbox_id: string | null
@@ -57,6 +59,7 @@ export class Conversation extends BaseModel {
   }) {
     this.id = row.id
     this.userId = row.user_id
+    this.projectId = row.project_id
     this.title = row.title
     this.sessionId = row.session_id
     this.sandboxId = row.sandbox_id

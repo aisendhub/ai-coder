@@ -15,14 +15,22 @@ import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { MessageParam } from "@anthropic-ai/sdk/resources"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { resolve } from "node:path"
+import { dirname, resolve, basename } from "node:path"
+import { promises as fsp } from "node:fs"
 import chokidar from "chokidar"
 import { EventEmitter } from "node:events"
 import { createClient } from "@supabase/supabase-js"
 
 const execFileP = promisify(execFile)
 
+// Default working dir for legacy conversations (project.cwd = '.').
 const WORKSPACE_DIR = resolve(process.env.WORKSPACE_DIR ?? process.cwd())
+
+// Everything the directory browser is allowed to traverse. Defaults to the
+// parent of the install directory — typically where sibling repos live.
+const PROJECTS_ROOT = resolve(
+  process.env.PROJECTS_ROOT ?? dirname(process.cwd())
+)
 
 // Supabase admin client — service-role key bypasses RLS so the server can
 // own all message persistence, regardless of which (or no) user is connected.
@@ -37,30 +45,74 @@ const sb = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
 if (!sb) console.warn("[warn] Supabase service-role not configured; persistence disabled")
 
 // ─────────────────────────────────────────────────────────────────────────────
-// File-system watcher (changes panel)
+// Project cwd resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fsBus = new EventEmitter()
-fsBus.setMaxListeners(100)
-
-const watcher = chokidar.watch(WORKSPACE_DIR, {
-  ignored: [
-    /(^|[/\\])\.git([/\\]|$)/,
-    /(^|[/\\])node_modules([/\\]|$)/,
-    /(^|[/\\])dist([/\\]|$)/,
-    /(^|[/\\])\.next([/\\]|$)/,
-    /(^|[/\\])\.cache([/\\]|$)/,
-  ],
-  ignoreInitial: true,
-  awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
-})
-
-let debounce: NodeJS.Timeout | null = null
-const notify = (path: string) => {
-  if (debounce) clearTimeout(debounce)
-  debounce = setTimeout(() => fsBus.emit("changed", { path, at: Date.now() }), 200)
+/** Resolve a project cwd string to an absolute path.
+ *  '.' (the backfill marker) falls back to WORKSPACE_DIR. */
+function resolveProjectCwd(cwd: string): string {
+  if (!cwd || cwd === ".") return WORKSPACE_DIR
+  return resolve(cwd)
 }
-watcher.on("add", notify).on("change", notify).on("unlink", notify).on("addDir", notify).on("unlinkDir", notify)
+
+async function cwdForConversation(conversationId: string): Promise<string> {
+  if (!sb) return WORKSPACE_DIR
+  const { data: conv, error: convErr } = await sb
+    .from("conversations")
+    .select("project_id")
+    .eq("id", conversationId)
+    .single()
+  if (convErr || !conv?.project_id) {
+    console.warn("[cwd] no project_id for conv", conversationId, convErr?.message)
+    return WORKSPACE_DIR
+  }
+  const { data: proj, error: projErr } = await sb
+    .from("projects")
+    .select("cwd")
+    .eq("id", conv.project_id)
+    .single()
+  if (projErr || !proj?.cwd) {
+    console.warn("[cwd] project lookup failed", conv.project_id, projErr?.message)
+    return WORKSPACE_DIR
+  }
+  const resolved = resolveProjectCwd(proj.cwd)
+  console.log("[cwd]", conversationId.slice(0, 8), "→", resolved)
+  return resolved
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File-system watcher (changes panel) — lazy, one per cwd
+// ─────────────────────────────────────────────────────────────────────────────
+
+type WatcherEntry = { bus: EventEmitter; watcher: ReturnType<typeof chokidar.watch> }
+const watchers = new Map<string, WatcherEntry>()
+
+function getWatcher(cwd: string): WatcherEntry {
+  const existing = watchers.get(cwd)
+  if (existing) return existing
+  const bus = new EventEmitter()
+  bus.setMaxListeners(100)
+  const watcher = chokidar.watch(cwd, {
+    ignored: [
+      /(^|[/\\])\.git([/\\]|$)/,
+      /(^|[/\\])node_modules([/\\]|$)/,
+      /(^|[/\\])dist([/\\]|$)/,
+      /(^|[/\\])\.next([/\\]|$)/,
+      /(^|[/\\])\.cache([/\\]|$)/,
+    ],
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+  })
+  let debounce: NodeJS.Timeout | null = null
+  const notify = (path: string) => {
+    if (debounce) clearTimeout(debounce)
+    debounce = setTimeout(() => bus.emit("changed", { path, at: Date.now() }), 200)
+  }
+  watcher.on("add", notify).on("change", notify).on("unlink", notify).on("addDir", notify).on("unlinkDir", notify)
+  const entry = { bus, watcher }
+  watchers.set(cwd, entry)
+  return entry
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-conversation runner — agent loop is detached from the HTTP request
@@ -113,7 +165,8 @@ async function startRunner(args: {
     const log = (event: string, payload: Record<string, unknown> = {}) => {
       console.log(`[${turnId} conv=${conversationId.slice(0, 6)}] ${event}`, payload)
     }
-    log("turn.start", { prompt: prompt.slice(0, 80), resume: resumeSessionId })
+    const cwd = await cwdForConversation(conversationId)
+    log("turn.start", { prompt: prompt.slice(0, 80), resume: resumeSessionId, cwd })
 
     let assistantText = ""
     const assistantEvents: StreamEvent[] = []
@@ -235,7 +288,7 @@ async function startRunner(args: {
         prompt: queryPrompt,
         options: {
           resume: resumeSessionId,
-          cwd: WORKSPACE_DIR,
+          cwd,
           permissionMode: "bypassPermissions",
           settingSources: [],
           includePartialMessages: false,
@@ -335,16 +388,29 @@ async function startRunner(args: {
 const app = new Hono()
 
 app.get("/api/health", (c) =>
-  c.json({ ok: true, workspace: WORKSPACE_DIR, runners: runners.size })
+  c.json({
+    ok: true,
+    workspace: WORKSPACE_DIR,
+    projectsRoot: PROJECTS_ROOT,
+    runners: runners.size,
+  })
 )
 
-// SSE for git changes
+// SSE for git changes — scoped to a conversation's project cwd.
 app.get("/api/changes/stream", (c) => {
   return streamSSE(c, async (stream) => {
+    const conversationId = c.req.query("conversationId")
+    if (!conversationId) {
+      await stream.writeSSE({ event: "ready", data: "{}" })
+      await new Promise<void>((r) => stream.onAbort(r))
+      return
+    }
+    const cwd = await cwdForConversation(conversationId)
+    const { bus } = getWatcher(cwd)
     const onChanged = (data: { path: string; at: number }) => {
       void stream.writeSSE({ event: "changed", data: JSON.stringify(data) })
     }
-    fsBus.on("changed", onChanged)
+    bus.on("changed", onChanged)
     await stream.writeSSE({ event: "ready", data: "{}" })
     const hb = setInterval(() => {
       void stream.writeSSE({ event: "ping", data: "{}" })
@@ -352,7 +418,7 @@ app.get("/api/changes/stream", (c) => {
     await new Promise<void>((resolveStream) => {
       stream.onAbort(() => {
         clearInterval(hb)
-        fsBus.off("changed", onChanged)
+        bus.off("changed", onChanged)
         resolveStream()
       })
     })
@@ -361,25 +427,52 @@ app.get("/api/changes/stream", (c) => {
 
 app.get("/api/changes", async (c) => {
   try {
+    const conversationId = c.req.query("conversationId")
+    if (!conversationId) {
+      return c.json({ workspace: "", files: [], unpushedCount: 0 })
+    }
+    const cwd = await cwdForConversation(conversationId)
     const { stdout: porcelain } = await execFileP(
       "git",
       ["status", "--porcelain=v1", "-z"],
-      { cwd: WORKSPACE_DIR, maxBuffer: 5 * 1024 * 1024 }
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
     )
     const files = parsePorcelain(porcelain)
     const withDiffs = await Promise.all(
-      files.map(async (f) => ({ ...f, diff: await fileDiff(f) }))
+      files.map(async (f) => ({ ...f, diff: await fileDiff(cwd, f) }))
     )
     let unpushedCount = 0
     try {
-      const { stdout } = await execFileP("git", ["rev-list", "--count", "@{u}..HEAD"], {
-        cwd: WORKSPACE_DIR,
-      })
+      const { stdout } = await execFileP("git", ["rev-list", "--count", "@{u}..HEAD"], { cwd })
       unpushedCount = parseInt(stdout.trim(), 10) || 0
     } catch {
       // no upstream
     }
-    return c.json({ workspace: WORKSPACE_DIR, files: withDiffs, unpushedCount })
+    return c.json({ workspace: cwd, files: withDiffs, unpushedCount })
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+// Directory browser — lists subdirectories of `path`. Defaults to PROJECTS_ROOT
+// but allows traversal anywhere the server process can read (single-tenant host).
+app.get("/api/fs/list", async (c) => {
+  try {
+    const raw = c.req.query("path") ?? PROJECTS_ROOT
+    const target = resolve(raw)
+    const entries = await fsp.readdir(target, { withFileTypes: true })
+    const dirs = entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => ({ name: e.name, path: resolve(target, e.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+    const parent = target === "/" ? null : dirname(target)
+    return c.json({
+      root: PROJECTS_ROOT,
+      path: target,
+      name: basename(target) || target,
+      parent,
+      dirs,
+    })
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
@@ -414,11 +507,11 @@ function parsePorcelain(z: string): ChangedFile[] {
   return files
 }
 
-async function fileDiff(f: ChangedFile): Promise<string> {
+async function fileDiff(cwd: string, f: ChangedFile): Promise<string> {
   try {
     if (f.status === "untracked") {
       const { stdout } = await execFileP("cat", [f.path], {
-        cwd: WORKSPACE_DIR,
+        cwd,
         maxBuffer: 5 * 1024 * 1024,
       }).catch(() => ({ stdout: "" }))
       return stdout
@@ -428,7 +521,7 @@ async function fileDiff(f: ChangedFile): Promise<string> {
         ? ["diff", "HEAD", "--", f.oldPath, f.path]
         : ["diff", "HEAD", "--", f.path]
     const { stdout } = await execFileP("git", args, {
-      cwd: WORKSPACE_DIR,
+      cwd,
       maxBuffer: 5 * 1024 * 1024,
     })
     return stdout

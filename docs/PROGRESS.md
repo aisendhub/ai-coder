@@ -40,17 +40,26 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · 🚫 blocked
 - ⬜ Backend: capture GitHub `provider_token` on sign-in, store for repo cloning
 - ⬜ Generate TypeScript types from schema (`supabase gen types`)
 
-## Phase 3 — E2B sandboxes
+## Phase 3 — Projects (host cwd)
 
-- ✅ E2B account + API key in `.env`
-- ⬜ Build E2B template image (`ai-coder-node`: git + node + claude CLI)
-- ⬜ Create sandbox on new conversation, save id to `conversations.sandbox_id`
-- ⬜ Clone user's repo into sandbox using GitHub OAuth token
-- ⬜ Run Agent SDK inside the sandbox (not on the host)
-- ⬜ Pause sandbox on idle, resume on next message
-- ⬜ Kill sandbox on conversation delete
-- ⬜ Cron/cleanup job for orphaned sandboxes
-- ⬜ Surface file-tree + diff of in-flight changes in the right panel
+- ✅ Migration `0002_projects.sql` (projects table, RLS, `conversations.project_id`)
+- ✅ Server resolves `cwd` per conversation from `projects.cwd`
+- ✅ `GET /api/fs/list` directory browser sandboxed under `PROJECTS_ROOT`
+- ✅ Project switcher + new-project dialog in nav
+- ✅ Conversations scoped to active project
+- ⬜ Optional: per-project git status cached (today re-runs on every request)
+- ✅ Surface file-tree + diff of in-flight changes in the right panel
+
+## Phase 3b — Container / microVM isolation ⏸️ POSTPONED
+
+Revisit when we actually need multi-tenant isolation. Schema keeps `sandbox_id` as a placeholder.
+
+- ⏸️ E2B (or Firecracker/Fly Machines) template image
+- ⏸️ Create sandbox on new conversation
+- ⏸️ Clone user's repo into sandbox using GitHub OAuth token
+- ⏸️ Run Agent SDK inside the sandbox
+- ⏸️ Pause on idle, resume on next message
+- ⏸️ Cron/cleanup job for orphaned sandboxes
 
 ## Phase 4 — Deployment
 
@@ -86,7 +95,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · 🚫 blocked
 ## Decisions log
 
 - **Backend host**: Railway (cheapest quick deploy, $5/mo Hobby credit).
-- **Sandbox provider**: E2B (purpose-built per-user microVMs, pause/resume).
+- **Execution**: host cwd per project, no container isolation yet. E2B/Firecracker deferred until multi-tenant.
 - **Auth provider**: Supabase (managed GitHub + Google OAuth).
 - **Primary OAuth**: GitHub (grants `repo` scope for cloning private repos).
 - **LLM runner**: Claude Agent SDK spawning `claude` CLI. Subscription OAuth in dev, API key in prod.

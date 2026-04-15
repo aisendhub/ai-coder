@@ -3,10 +3,34 @@
 export type Database = {
   public: {
     Tables: {
+      projects: {
+        Row: {
+          id: string
+          user_id: string
+          name: string
+          cwd: string
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          name: string
+          cwd: string
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          name?: string
+          cwd?: string
+          updated_at?: string
+        }
+      }
       conversations: {
         Row: {
           id: string
           user_id: string
+          project_id: string
           title: string
           session_id: string | null
           sandbox_id: string | null
@@ -17,6 +41,7 @@ export type Database = {
         Insert: {
           id?: string
           user_id: string
+          project_id: string
           title?: string
           session_id?: string | null
           sandbox_id?: string | null
@@ -26,6 +51,7 @@ export type Database = {
         }
         Update: {
           title?: string
+          project_id?: string
           session_id?: string | null
           sandbox_id?: string | null
           repo_url?: string | null

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
+import { FolderGit2, MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -8,6 +8,15 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { workspace } from "@/models"
 import { cn } from "@/lib/utils"
 import { useSidebarOptional } from "@/components/ui/sidebar"
+import { NewProjectDialog } from "@/components/new-project-dialog"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 type Props = {
   collapsed?: boolean
@@ -45,7 +54,10 @@ export const NavPanel = observer(function NavPanel({
   const loading = workspace.loading
   const runningIds = workspace.runningServerIds
   const unreadIds = workspace.unreadIds
+  const projects = workspace.sortedProjects
+  const activeProject = workspace.activeProject
   const [query, setQuery] = useState("")
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const { dark, toggle: toggleTheme } = useTheme()
 
   const filtered = query
@@ -55,6 +67,10 @@ export const NavPanel = observer(function NavPanel({
     : conversations
 
   const handleNew = async () => {
+    if (!activeProject) {
+      setProjectDialogOpen(true)
+      return
+    }
     try {
       await workspace.createNew()
       closeMobileNav()
@@ -63,9 +79,12 @@ export const NavPanel = observer(function NavPanel({
     }
   }
 
+  const dialog = <NewProjectDialog open={projectDialogOpen} onClose={() => setProjectDialogOpen(false)} />
+
   if (collapsed) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar text-sidebar-foreground py-2 gap-1">
+        {dialog}
         <Tooltip>
           <TooltipTrigger render={<Button size="icon" variant="ghost" aria-label="New chat" onClick={handleNew} />}>
             <Plus className="size-4" />
@@ -144,10 +163,44 @@ export const NavPanel = observer(function NavPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground">
+      {dialog}
       <div className="p-2 flex flex-col gap-2 border-b">
+        <div className="flex items-center gap-3">
+          <FolderGit2 className="size-4 text-muted-foreground shrink-0" />
+          <Select
+            value={activeProject?.id ?? ""}
+            onValueChange={(v: string) => {
+              if (v === "__new__") setProjectDialogOpen(true)
+              else workspace.setActiveProject(v || null)
+            }}
+          >
+            <SelectTrigger className="flex-1 min-w-0" aria-label="Project">
+              <SelectValue placeholder="No projects">
+                {(value: string) =>
+                  projects.find((p) => p.id === value)?.name ?? "No projects"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.name}
+                </SelectItem>
+              ))}
+              {projects.length > 0 && <SelectSeparator />}
+              <SelectItem value="__new__">+ New project…</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {activeProject && (
+          <div className="text-[10px] text-muted-foreground px-1 font-mono truncate" title={activeProject.cwd}>
+            {activeProject.cwd}
+          </div>
+        )}
         <Button
           className="w-full justify-start gap-2"
           onClick={handleNew}
+          disabled={!activeProject}
         >
           <Plus className="size-4" />
           New chat
