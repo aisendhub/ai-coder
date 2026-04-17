@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, GitBranch } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -18,6 +18,7 @@ type ChangesResponse = {
   workspace: string
   files: ChangedFile[]
   unpushedCount: number
+  branch: string
 }
 
 async function dispatchPrompt(prompt: string) {
@@ -39,6 +40,7 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
+  const [search, setSearch] = useState("")
 
   const fetchChanges = useCallback(async () => {
     if (!conversationId) {
@@ -120,6 +122,28 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
 
   const files = data?.files ?? []
 
+  const filteredFiles = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return files
+    return files.filter(
+      (f) =>
+        f.path.toLowerCase().includes(q) ||
+        f.diff.toLowerCase().includes(q)
+    )
+  }, [files, search])
+
+  const collapseAll = useCallback(() => {
+    const next: Record<string, boolean> = {}
+    for (const f of filteredFiles) next[f.path] = false
+    setOpenCards((prev) => ({ ...prev, ...next }))
+  }, [filteredFiles])
+
+  const expandAll = useCallback(() => {
+    const next: Record<string, boolean> = {}
+    for (const f of filteredFiles) next[f.path] = true
+    setOpenCards((prev) => ({ ...prev, ...next }))
+  }, [filteredFiles])
+
   if (collapsed) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center py-2 gap-1">
@@ -143,55 +167,91 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
 
   return (
     <div className="flex h-full flex-col min-h-0">
-      <div className="flex h-14 shrink-0 items-center justify-between px-3 border-b">
-        <div className="flex items-center gap-2 min-w-0">
-          <FileCode className="size-4 shrink-0" />
-          <h2 className="text-sm font-medium">Changes</h2>
-          <span className="text-xs text-muted-foreground">{files.length}</span>
+      <div className="shrink-0 border-b">
+        <div className="flex h-14 items-center justify-between px-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileCode className="size-4 shrink-0" />
+            <h2 className="text-sm font-medium">Changes</h2>
+            <span className="text-xs text-muted-foreground">{files.length}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
+                  disabled={files.length === 0}
+                >
+                  <GitCommitVertical className="size-3.5" />
+                  Commit
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Commit all current changes</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => dispatchPrompt(files.length > 0
+                    ? "Commit the latest changes with a concise message and then push."
+                    : "Push the latest commits to the remote repository.")}
+                  disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
+                >
+                  <ArrowUpFromLine className="size-3.5" />
+                  Push
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Push to remote</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={fetchChanges}
+                  disabled={loading}
+                >
+                  <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Refresh changes</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
-        <div className="flex items-center gap-1">
+        {data?.branch && (
+          <div className="flex items-center gap-1.5 px-3 pb-2 text-xs text-muted-foreground">
+            <GitBranch className="size-3 shrink-0" />
+            <span className="truncate font-mono">{data.branch}</span>
+          </div>
+        )}
+        <div className="flex items-center gap-1 px-3 pb-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Filter files…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-7 w-full rounded-md border bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
           <Tooltip>
             <TooltipTrigger>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
-                disabled={files.length === 0}
-              >
-                <GitCommitVertical className="size-3.5" />
-                Commit
+              <Button size="sm" variant="ghost" onClick={expandAll} disabled={filteredFiles.length === 0}>
+                <ChevronsUpDown className="size-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Commit all current changes</TooltipContent>
+            <TooltipContent>Expand all</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => dispatchPrompt(files.length > 0
-                  ? "Commit the latest changes with a concise message and then push."
-                  : "Push the latest commits to the remote repository.")}
-                disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
-              >
-                <ArrowUpFromLine className="size-3.5" />
-                Push
+              <Button size="sm" variant="ghost" onClick={collapseAll} disabled={filteredFiles.length === 0}>
+                <ChevronsDownUp className="size-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Push to remote</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={fetchChanges}
-                disabled={loading}
-              >
-                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Refresh changes</TooltipContent>
+            <TooltipContent>Collapse all</TooltipContent>
           </Tooltip>
         </div>
       </div>
@@ -207,8 +267,13 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
             No uncommitted changes.
           </div>
         )}
+        {files.length > 0 && filteredFiles.length === 0 && search && (
+          <div className="p-6 text-center text-xs text-muted-foreground">
+            No files matching &ldquo;{search}&rdquo;
+          </div>
+        )}
         <div className="flex flex-col gap-2 p-2">
-          {files.map((f) => (
+          {filteredFiles.map((f) => (
             <FileCard
               key={f.path}
               file={f}

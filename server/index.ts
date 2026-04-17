@@ -429,7 +429,7 @@ app.get("/api/changes", async (c) => {
   try {
     const conversationId = c.req.query("conversationId")
     if (!conversationId) {
-      return c.json({ workspace: "", files: [], unpushedCount: 0 })
+      return c.json({ workspace: "", files: [], unpushedCount: 0, branch: "" })
     }
     const cwd = await cwdForConversation(conversationId)
     const { stdout: porcelain } = await execFileP(
@@ -448,7 +448,14 @@ app.get("/api/changes", async (c) => {
     } catch {
       // no upstream
     }
-    return c.json({ workspace: cwd, files: withDiffs, unpushedCount })
+    let branch = ""
+    try {
+      const { stdout } = await execFileP("git", ["branch", "--show-current"], { cwd })
+      branch = stdout.trim()
+    } catch {
+      // not a git repo or detached HEAD
+    }
+    return c.json({ workspace: cwd, files: withDiffs, unpushedCount, branch })
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
@@ -593,6 +600,7 @@ if (process.env.NODE_ENV === "production") {
 }
 
 const port = Number(process.env.PORT ?? 3001)
-serve({ fetch: app.fetch, port }, ({ port }) => {
-  console.log(`ai-coder backend listening on :${port}`)
+const hostname = process.env.HOST ?? "127.0.0.1"
+serve({ fetch: app.fetch, port, hostname }, ({ address, port }) => {
+  console.log(`ai-coder backend listening on ${address}:${port}`)
 })
