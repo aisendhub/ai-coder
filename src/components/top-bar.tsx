@@ -2,18 +2,22 @@ import { observer } from "mobx-react-lite"
 import { Sparkles } from "lucide-react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
-import { RightPanelTrigger } from "@/components/right-panel"
+import { ChangesTrigger, TerminalTrigger } from "@/components/right-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { workspace } from "@/models"
 
 type Props = {
   rightOpen: boolean
   onRightOpenChange: (open: boolean) => void
+  terminalOpen: boolean
+  onTerminalOpenChange: (open: boolean) => void
 }
 
 export const TopBar = observer(function TopBar({
   rightOpen,
   onRightOpenChange,
+  terminalOpen,
+  onTerminalOpenChange,
 }: Props) {
   const title = workspace.active?.title ?? "New chat"
   const isMobile = useIsMobile()
@@ -36,7 +40,10 @@ export const TopBar = observer(function TopBar({
           </div>
         </div>
       </div>
-      <RightPanelTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
+      <div className="flex items-center gap-0.5">
+        <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
+        <TerminalTrigger open={terminalOpen} onOpenChange={onTerminalOpenChange} />
+      </div>
     </header>
   )
 })

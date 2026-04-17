@@ -20,6 +20,8 @@ import { promises as fsp } from "node:fs"
 import chokidar from "chokidar"
 import { EventEmitter } from "node:events"
 import { createClient } from "@supabase/supabase-js"
+import * as pty from "node-pty"
+import { WebSocketServer } from "ws"
 
 const execFileP = promisify(execFile)
 
@@ -601,6 +603,74 @@ if (process.env.NODE_ENV === "production") {
 
 const port = Number(process.env.PORT ?? 3001)
 const hostname = process.env.HOST ?? "127.0.0.1"
-serve({ fetch: app.fetch, port, hostname }, ({ address, port }) => {
+const server = serve({ fetch: app.fetch, port, hostname }, ({ address, port }) => {
   console.log(`ai-coder backend listening on ${address}:${port}`)
+})
+
+// ── Terminal PTY over WebSocket ──────────────────────────────────────────────
+const wss = new WebSocketServer({ noServer: true })
+
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url ?? "", `http://${req.headers.host}`)
+  if (url.pathname !== "/api/terminal") {
+    socket.destroy()
+    return
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req)
+  })
+})
+
+wss.on("connection", (ws, req) => {
+  const url = new URL(req.url ?? "", `http://${req.headers.host}`)
+  const cwd = url.searchParams.get("cwd") || WORKSPACE_DIR
+  const cols = parseInt(url.searchParams.get("cols") ?? "80", 10)
+  const rows = parseInt(url.searchParams.get("rows") ?? "24", 10)
+  const shell = process.env.SHELL || "/bin/bash"
+
+  let term: pty.IPty
+  try {
+    term = pty.spawn(shell, [], {
+      name: "xterm-256color",
+      cols,
+      rows,
+      cwd,
+      env: process.env as Record<string, string>,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error("[terminal] pty.spawn failed:", message)
+    if (ws.readyState === ws.OPEN) {
+      ws.send(`\r\n\x1b[31m[terminal] failed to spawn shell: ${message}\x1b[0m\r\n`)
+      ws.close()
+    }
+    return
+  }
+
+  term.onData((data) => {
+    if (ws.readyState === ws.OPEN) ws.send(data)
+  })
+
+  term.onExit(() => {
+    if (ws.readyState === ws.OPEN) ws.close()
+  })
+
+  ws.on("message", (msg) => {
+    const str = msg.toString()
+    // Resize messages are JSON: {"type":"resize","cols":N,"rows":N}
+    if (str.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(str)
+        if (parsed.type === "resize") {
+          term.resize(parsed.cols, parsed.rows)
+          return
+        }
+      } catch { /* not JSON, treat as input */ }
+    }
+    term.write(str)
+  })
+
+  ws.on("close", () => {
+    try { term.kill() } catch { /* already exited */ }
+  })
 })

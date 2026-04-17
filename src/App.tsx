@@ -10,6 +10,7 @@ import { AppSidebar } from "@/components/app-sidebar"
 import { NavPanel } from "@/components/nav-panel"
 import { ChatPanel } from "@/components/chat-panel"
 import { CodePanel } from "@/components/code-panel"
+import { TerminalPanel } from "@/components/terminal-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { TopBar } from "@/components/top-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -69,6 +70,7 @@ function Workspace() {
 
 function DesktopLayout() {
   const [rightOpen, setRightOpen] = useState(true)
+  const [terminalOpen, setTerminalOpen] = useState(false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
   const navRef = useRef<ImperativePanelHandle>(null)
@@ -108,6 +110,8 @@ function DesktopLayout() {
               <TopBar
                 rightOpen={rightOpen}
                 onRightOpenChange={setRightOpen}
+                terminalOpen={terminalOpen}
+                onTerminalOpenChange={setTerminalOpen}
               />
               <div className="flex-1 min-h-0 overflow-hidden">
                 <ChatPanel />
@@ -134,6 +138,21 @@ function DesktopLayout() {
               </ResizablePanel>
             </>
           )}
+          {terminalOpen && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel
+                id="terminal"
+                defaultSize={28}
+                minSize={18}
+                maxSize={60}
+              >
+                <div className="h-full min-h-0 overflow-hidden border-l">
+                  <TerminalPanel />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
         </ResizablePanelGroup>
       </div>
     </ChatStateProvider>
@@ -142,12 +161,18 @@ function DesktopLayout() {
 
 function MobileLayout() {
   const [rightOpen, setRightOpen] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
   return (
     <ChatStateProvider>
       <SidebarProvider style={{ height: "100svh" } as React.CSSProperties}>
         <AppSidebar />
         <SidebarInset className="h-svh min-w-0 flex-1 flex flex-col overflow-hidden">
-          <TopBar rightOpen={rightOpen} onRightOpenChange={setRightOpen} />
+          <TopBar
+            rightOpen={rightOpen}
+            onRightOpenChange={setRightOpen}
+            terminalOpen={terminalOpen}
+            onTerminalOpenChange={setTerminalOpen}
+          />
           <div className="flex-1 min-h-0 overflow-hidden">
             <ChatPanel />
           </div>

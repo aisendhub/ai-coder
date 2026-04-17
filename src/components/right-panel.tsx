@@ -1,4 +1,4 @@
-import { PanelRightClose, PanelRightOpen } from "lucide-react"
+import { GitBranch, Terminal as TerminalIcon, PanelRightOpen } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -32,7 +32,7 @@ export function RightPanel({ open }: Props) {
   )
 }
 
-export function RightPanelTrigger({
+export function ChangesTrigger({
   open,
   onOpenChange,
 }: {
@@ -69,16 +69,45 @@ export function RightPanelTrigger({
             size="icon"
             onClick={() => onOpenChange(!open)}
             aria-label={open ? "Close changes" : "Open changes"}
+            aria-pressed={open}
+            className={cn(open && "bg-accent text-accent-foreground")}
           />
         }
       >
-        {open ? (
-          <PanelRightClose className="size-5" />
-        ) : (
-          <PanelRightOpen className="size-5" />
-        )}
+        <GitBranch className="size-5" />
       </TooltipTrigger>
       <TooltipContent>{open ? "Close changes" : "Open changes"}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+export function TerminalTrigger({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const isMobile = useIsMobile()
+  if (isMobile) return null
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenChange(!open)}
+            aria-label={open ? "Close terminal" : "Open terminal"}
+            aria-pressed={open}
+            className={cn(open && "bg-accent text-accent-foreground")}
+          />
+        }
+      >
+        <TerminalIcon className="size-5" />
+      </TooltipTrigger>
+      <TooltipContent>{open ? "Close terminal" : "Open terminal"}</TooltipContent>
     </Tooltip>
   )
 }
