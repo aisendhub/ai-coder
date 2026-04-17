@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { workspace } from "@/models"
+import { apiFetch, withAccessToken } from "@/lib/api"
 
 type ChangedFile = {
   path: string
@@ -52,7 +53,7 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`)
+      const res = await apiFetch(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = (await res.json()) as ChangesResponse
       setData(json)
@@ -93,12 +94,20 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
     fetchChanges()
 
     if (!conversationId) return
+    const convId = conversationId
 
     let es: EventSource | null = null
     let esRetry: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
 
-    function connectSSE() {
-      es = new EventSource(`/api/changes/stream?conversationId=${encodeURIComponent(conversationId)}`)
+    async function connectSSE() {
+      // EventSource can't set Authorization headers, so authenticate via
+      // an `access_token` query param instead. The backend enforces it.
+      const url = await withAccessToken(
+        `/api/changes/stream?conversationId=${encodeURIComponent(convId)}`
+      )
+      if (cancelled) return
+      es = new EventSource(url)
       es.addEventListener("ready", debouncedRefetch)
       es.addEventListener("changed", debouncedRefetch)
       es.onerror = () => {
@@ -108,11 +117,12 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
         }
       }
     }
-    connectSSE()
+    void connectSSE()
 
     const onTurnDone = () => fetchChanges()
     window.addEventListener("ai-coder:turn-done", onTurnDone)
     return () => {
+      cancelled = true
       es?.close()
       if (esRetry) clearTimeout(esRetry)
       window.removeEventListener("ai-coder:turn-done", onTurnDone)

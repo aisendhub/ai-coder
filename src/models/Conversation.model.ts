@@ -3,6 +3,7 @@ import { BaseModel } from "./Base.model"
 import { BaseList } from "./BaseList.model"
 import { Message, type StreamEvent } from "./Message.model"
 import { supabase } from "@/lib/supabase"
+import { apiFetch } from "@/lib/api"
 import type { Attachment, AttachmentMeta } from "@/lib/attachment"
 
 class MessageList extends BaseList<typeof Message> {
@@ -247,7 +248,7 @@ export class Conversation extends BaseModel {
     this.abortController = controller
 
     try {
-      const res = await fetch("/api/chat", {
+      const res = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

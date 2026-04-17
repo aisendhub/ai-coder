@@ -6,6 +6,7 @@ import { TerminalIcon, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { workspace } from "@/models"
+import { withAccessToken } from "@/lib/api"
 import "@xterm/xterm/css/xterm.css"
 
 export const TerminalPanel = observer(function TerminalPanel() {
@@ -40,30 +41,49 @@ export const TerminalPanel = observer(function TerminalPanel() {
     fitRef.current = fit
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-    const url = `${proto}//${window.location.host}/api/terminal?cwd=${encodeURIComponent(cwd)}&cols=${term.cols}&rows=${term.rows}`
-    const ws = new WebSocket(url)
-    wsRef.current = ws
+    const baseUrl = `${proto}//${window.location.host}/api/terminal?cwd=${encodeURIComponent(cwd)}&cols=${term.cols}&rows=${term.rows}`
 
-    ws.onmessage = (e) => {
-      // Server sends raw pty bytes as strings (utf-8) or Blob if binary.
-      if (typeof e.data === "string") term.write(e.data)
-      else if (e.data instanceof Blob) e.data.text().then((t) => term.write(t))
+    // Queue input until the socket has actually connected — withAccessToken
+    // is async (reads the Supabase session) so the WebSocket is created on
+    // a microtask.
+    let ws: WebSocket | null = null
+    const pendingInput: string[] = []
+    const sendToWs = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data)
+      else pendingInput.push(data)
     }
-    ws.onclose = () => {
-      if (!cancelled) term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n")
-    }
-    ws.onerror = () => {
-      if (!cancelled) term.write("\r\n\x1b[31m[websocket error]\x1b[0m\r\n")
-    }
+
+    // The access token has to ride on the query string because WebSocket has
+    // no header API. The backend verifies it (and that `cwd` matches one of
+    // the user's projects) before upgrading.
+    void withAccessToken(baseUrl).then((url) => {
+      if (cancelled) return
+      const socket = new WebSocket(url)
+      ws = socket
+      wsRef.current = socket
+
+      socket.onopen = () => {
+        for (const data of pendingInput.splice(0)) socket.send(data)
+      }
+      socket.onmessage = (e) => {
+        // Server sends raw pty bytes as strings (utf-8) or Blob if binary.
+        if (typeof e.data === "string") term.write(e.data)
+        else if (e.data instanceof Blob) e.data.text().then((t) => term.write(t))
+      }
+      socket.onclose = () => {
+        if (!cancelled) term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n")
+      }
+      socket.onerror = () => {
+        if (!cancelled) term.write("\r\n\x1b[31m[websocket error]\x1b[0m\r\n")
+      }
+    })
 
     const inputDisp = term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data)
+      sendToWs(data)
     })
 
     const resizeDisp = term.onResize(({ cols, rows }) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "resize", cols, rows }))
-      }
+      sendToWs(JSON.stringify({ type: "resize", cols, rows }))
     })
 
     const ro = new ResizeObserver(() => {
@@ -76,7 +96,7 @@ export const TerminalPanel = observer(function TerminalPanel() {
       inputDisp.dispose()
       resizeDisp.dispose()
       ro.disconnect()
-      ws.close()
+      ws?.close()
       term.dispose()
       termRef.current = null
       fitRef.current = null
