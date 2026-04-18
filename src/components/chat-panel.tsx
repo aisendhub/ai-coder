@@ -78,7 +78,7 @@ export const ChatPanel = observer(function ChatPanel() {
   return (
     <div className="flex flex-col h-full min-h-0">
       <ScrollArea className="flex-1 min-h-0">
-        <div className="mx-auto w-full max-w-2xl px-4 py-6 flex flex-col gap-4">
+        <div className="mx-auto w-full max-w-243 px-10 py-6 flex flex-col gap-4">
           {!conversation && (
             <div className="text-center text-sm text-muted-foreground py-16">
               Start a conversation with Claude.
@@ -121,7 +121,7 @@ export const ChatPanel = observer(function ChatPanel() {
         </div>
       </ScrollArea>
       <div className="border-t p-3">
-        <div className="mx-auto w-full max-w-2xl">
+        <div className="mx-auto w-full max-w-243 px-10">
           <Composer onSend={handleSend} />
         </div>
       </div>
@@ -166,7 +166,7 @@ const MessageBubble = observer(function MessageBubble({
   const hasContent = message.text.length > 0 || message.events.length > 0
 
   return (
-    <div className="self-start max-w-[85%] w-full flex flex-col gap-2">
+    <div className="self-stretch w-full flex flex-col gap-2">
       {message.events
         .filter((e) => e.kind !== "text")
         .map((e, idx) => (
