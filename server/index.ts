@@ -131,6 +131,7 @@ type Runner = {
   bus: EventEmitter
   done: boolean
   promise: Promise<void>
+  abort: AbortController
 }
 
 const runners = new Map<string, Runner>()
@@ -154,11 +155,13 @@ async function startRunner(args: {
   const { conversationId, prompt, attachments, resumeSessionId } = args
   const bus = new EventEmitter()
   bus.setMaxListeners(50)
+  const abort = new AbortController()
   const runner: Runner = {
     conversationId,
     bus,
     done: false,
     promise: Promise.resolve(),
+    abort,
   }
   runners.set(conversationId, runner)
 
@@ -294,6 +297,7 @@ async function startRunner(args: {
           permissionMode: "bypassPermissions",
           settingSources: [],
           includePartialMessages: false,
+          abortController: abort,
         },
       })
 
@@ -544,6 +548,17 @@ app.get("/api/runners", (c) => {
   return c.json({
     runners: Array.from(runners.keys()),
   })
+})
+
+// Abort an in-flight runner for a conversation.
+app.post("/api/chat/stop", async (c) => {
+  const body = await c.req.json<{ conversationId?: string }>().catch(() => ({}))
+  const conversationId = body.conversationId
+  if (!conversationId) return c.json({ error: "conversationId required" }, 400)
+  const runner = runners.get(conversationId)
+  if (!runner || runner.done) return c.json({ stopped: false, reason: "no-runner" })
+  runner.abort.abort()
+  return c.json({ stopped: true })
 })
 
 // Start a turn. Returns an SSE stream that subscribes to the runner's bus.

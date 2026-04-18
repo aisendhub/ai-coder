@@ -186,8 +186,16 @@ export class Conversation extends BaseModel {
   }
 
   @action cancel() {
+    // Tell the server to abort the background runner — the client-side
+    // abortController only closes our SSE read, not the AI turn.
+    void fetch("/api/chat/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId: this.id }),
+    }).catch((err) => console.error("cancel: stop request failed", err))
     this.abortController?.abort()
     this.abortController = null
+    this.queue = []
     this.streaming = false
   }
 
@@ -347,7 +355,11 @@ export class Conversation extends BaseModel {
         runInAction(() => {
           this.streaming = false
         })
-        window.dispatchEvent(new CustomEvent("ai-coder:turn-done"))
+        window.dispatchEvent(
+          new CustomEvent("ai-coder:turn-done", {
+            detail: { id: this.id, text: assistantText },
+          })
+        )
         // Play a short chime so the user knows the AI finished
         console.log("[runTurn] playing done sound")
         import("../lib/sounds").then((s) => {

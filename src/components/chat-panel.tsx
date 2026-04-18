@@ -6,7 +6,7 @@ import {
   type KeyboardEvent,
 } from "react"
 import { observer } from "mobx-react-lite"
-import { Paperclip, Send, Wrench, Brain, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon } from "lucide-react"
+import { Paperclip, Send, Square, Wrench, Brain, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Markdown } from "@/components/markdown"
@@ -122,7 +122,11 @@ export const ChatPanel = observer(function ChatPanel() {
       </ScrollArea>
       <div className="border-t p-3">
         <div className="mx-auto w-full max-w-243 px-10">
-          <Composer onSend={handleSend} />
+          <Composer
+            onSend={handleSend}
+            streaming={conversation?.streaming ?? false}
+            onStop={() => conversation?.cancel()}
+          />
         </div>
       </div>
     </div>
@@ -262,8 +266,12 @@ function Dot({ delay }: { delay: string }) {
 
 function Composer({
   onSend,
+  streaming,
+  onStop,
 }: {
   onSend: (prompt: string, attachments?: Attachment[]) => void
+  streaming: boolean
+  onStop: () => void
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -334,7 +342,11 @@ function Composer({
     }
   }
 
-  const canSend = value.trim().length > 0 || attachments.length > 0
+  const hasInput = value.trim().length > 0 || attachments.length > 0
+  // Show Stop only when the AI is working AND the user hasn't queued new input.
+  // Typing in the textarea flips back to Send (enabled) so the message queues.
+  const showStop = streaming && !hasInput
+  const canSend = hasInput
 
   return (
     <div className="rounded-xl border bg-muted/40 shadow-xs focus-within:ring-2 focus-within:ring-ring">
@@ -402,16 +414,29 @@ function Composer({
           className="hidden"
           onChange={handleFileSelect}
         />
-        <Button
-          type="button"
-          size="icon"
-          className="shrink-0"
-          aria-label="Send"
-          onClick={submit}
-          disabled={!canSend}
-        >
-          <Send className="size-4" />
-        </Button>
+        {showStop ? (
+          <Button
+            type="button"
+            size="icon"
+            variant="destructive"
+            className="shrink-0"
+            aria-label="Stop"
+            onClick={onStop}
+          >
+            <Square className="size-4 fill-current" />
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="icon"
+            className="shrink-0"
+            aria-label="Send"
+            onClick={submit}
+            disabled={!canSend}
+          >
+            <Send className="size-4" />
+          </Button>
+        )}
       </div>
     </div>
   )
