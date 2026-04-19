@@ -5,6 +5,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { highlightCode, languageForPath } from "@/lib/highlight"
 import { workspace } from "@/models"
 
 type ChangedFile = {
@@ -175,6 +176,12 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
             <span className="text-xs text-muted-foreground">{files.length}</span>
           </div>
           <div className="flex items-center gap-1">
+            {data?.branch && (
+              <div className="flex items-center gap-1 mr-1 text-xs text-muted-foreground min-w-0 max-w-30">
+                <GitBranch className="size-3 shrink-0" />
+                <span className="truncate font-mono" title={data.branch}>{data.branch}</span>
+              </div>
+            )}
             <Tooltip>
               <TooltipTrigger>
                 <Button
@@ -220,12 +227,6 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
             </Tooltip>
           </div>
         </div>
-        {data?.branch && (
-          <div className="flex items-center gap-1.5 px-3 pb-2 text-xs text-muted-foreground">
-            <GitBranch className="size-3 shrink-0" />
-            <span className="truncate font-mono">{data.branch}</span>
-          </div>
-        )}
         <div className="flex items-center gap-1 px-3 pb-2">
           <div className="relative flex-1">
             <Search className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
@@ -336,20 +337,60 @@ function FileCard({
 function Diff({ file }: { file: ChangedFile }) {
   const hunks = extractHunks(file.diff)
   if (hunks.length === 0) {
-    return (
-      <div className="p-3">
-        {file.diff ? (
-          <pre className="whitespace-pre-wrap font-mono text-[12px] leading-snug">
-            {file.diff}
-          </pre>
-        ) : (
-          <span className="text-xs text-muted-foreground">No diff.</span>
-        )}
-      </div>
-    )
+    if (!file.diff) {
+      return <div className="p-3"><span className="text-xs text-muted-foreground">No diff.</span></div>
+    }
+    return <NewFileBody path={file.path} content={file.diff} />
   }
   // Simple, reliable renderer — colors added/removed lines; no external CSS.
   return <SimpleDiff hunks={hunks} />
+}
+
+function NewFileBody({ path, content }: { path: string; content: string }) {
+  const [html, setHtml] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setHtml(null)
+    setDone(false)
+    void (async () => {
+      const lang = languageForPath(path)
+      if (!lang) {
+        if (!cancelled) setDone(true)
+        return
+      }
+      try {
+        const out = await highlightCode(content, lang)
+        if (cancelled) return
+        setHtml(out)
+      } finally {
+        if (!cancelled) setDone(true)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [path, content])
+
+  if (html) {
+    return (
+      <div
+        className="[&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:leading-snug"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    )
+  }
+
+  // Plain pre while highlighting (or when language is unsupported)
+  return (
+    <div className="p-3">
+      <pre className={cn(
+        "whitespace-pre-wrap font-mono text-[12px] leading-snug",
+        !done && "text-muted-foreground"
+      )}>
+        {content}
+      </pre>
+    </div>
+  )
 }
 
 function SimpleDiff({ hunks }: { hunks: string[] }) {

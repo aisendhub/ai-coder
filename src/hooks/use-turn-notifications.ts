@@ -28,6 +28,31 @@ async function fetchLastAssistantText(conversationId: string): Promise<string> {
   }
 }
 
+function isAppFocused(): boolean {
+  return typeof document !== "undefined" && !document.hidden && document.hasFocus()
+}
+
+function showOsNotification(id: string, title: string, snippet: string) {
+  if (typeof window === "undefined" || !("Notification" in window)) return false
+  if (Notification.permission !== "granted") return false
+  try {
+    const n = new Notification(title, {
+      body: snippet || "AI response ready",
+      // tag dedupes per-conversation: a fresh turn replaces the previous notification
+      tag: `ai-coder:conv:${id}`,
+      renotify: true,
+    } as NotificationOptions)
+    n.onclick = () => {
+      window.focus()
+      workspace.setActive(id)
+      n.close()
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 function showTurnToast(id: string, title: string, snippet: string) {
   toast(title, {
     description: snippet || "AI response ready",
@@ -43,11 +68,20 @@ function showTurnToast(id: string, title: string, snippet: string) {
   })
 }
 
+function notifyTurnDone(id: string, title: string, snippet: string) {
+  if (isAppFocused()) {
+    showTurnToast(id, title, snippet)
+  } else if (!showOsNotification(id, title, snippet)) {
+    // Fallback to in-app toast if OS notifications aren't available/granted
+    showTurnToast(id, title, snippet)
+  }
+}
+
 /**
- * Listen for AI turn completions and show a toast notification with the
- * conversation title and the last assistant message. Fires for both the
- * active conversation (via ai-coder:turn-done) and background conversations
- * (via ai-coder:background-done). Clicking the toast activates the conversation.
+ * Listen for AI turn completions and surface them to the user. When the app
+ * is focused, shows an in-app toast; when blurred or in a background tab,
+ * fires an OS notification (if permission was granted). Clicking either
+ * activates the conversation.
  */
 export function useTurnNotifications() {
   useEffect(() => {
@@ -56,7 +90,7 @@ export function useTurnNotifications() {
       if (!id) return
       const title = workspace.conversations.find(id)?.title ?? "Chat"
       const snippet = text ? trimSnippet(text) : trimSnippet(await fetchLastAssistantText(id))
-      showTurnToast(id, title, snippet)
+      notifyTurnDone(id, title, snippet)
     }
 
     const onBackgroundDone = async (e: Event) => {
@@ -64,7 +98,7 @@ export function useTurnNotifications() {
       for (const id of ids) {
         const title = workspace.conversations.find(id)?.title ?? "Chat"
         const snippet = trimSnippet(await fetchLastAssistantText(id))
-        showTurnToast(id, title, snippet)
+        notifyTurnDone(id, title, snippet)
       }
     }
 

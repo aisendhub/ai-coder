@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { Sparkles } from "lucide-react"
+import { Sparkles, Bell } from "lucide-react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
+import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ChangesTrigger, TerminalTrigger } from "@/components/right-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { workspace } from "@/models"
@@ -41,9 +44,57 @@ export const TopBar = observer(function TopBar({
         </div>
       </div>
       <div className="flex items-center gap-0.5">
+        <NotificationsTrigger />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
         <TerminalTrigger open={terminalOpen} onOpenChange={onTerminalOpenChange} />
       </div>
     </header>
   )
 })
+
+function NotificationsTrigger() {
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(() =>
+    typeof window !== "undefined" && "Notification" in window
+      ? Notification.permission
+      : "unsupported"
+  )
+
+  // Re-sync if the user changes the setting in the browser while the app is open.
+  useEffect(() => {
+    if (permission === "unsupported") return
+    const onFocus = () => setPermission(Notification.permission)
+    window.addEventListener("focus", onFocus)
+    return () => window.removeEventListener("focus", onFocus)
+  }, [permission])
+
+  // Hide the button once the user has made a decision (granted or denied).
+  // Once denied, the browser blocks programmatic re-prompts anyway.
+  if (permission !== "default") return null
+
+  const request = async () => {
+    try {
+      const result = await Notification.requestPermission()
+      setPermission(result)
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={request}
+            aria-label="Enable desktop notifications"
+          />
+        }
+      >
+        <Bell className="size-5" />
+      </TooltipTrigger>
+      <TooltipContent>Enable desktop notifications</TooltipContent>
+    </Tooltip>
+  )
+}
