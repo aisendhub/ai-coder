@@ -2,13 +2,15 @@ import { useEffect, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
 import { Terminal as XTerm } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
-import { TerminalIcon, RefreshCw } from "lucide-react"
+import { TerminalIcon, RefreshCw, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { workspace } from "@/models"
 import "@xterm/xterm/css/xterm.css"
 
-export const TerminalPanel = observer(function TerminalPanel() {
+export const TerminalPanel = observer(function TerminalPanel({
+  onClose,
+}: { onClose?: () => void } = {}) {
   const cwd = workspace.activeProject?.cwd ?? ""
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
@@ -111,6 +113,16 @@ export const TerminalPanel = observer(function TerminalPanel() {
               </TooltipTrigger>
               <TooltipContent>Reconnect</TooltipContent>
             </Tooltip>
+            {onClose && (
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close terminal">
+                    <X className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Close</TooltipContent>
+              </Tooltip>
+            )}
           </div>
         </div>
         <div className="px-3 pb-2 text-xs text-muted-foreground truncate font-mono">{cwd}</div>

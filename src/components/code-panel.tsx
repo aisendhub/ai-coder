@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, GitBranch, FileText } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, GitBranch, FileText, X } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -35,7 +35,10 @@ async function dispatchPrompt(prompt: string) {
   void target.send(prompt)
 }
 
-export const CodePanel = observer(function CodePanel({ collapsed = false }: { collapsed?: boolean } = {}) {
+export const CodePanel = observer(function CodePanel({
+  collapsed = false,
+  onClose,
+}: { collapsed?: boolean; onClose?: () => void } = {}) {
   const conversationId = workspace.active?.id ?? null
   const [data, setData] = useState<ChangesResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -225,6 +228,16 @@ export const CodePanel = observer(function CodePanel({ collapsed = false }: { co
               </TooltipTrigger>
               <TooltipContent>Refresh changes</TooltipContent>
             </Tooltip>
+            {onClose && (
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close changes">
+                    <X className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Close</TooltipContent>
+              </Tooltip>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-1 px-3 pb-2">

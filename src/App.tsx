@@ -134,7 +134,7 @@ function DesktopLayout() {
                 }
               >
                 <div className="h-full min-h-0 overflow-hidden border-l">
-                  <CodePanel collapsed={codeCollapsed} />
+                  <CodePanel collapsed={codeCollapsed} onClose={() => setRightOpen(false)} />
                 </div>
               </ResizablePanel>
             </>
@@ -149,7 +149,7 @@ function DesktopLayout() {
                 maxSize={60}
               >
                 <div className="h-full min-h-0 overflow-hidden border-l">
-                  <TerminalPanel />
+                  <TerminalPanel onClose={() => setTerminalOpen(false)} />
                 </div>
               </ResizablePanel>
             </>
