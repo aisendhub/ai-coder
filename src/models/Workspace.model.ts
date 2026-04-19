@@ -4,6 +4,7 @@ import { BaseModel } from "./Base.model"
 import { Conversation } from "./Conversation.model"
 import { Project } from "./Project.model"
 import { supabase } from "@/lib/supabase"
+import { apiFetch } from "@/lib/api"
 
 class ConversationList extends BaseList<typeof Conversation> {
   get ItemType() {
@@ -344,7 +345,7 @@ export class Workspace extends BaseModel {
   private startRunnersPoll() {
     const tick = async () => {
       try {
-        const res = await fetch("/api/runners")
+        const res = await apiFetch("/api/runners")
         if (!res.ok) return
         const json = (await res.json()) as { runners: string[] }
         runInAction(() => {

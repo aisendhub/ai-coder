@@ -7,7 +7,7 @@ if (process.env.NODE_ENV !== "production") {
   delete process.env.ANTHROPIC_API_KEY
 }
 
-import { Hono } from "hono"
+import { Hono, type Context, type MiddlewareHandler } from "hono"
 import { streamSSE } from "hono/streaming"
 import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
@@ -15,11 +15,11 @@ import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { MessageParam } from "@anthropic-ai/sdk/resources"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { dirname, resolve, basename } from "node:path"
+import { dirname, resolve, basename, sep } from "node:path"
 import { promises as fsp } from "node:fs"
 import chokidar from "chokidar"
 import { EventEmitter } from "node:events"
-import { createClient } from "@supabase/supabase-js"
+import { createClient, type User } from "@supabase/supabase-js"
 import * as pty from "node-pty"
 import { WebSocketServer } from "ws"
 
@@ -45,6 +45,90 @@ const sb = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
   : null
 
 if (!sb) console.warn("[warn] Supabase service-role not configured; persistence disabled")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth — verify Supabase JWTs and enforce ownership before running any work.
+//
+// The service-role client bypasses RLS, so HTTP endpoints MUST authenticate
+// the caller themselves. Every `/api/*` route (plus the terminal WebSocket)
+// requires a valid access token and verifies that the resource being acted
+// on belongs to the caller.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type AppEnv = { Variables: { user: User } }
+
+async function verifyAccessToken(token: string | undefined): Promise<User | null> {
+  if (!token || !sb) return null
+  const { data, error } = await sb.auth.getUser(token)
+  if (error || !data.user) return null
+  return data.user
+}
+
+function bearerTokenFromHeader(c: Context): string | undefined {
+  const header = c.req.header("authorization") ?? c.req.header("Authorization")
+  if (!header) return undefined
+  const [scheme, token] = header.split(" ", 2)
+  if (scheme?.toLowerCase() !== "bearer" || !token) return undefined
+  return token.trim()
+}
+
+/** Require a valid Supabase JWT on this request. Prefers the Authorization
+ *  header; falls back to an `access_token` query param for EventSource /
+ *  WebSocket clients that cannot set headers. */
+const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (!sb) return c.json({ error: "server not configured" }, 503)
+  const token = bearerTokenFromHeader(c) ?? c.req.query("access_token")
+  const user = await verifyAccessToken(token)
+  if (!user) return c.json({ error: "unauthorized" }, 401)
+  c.set("user", user)
+  await next()
+}
+
+async function assertConversationOwned(userId: string, conversationId: string): Promise<boolean> {
+  if (!sb) return false
+  const { data, error } = await sb
+    .from("conversations")
+    .select("user_id")
+    .eq("id", conversationId)
+    .maybeSingle()
+  if (error || !data) return false
+  return data.user_id === userId
+}
+
+async function assertCwdOwnedByUser(userId: string, cwd: string): Promise<boolean> {
+  if (!sb) return false
+  const target = resolve(cwd)
+  const { data, error } = await sb
+    .from("projects")
+    .select("cwd")
+    .eq("user_id", userId)
+  if (error || !data) return false
+  return data.some((p: { cwd: string }) => resolveProjectCwd(p.cwd) === target)
+}
+
+/** Env vars we refuse to hand to a PTY — these let a terminal user exfiltrate
+ *  backend credentials via `env`, `printenv`, etc. */
+const SENSITIVE_ENV_VARS = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "VITE_SUPABASE_URL",
+  "VITE_SUPABASE_ANON_KEY",
+  "DATABASE_URL",
+  "DATABASE_POOLER_URL",
+  "PGPASSWORD",
+])
+
+function sanitizedChildEnv(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue
+    if (SENSITIVE_ENV_VARS.has(k)) continue
+    out[k] = v
+  }
+  return out
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Project cwd resolution
@@ -391,8 +475,9 @@ async function startRunner(args: {
 // HTTP
 // ─────────────────────────────────────────────────────────────────────────────
 
-const app = new Hono()
+const app = new Hono<AppEnv>()
 
+// Health is intentionally unauthenticated so uptime checks work.
 app.get("/api/health", (c) =>
   c.json({
     ok: true,
@@ -402,6 +487,10 @@ app.get("/api/health", (c) =>
   })
 )
 
+// Every other /api/* route requires a valid Supabase JWT. Register the
+// middleware up-front so no future route accidentally ships unauthenticated.
+app.use("/api/*", requireAuth)
+
 // SSE for git changes — scoped to a conversation's project cwd.
 app.get("/api/changes/stream", (c) => {
   return streamSSE(c, async (stream) => {
@@ -409,6 +498,11 @@ app.get("/api/changes/stream", (c) => {
     if (!conversationId) {
       await stream.writeSSE({ event: "ready", data: "{}" })
       await new Promise<void>((r) => stream.onAbort(r))
+      return
+    }
+    const user = c.get("user")
+    if (!(await assertConversationOwned(user.id, conversationId))) {
+      await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "forbidden" }) })
       return
     }
     const cwd = await cwdForConversation(conversationId)
@@ -478,6 +572,10 @@ app.get("/api/changes", async (c) => {
     if (!conversationId) {
       return c.json({ workspace: "", files: [], unpushedCount: 0, branch: "" })
     }
+    const user = c.get("user")
+    if (!(await assertConversationOwned(user.id, conversationId))) {
+      return c.json({ error: "forbidden" }, 403)
+    }
     const cwd = await cwdForConversation(conversationId)
     const { stdout: porcelain } = await execFileP(
       "git",
@@ -508,18 +606,30 @@ app.get("/api/changes", async (c) => {
   }
 })
 
-// Directory browser — lists subdirectories of `path`. Defaults to PROJECTS_ROOT
-// but allows traversal anywhere the server process can read (single-tenant host).
+// Directory browser — lists subdirectories of `path`. Sandboxed to
+// PROJECTS_ROOT so an authenticated user can't walk the whole filesystem
+// via query-string path traversal.
+function isUnderProjectsRoot(target: string): boolean {
+  if (target === PROJECTS_ROOT) return true
+  return target.startsWith(PROJECTS_ROOT + sep)
+}
+
 app.get("/api/fs/list", async (c) => {
   try {
     const raw = c.req.query("path") ?? PROJECTS_ROOT
     const target = resolve(raw)
+    if (!isUnderProjectsRoot(target)) {
+      return c.json({ error: "path outside PROJECTS_ROOT" }, 403)
+    }
     const entries = await fsp.readdir(target, { withFileTypes: true })
     const dirs = entries
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => ({ name: e.name, path: resolve(target, e.name) }))
       .sort((a, b) => a.name.localeCompare(b.name))
-    const parent = target === "/" ? null : dirname(target)
+    // Don't expose a `parent` that escapes PROJECTS_ROOT.
+    const parentRaw = target === "/" ? null : dirname(target)
+    const parent =
+      parentRaw && isUnderProjectsRoot(parentRaw) ? parentRaw : null
     return c.json({
       root: PROJECTS_ROOT,
       path: target,
@@ -584,11 +694,19 @@ async function fileDiff(cwd: string, f: ChangedFile): Promise<string> {
   }
 }
 
-// Status of all running conversations (for live "running" badges in UI later)
-app.get("/api/runners", (c) => {
-  return c.json({
-    runners: Array.from(runners.keys()),
-  })
+// Status of all running conversations (for live "running" badges in UI later).
+// Scoped to the authenticated user — each client only sees its own runners.
+app.get("/api/runners", async (c) => {
+  const user = c.get("user")
+  if (!sb) return c.json({ runners: [] })
+  const ids = Array.from(runners.keys())
+  if (ids.length === 0) return c.json({ runners: [] })
+  const { data } = await sb
+    .from("conversations")
+    .select("id")
+    .eq("user_id", user.id)
+    .in("id", ids)
+  return c.json({ runners: (data ?? []).map((r: { id: string }) => r.id) })
 })
 
 // Abort an in-flight runner for a conversation.
@@ -621,6 +739,21 @@ app.post("/api/chat", async (c) => {
   }
   if (!prompt || typeof prompt !== "string") {
     return c.json({ error: "prompt required" }, 400)
+  }
+
+  const user = c.get("user")
+  if (!(await assertConversationOwned(user.id, conversationId))) {
+    return c.json({ error: "forbidden" }, 403)
+  }
+
+  // Reject pathological request bodies before we start buffering them into
+  // memory. Individual attachments are also size-checked on the client.
+  const totalAttachmentBytes = (attachments ?? []).reduce(
+    (n, a) => n + (a.sizeBytes || 0),
+    0
+  )
+  if (totalAttachmentBytes > 25 * 1024 * 1024) {
+    return c.json({ error: "attachments too large" }, 413)
   }
 
   let runner = runners.get(conversationId)
@@ -664,24 +797,61 @@ const server = serve({ fetch: app.fetch, port, hostname }, ({ address, port }) =
 })
 
 // ── Terminal PTY over WebSocket ──────────────────────────────────────────────
+//
+// Every connection MUST present a valid Supabase access token (via the
+// `access_token` query param — WebSocket clients can't set Authorization
+// headers) AND the requested `cwd` must match one of that user's projects.
+// Without these checks, `/api/terminal` was effectively an unauthenticated
+// remote shell on the host.
 const wss = new WebSocketServer({ noServer: true })
 
-server.on("upgrade", (req, socket, head) => {
+server.on("upgrade", async (req, socket, head) => {
   const url = new URL(req.url ?? "", `http://${req.headers.host}`)
   if (url.pathname !== "/api/terminal") {
     socket.destroy()
     return
   }
+
+  const token = url.searchParams.get("access_token") ?? undefined
+  const user = await verifyAccessToken(token)
+  if (!user) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n")
+    socket.destroy()
+    return
+  }
+
+  const cwdParam = url.searchParams.get("cwd")
+  if (!cwdParam) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n")
+    socket.destroy()
+    return
+  }
+  if (!(await assertCwdOwnedByUser(user.id, cwdParam))) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n")
+    socket.destroy()
+    return
+  }
+
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req)
   })
 })
 
+// Clamp terminal dimensions to sane values; anything above this is either a
+// typo or an attempt to allocate huge pty buffers.
+function clampDim(raw: string | null, fallback: number, max: number): number {
+  const n = parseInt(raw ?? "", 10)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.min(n, max)
+}
+
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "", `http://${req.headers.host}`)
+  // cwd is validated against the authenticated user in the upgrade handler
+  // above, so at this point it is guaranteed to be one of their projects.
   const cwd = url.searchParams.get("cwd") || WORKSPACE_DIR
-  const cols = parseInt(url.searchParams.get("cols") ?? "80", 10)
-  const rows = parseInt(url.searchParams.get("rows") ?? "24", 10)
+  const cols = clampDim(url.searchParams.get("cols"), 80, 500)
+  const rows = clampDim(url.searchParams.get("rows"), 24, 200)
   const shell = process.env.SHELL || "/bin/bash"
 
   let term: pty.IPty
@@ -691,7 +861,9 @@ wss.on("connection", (ws, req) => {
       cols,
       rows,
       cwd,
-      env: process.env as Record<string, string>,
+      // Strip backend credentials (service-role key, Anthropic key, DB URLs)
+      // so a terminal session can't `env` them out.
+      env: sanitizedChildEnv(),
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
