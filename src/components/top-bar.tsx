@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { Sparkles, Bell } from "lucide-react"
+import { Sparkles, Bell, BellOff, BellRing } from "lucide-react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ChangesTrigger, TerminalTrigger } from "@/components/right-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { showOsNotification } from "@/hooks/use-turn-notifications"
 import { workspace } from "@/models"
 
 type Props = {
@@ -67,18 +68,30 @@ function NotificationsTrigger() {
     return () => window.removeEventListener("focus", onFocus)
   }, [permission])
 
-  // Hide the button once the user has made a decision (granted or denied).
-  // Once denied, the browser blocks programmatic re-prompts anyway.
-  if (permission !== "default") return null
+  if (permission === "unsupported") return null
 
-  const request = async () => {
-    try {
-      const result = await Notification.requestPermission()
+  const onClick = async () => {
+    if (permission === "default") {
+      const result = await Notification.requestPermission().catch(() => "denied" as const)
       setPermission(result)
-    } catch {
-      // ignore
+      return
     }
+    if (permission === "granted") {
+      // Fire a test notification so the user can verify their OS settings.
+      showOsNotification("test", "Notifications enabled", "If you don't see a system banner, check your OS notification settings for the browser.")
+      return
+    }
+    // denied — can't re-prompt programmatically; surface a hint
+    alert("Notifications are blocked. Re-enable them in your browser's site settings, then reload.")
   }
+
+  const Icon = permission === "granted" ? BellRing : permission === "denied" ? BellOff : Bell
+  const label =
+    permission === "granted"
+      ? "Notifications on (click to test)"
+      : permission === "denied"
+        ? "Notifications blocked"
+        : "Enable desktop notifications"
 
   return (
     <Tooltip>
@@ -87,14 +100,14 @@ function NotificationsTrigger() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={request}
-            aria-label="Enable desktop notifications"
+            onClick={onClick}
+            aria-label={label}
           />
         }
       >
-        <Bell className="size-5" />
+        <Icon className="size-5" />
       </TooltipTrigger>
-      <TooltipContent>Enable desktop notifications</TooltipContent>
+      <TooltipContent>{label}</TooltipContent>
     </Tooltip>
   )
 }

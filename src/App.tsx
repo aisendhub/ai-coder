@@ -10,6 +10,7 @@ import { AppSidebar } from "@/components/app-sidebar"
 import { NavPanel } from "@/components/nav-panel"
 import { ChatPanel } from "@/components/chat-panel"
 import { CodePanel } from "@/components/code-panel"
+import { FilePanelSlot } from "@/components/file-panel"
 import { TerminalPanel } from "@/components/terminal-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { TopBar } from "@/components/top-bar"
@@ -153,6 +154,7 @@ function DesktopLayout() {
               </ResizablePanel>
             </>
           )}
+          <FilePanelSlot />
         </ResizablePanelGroup>
       </div>
     </ChatStateProvider>

@@ -32,23 +32,33 @@ function isAppFocused(): boolean {
   return typeof document !== "undefined" && !document.hidden && document.hasFocus()
 }
 
-function showOsNotification(id: string, title: string, snippet: string) {
-  if (typeof window === "undefined" || !("Notification" in window)) return false
-  if (Notification.permission !== "granted") return false
+export function showOsNotification(id: string, title: string, snippet: string) {
+  if (typeof window === "undefined" || !("Notification" in window)) {
+    console.warn("[notif] Notification API unavailable")
+    return false
+  }
+  if (Notification.permission !== "granted") {
+    console.warn("[notif] permission not granted:", Notification.permission)
+    return false
+  }
   try {
     const n = new Notification(title, {
       body: snippet || "AI response ready",
       // tag dedupes per-conversation: a fresh turn replaces the previous notification
       tag: `ai-coder:conv:${id}`,
       renotify: true,
+      icon: "/favicon.ico",
     } as NotificationOptions)
     n.onclick = () => {
       window.focus()
       workspace.setActive(id)
       n.close()
     }
+    n.onerror = (e) => console.error("[notif] error firing notification", e)
+    n.onshow = () => console.debug("[notif] shown:", title)
     return true
-  } catch {
+  } catch (err) {
+    console.error("[notif] threw while constructing:", err)
     return false
   }
 }
@@ -69,7 +79,9 @@ function showTurnToast(id: string, title: string, snippet: string) {
 }
 
 function notifyTurnDone(id: string, title: string, snippet: string) {
-  if (isAppFocused()) {
+  const focused = isAppFocused()
+  console.debug("[notif] turn-done", { id: id.slice(0, 6), focused, perm: typeof Notification !== "undefined" ? Notification.permission : "n/a" })
+  if (focused) {
     showTurnToast(id, title, snippet)
   } else if (!showOsNotification(id, title, snippet)) {
     // Fallback to in-app toast if OS notifications aren't available/granted

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, GitBranch } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, GitBranch, FileText } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -302,29 +302,52 @@ function FileCard({
   const name = file.path.split("/").pop() ?? file.path
   const dir = file.path.slice(0, file.path.length - name.length).replace(/\/$/, "")
 
+  const canOpen = file.status !== "deleted"
+
   return (
-    <div className="rounded-md border border-border/50 bg-card overflow-hidden">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer hover:bg-accent/40"
-      >
-        {collapsed ? (
-          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <StatusIcon status={file.status} />
-        <div className="flex-1 min-w-0">
-          <div className="truncate font-mono text-[13px]">{name}</div>
-          {dir && (
-            <div className="truncate text-[11px] text-muted-foreground font-mono">
-              {dir}
-            </div>
+    <div className="group/file-card rounded-md border border-border/50 bg-card overflow-hidden">
+      <div className="w-full flex items-center gap-1 px-2 py-1.5 hover:bg-accent/40">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex-1 min-w-0 flex items-center gap-2 text-left cursor-pointer"
+        >
+          {collapsed ? (
+            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
           )}
-        </div>
-        <StatusBadge status={file.status} />
-      </button>
+          <StatusIcon status={file.status} />
+          <div className="flex-1 min-w-0">
+            <div className="truncate font-mono text-[13px]">{name}</div>
+            {dir && (
+              <div className="truncate text-[11px] text-muted-foreground font-mono">
+                {dir}
+              </div>
+            )}
+          </div>
+          <StatusBadge status={file.status} />
+        </button>
+        {canOpen && (
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="size-6 p-0 opacity-0 group-hover/file-card:opacity-100 focus-visible:opacity-100 transition-opacity"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  workspace.openFile(file.path)
+                }}
+                aria-label="Open full file"
+              >
+                <FileText className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Open full file</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
       {!collapsed && (
         <div className="border-t border-border/50 text-[12px]">
           <Diff file={file} />

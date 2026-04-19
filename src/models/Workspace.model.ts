@@ -28,6 +28,9 @@ export class Workspace extends BaseModel {
   /** Conversation ids whose AI turn finished while they were NOT active —
    *  cleared when the user activates the conversation. */
   @observable unreadIds = new Set<string>()
+  /** When non-null, the file panel is open and showing this path
+   *  (relative to the active conversation's project cwd). */
+  @observable openFilePath: string | null = null
   @observable loading = false
 
   conversations = ConversationList.create()
@@ -66,6 +69,8 @@ export class Workspace extends BaseModel {
     const prev = this.active
     prev?.unsubscribe()
     this.activeId = id
+    // The open file is scoped to a conversation's project — drop it on switch.
+    this.openFilePath = null
     const next = this.active
     if (next) {
       if (!next.loaded) void next.loadMessages()
@@ -76,6 +81,14 @@ export class Workspace extends BaseModel {
         this.unreadIds = updated
       }
     }
+  }
+
+  @action openFile(path: string) {
+    this.openFilePath = path
+  }
+
+  @action closeFile() {
+    this.openFilePath = null
   }
 
   @action setActiveProject(id: string | null) {

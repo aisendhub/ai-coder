@@ -431,6 +431,47 @@ app.get("/api/changes/stream", (c) => {
   })
 })
 
+// Read the working-tree content of a file scoped to a conversation's project cwd.
+// Used by the file panel to render the full file with a diff gutter overlay.
+app.get("/api/changes/file", async (c) => {
+  try {
+    const conversationId = c.req.query("conversationId")
+    const path = c.req.query("path")
+    if (!conversationId || !path) {
+      return c.json({ error: "conversationId and path required" }, 400)
+    }
+    const cwd = await cwdForConversation(conversationId)
+    const abs = resolve(cwd, path)
+    // Sandbox: never serve files outside the project cwd.
+    if (!abs.startsWith(cwd + "/") && abs !== cwd) {
+      return c.json({ error: "path escapes project root" }, 400)
+    }
+    const stat = await fsp.stat(abs)
+    const MAX_BYTES = 1_000_000 // 1 MB
+    if (stat.size > MAX_BYTES) {
+      const fh = await fsp.open(abs, "r")
+      try {
+        const buf = Buffer.alloc(MAX_BYTES)
+        await fh.read(buf, 0, MAX_BYTES, 0)
+        return c.json({
+          path,
+          content: buf.toString("utf8"),
+          truncated: true,
+          sizeBytes: stat.size,
+        })
+      } finally {
+        await fh.close()
+      }
+    }
+    const content = await fsp.readFile(abs, "utf8")
+    return c.json({ path, content, truncated: false, sizeBytes: stat.size })
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "ENOENT") return c.json({ error: "file not found" }, 404)
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
 app.get("/api/changes", async (c) => {
   try {
     const conversationId = c.req.query("conversationId")
