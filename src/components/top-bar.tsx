@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
+import { toast } from "sonner"
 import { Sparkles, Bell, BellOff, BellRing } from "lucide-react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
@@ -71,18 +72,53 @@ function NotificationsTrigger() {
   if (permission === "unsupported") return null
 
   const onClick = async () => {
-    if (permission === "default") {
-      const result = await Notification.requestPermission().catch(() => "denied" as const)
+    // Always re-read permission at click time — state may be stale if the
+    // user changed it via browser settings.
+    const live = Notification.permission
+    setPermission(live)
+    console.debug("[notif] bell clicked, permission=", live)
+
+    if (live === "default") {
+      const result = await Notification.requestPermission().catch((err) => {
+        console.error("[notif] requestPermission threw", err)
+        return "denied" as const
+      })
+      console.debug("[notif] requestPermission result=", result)
       setPermission(result)
+      if (result === "granted") {
+        toast.success("Notifications enabled — click the bell again to fire a test.")
+      } else if (result === "denied") {
+        toast.error("Notifications blocked. Enable them in browser settings, then reload.")
+      }
       return
     }
-    if (permission === "granted") {
-      // Fire a test notification so the user can verify their OS settings.
-      showOsNotification("test", "Notifications enabled", "If you don't see a system banner, check your OS notification settings for the browser.")
+
+    if (live === "granted") {
+      const fired = showOsNotification(
+        "test",
+        "ai-coder notifications work",
+        "If no system banner appears, your OS / browser is suppressing it. Check macOS Notification Center settings for this browser."
+      )
+      // Always show an in-app confirmation so the click never feels dead.
+      if (fired) {
+        toast.success("Test notification fired", {
+          description:
+            "If no system banner appeared, OS-level notifications for the browser are off (macOS: System Settings → Notifications → [Browser]).",
+          duration: 6000,
+        })
+      } else {
+        toast.error("Test notification failed to construct — check the console.", {
+          duration: 6000,
+        })
+      }
       return
     }
-    // denied — can't re-prompt programmatically; surface a hint
-    alert("Notifications are blocked. Re-enable them in your browser's site settings, then reload.")
+
+    // denied — can't re-prompt programmatically
+    toast.error("Notifications are blocked.", {
+      description: "Re-enable them in your browser's site settings, then reload.",
+      duration: 6000,
+    })
   }
 
   const Icon = permission === "granted" ? BellRing : permission === "denied" ? BellOff : Bell
