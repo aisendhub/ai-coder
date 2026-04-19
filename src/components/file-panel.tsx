@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
 import { X, FileText, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable"
 import { cn } from "@/lib/utils"
@@ -187,22 +186,69 @@ export const FilePanel = observer(function FilePanel() {
           <div className="px-3 pb-2 text-xs text-red-600">{error}</div>
         )}
       </div>
-      <ScrollArea className="flex-1 min-h-0">
+      <FilePanelBody
+        loading={loading}
+        error={error}
+        content={content}
+        html={language ? html : null}
+        byLine={lineStatuses.byLine}
+        removedAfter={lineStatuses.removedAfter}
+      />
+    </div>
+  )
+})
+
+function FilePanelBody({
+  loading,
+  error,
+  content,
+  html,
+  byLine,
+  removedAfter,
+}: {
+  loading: boolean
+  error: string | null
+  content: string | null
+  html: string | null
+  byLine: Map<number, LineStatus>
+  removedAfter: Set<number>
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  const lineCount = useMemo(() => {
+    if (!content) return 0
+    let n = 1
+    for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) n++
+    if (content.endsWith("\n")) n--
+    return Math.max(n, 1)
+  }, [content])
+
+  return (
+    <div className="flex-1 min-h-0 flex">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto scrollbar-hide relative">
         {!loading && !error && content !== null && (
           <FileBody
             content={content}
-            html={language ? html : null}
-            byLine={lineStatuses.byLine}
-            removedAfter={lineStatuses.removedAfter}
+            html={html}
+            byLine={byLine}
+            removedAfter={removedAfter}
           />
         )}
         {loading && content === null && (
           <div className="p-6 text-center text-xs text-muted-foreground">Loading…</div>
         )}
-      </ScrollArea>
+      </div>
+      {!loading && !error && content !== null && lineCount > 0 && (
+        <Minimap
+          scrollRef={scrollRef}
+          lineCount={lineCount}
+          byLine={byLine}
+          removedAfter={removedAfter}
+        />
+      )}
     </div>
   )
-})
+}
 
 function FileBody({
   content,
@@ -358,4 +404,169 @@ function computeLineStatuses(content: string, diff: string): {
   }
 
   return { byLine, removedAfter }
+}
+
+/**
+ * Vertical minimap of the file's diff status.
+ *
+ * - Compresses the full file's height into the visible viewport height: each
+ *   line maps to a 1-Npx slice (`viewportHeight / lineCount`, min 1.5px).
+ * - Coalesces adjacent same-status lines into runs so we render O(runs) divs
+ *   rather than O(lines).
+ * - A semi-transparent overlay shows the currently-visible region.
+ * - Click anywhere → scrolls so the corresponding line is centered in view.
+ * - Drag the overlay (or anywhere) → continuous scroll.
+ */
+function Minimap({
+  scrollRef,
+  lineCount,
+  byLine,
+  removedAfter,
+}: {
+  scrollRef: React.RefObject<HTMLDivElement | null>
+  lineCount: number
+  byLine: Map<number, LineStatus>
+  removedAfter: Set<number>
+}) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  const [scrollState, setScrollState] = useState({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 })
+  const [trackHeight, setTrackHeight] = useState(0)
+
+  // Sync scroll metrics from the parent scroller
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const update = () => {
+      setScrollState({
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      })
+    }
+    update()
+    el.addEventListener("scroll", update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    // Also re-measure when inner content grows
+    const inner = el.firstElementChild
+    if (inner) ro.observe(inner)
+    return () => {
+      el.removeEventListener("scroll", update)
+      ro.disconnect()
+    }
+  }, [scrollRef])
+
+  // Track height (the minimap's own dimensions in CSS px)
+  useEffect(() => {
+    const el = trackRef.current
+    if (!el) return
+    const update = () => setTrackHeight(el.clientHeight)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Coalesce per-line statuses into runs (one rendered div per run)
+  const runs = useMemo(() => {
+    type Run = { start: number; end: number; status: LineStatus }
+    const out: Run[] = []
+    let cur: Run | null = null
+    for (let n = 1; n <= lineCount; n++) {
+      const s = byLine.get(n)
+      if (!s) {
+        cur = null
+        continue
+      }
+      if (cur && cur.status === s && cur.end === n - 1) {
+        cur.end = n
+      } else {
+        cur = { start: n, end: n, status: s }
+        out.push(cur)
+      }
+    }
+    return out
+  }, [byLine, lineCount])
+
+  const removedList = useMemo(() => Array.from(removedAfter).sort((a, b) => a - b), [removedAfter])
+
+  const linePx = trackHeight > 0 && lineCount > 0 ? trackHeight / lineCount : 0
+  const sliverH = Math.max(linePx, 1.5)
+
+  // Viewport indicator: maps the visible code region to minimap pixel space
+  const indicator = (() => {
+    const { scrollTop, scrollHeight, clientHeight } = scrollState
+    if (scrollHeight <= clientHeight || trackHeight === 0) return null
+    const scale = trackHeight / scrollHeight
+    return {
+      top: Math.max(0, scrollTop * scale),
+      height: Math.max(20, clientHeight * scale),
+    }
+  })()
+
+  const scrollToY = useCallback(
+    (clientY: number, smooth: boolean) => {
+      const track = trackRef.current
+      const scroller = scrollRef.current
+      if (!track || !scroller) return
+      const rect = track.getBoundingClientRect()
+      const y = clientY - rect.top
+      const ratio = Math.max(0, Math.min(1, y / rect.height))
+      const target = ratio * (scroller.scrollHeight - scroller.clientHeight)
+      scroller.scrollTo({ top: target, behavior: smooth ? "smooth" : "auto" })
+    },
+    [scrollRef]
+  )
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId)
+    scrollToY(e.clientY, true)
+  }
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.buttons !== 1) return
+    scrollToY(e.clientY, false)
+  }
+
+  return (
+    <div
+      ref={trackRef}
+      className="relative w-2.5 shrink-0 p-px border-l border-l-transparent cursor-pointer select-none transition-colors"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      aria-label="File minimap"
+    >
+      {/* slivers + indicator are positioned inside the 1px padding so they
+          line up with the rounded scrollbar-thumb width (8px wide). */}
+      {runs.map((r, i) => {
+        const top = (r.start - 1) * linePx
+        const height = Math.max((r.end - r.start + 1) * linePx, sliverH)
+        const cls =
+          r.status === "added"
+            ? "bg-green-500/70"
+            : r.status === "modified"
+              ? "bg-amber-500/70"
+              : ""
+        return (
+          <div
+            key={i}
+            className={cn("absolute inset-x-px rounded-full", cls)}
+            style={{ top, height }}
+          />
+        )
+      })}
+      {removedList.map((n) => (
+        <div
+          key={`r-${n}`}
+          className="absolute inset-x-px h-px bg-red-500/80"
+          style={{ top: n * linePx }}
+        />
+      ))}
+      {indicator && (
+        <div
+          className="absolute inset-x-px rounded-full bg-foreground/15 pointer-events-none"
+          style={{ top: indicator.top, height: indicator.height }}
+        />
+      )}
+    </div>
+  )
 }
