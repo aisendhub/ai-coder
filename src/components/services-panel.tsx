@@ -12,6 +12,11 @@ import {
   Trash2,
   Settings,
   ChevronLeft,
+  Cloud,
+  CloudOff,
+  Link2,
+  Unlink,
+  Sparkles,
 } from "lucide-react"
 
 import {
@@ -21,12 +26,15 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
+import { X } from "lucide-react"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
+import { useConfirm } from "@/lib/confirm"
 import { workspace } from "@/models"
 import type { Service, LogLine } from "@/models"
 import type { RunManifestDto, RunnerId } from "@/models/ServiceList.model"
@@ -39,52 +47,109 @@ type EditorState = {
   initial: Partial<RunManifestDto>
   detected: RunManifestDto | null
   cwd: string
+  /** LLM-detection state for the first-run flow. `pending` shows a spinner
+   *  and disables Save; `ready` populates the form once; `failed` surfaces
+   *  the error but lets the user proceed with heuristic defaults. */
+  llm?:
+    | { status: "pending" }
+    | { status: "ready"; rationale: string; confidence: "high" | "medium" | "low" }
+    | { status: "failed"; error: string }
 }
 
 // ── Trigger button (top-bar) ─────────────────────────────────────────────────
+// Desktop: toggles the dockable services panel in the ResizablePanelGroup.
+// Mobile: wraps the panel in a Sheet since there's no room to dock.
 
-export const ServicesTrigger = observer(function ServicesTrigger() {
-  const [open, setOpen] = useState(false)
+export const ServicesTrigger = observer(function ServicesTrigger({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
   const liveCount = workspace.services.items.filter((s) => s.isLive).length
+  const isMobile = useIsMobile()
+
+  const tooltipLabel =
+    liveCount > 0
+      ? `${liveCount} service${liveCount === 1 ? "" : "s"} running`
+      : "Services"
+
+  if (isMobile) {
+    return (
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <SheetTrigger
+                className={cn(
+                  "inline-flex items-center justify-center rounded-md h-9 px-2 gap-1 hover:bg-accent hover:text-accent-foreground",
+                  liveCount > 0 && "text-emerald-500"
+                )}
+                aria-label="Running services"
+              />
+            }
+          >
+            <Server className="size-4" />
+            {liveCount > 0 && (
+              <span className="text-xs font-mono">{liveCount}</span>
+            )}
+          </TooltipTrigger>
+          <TooltipContent>{tooltipLabel}</TooltipContent>
+        </Tooltip>
+        <SheetContent
+          side="right"
+          showCloseButton={false}
+          className="p-0 w-[95vw]"
+        >
+          <SheetHeader className="sr-only">
+            <SheetTitle>Services</SheetTitle>
+          </SheetHeader>
+          <ServicesPanel onClose={() => onOpenChange(false)} />
+        </SheetContent>
+      </Sheet>
+    )
+  }
 
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <SheetTrigger
-              className={cn(
-                "inline-flex items-center justify-center rounded-md h-9 px-2 gap-1 hover:bg-accent hover:text-accent-foreground",
-                liveCount > 0 && "text-emerald-500"
-              )}
-              aria-label="Running services"
-            />
-          }
-        >
-          <Server className="size-4" />
-          {liveCount > 0 && (
-            <span className="text-xs font-mono">{liveCount}</span>
-          )}
-        </TooltipTrigger>
-        <TooltipContent>
-          {liveCount > 0
-            ? `${liveCount} service${liveCount === 1 ? "" : "s"} running`
-            : "Services"}
-        </TooltipContent>
-      </Tooltip>
-      <SheetContent side="right" className="p-0 w-[95vw] sm:w-[560px]">
-        <SheetHeader className="sr-only">
-          <SheetTitle>Services</SheetTitle>
-        </SheetHeader>
-        <ServicesPanel open={open} />
-      </SheetContent>
-    </Sheet>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenChange(!open)}
+            aria-label={open ? "Close services" : "Open services"}
+            aria-pressed={open}
+            className={cn(
+              "relative",
+              open && "bg-accent text-accent-foreground",
+              liveCount > 0 && !open && "text-emerald-500"
+            )}
+          />
+        }
+      >
+        <Server className="size-5" />
+        {liveCount > 0 && (
+          <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-emerald-500 text-[10px] font-mono text-white flex items-center justify-center">
+            {liveCount}
+          </span>
+        )}
+      </TooltipTrigger>
+      <TooltipContent>{open ? `Close ${tooltipLabel.toLowerCase()}` : tooltipLabel}</TooltipContent>
+    </Tooltip>
   )
 })
 
 // ── Panel body ───────────────────────────────────────────────────────────────
+// Mounted when the user docks the panel; unmounted when they close it, so
+// we no longer track an `open` flag — mount-time = open-time.
 
-const ServicesPanel = observer(function ServicesPanel({ open }: { open: boolean }) {
+export const ServicesPanel = observer(function ServicesPanel({
+  onClose,
+}: {
+  onClose?: () => void
+} = {}) {
   const userId = workspace.userId
   const active = workspace.active
   const activeProject = workspace.activeProject
@@ -107,17 +172,84 @@ const ServicesPanel = observer(function ServicesPanel({ open }: { open: boolean 
   }, [userId, services])
 
   useEffect(() => {
-    if (!open) return
     void refresh()
     void services.refreshRunners()
+    if (userId) void services.refreshRailwayIntegration(userId)
     const t = window.setInterval(() => { void refresh() }, 5000)
     return () => window.clearInterval(t)
-  }, [open, refresh, services])
+  }, [refresh, services, userId])
 
-  // Reset editor when the sheet closes so reopening is fresh.
+  // First-run auto-prompt. If we have a project/task scope AND nothing is
+  // cached AND no services are running for this scope, open the editor
+  // pre-filled by the LLM (falls back to heuristic). Runs once per mount.
+  const llmBootstrappedRef = useRef(false)
   useEffect(() => {
-    if (!open) setEditor(null)
-  }, [open])
+    if (llmBootstrappedRef.current) return
+    if (!userId || !targetProjectId) return
+    if (editor) return
+    // If any services exist for this user, skip auto-prompt — the user is
+    // clearly past the "how do I run this" step for at least one project.
+    if (services.items.length > 0) return
+    llmBootstrappedRef.current = true
+
+    void (async () => {
+      try {
+        const view = await services.fetchProjectManifest(userId, targetProjectId)
+        if (view.cached) return // already configured — don't auto-open
+        // Open editor immediately in pending state so the user sees
+        // "detecting…" instead of a blank sheet while the LLM runs.
+        setEditor({
+          mode: "first-run",
+          projectId: targetProjectId,
+          conversationId: active?.id ?? null,
+          label: targetLabel,
+          initial: view.detected ?? { stack: "custom", start: "", env: {} },
+          detected: view.detected,
+          cwd: view.cwd,
+          llm: { status: "pending" },
+        })
+        const result = await services.detectLlmManifest(userId, targetProjectId)
+        const proposal = result.llm.proposal
+        setEditor((prev) => {
+          // User may have cancelled, saved, or switched projects while the
+          // LLM was thinking — only populate if we're still on the same
+          // first-run pending state.
+          if (!prev || prev.mode !== "first-run" || prev.projectId !== targetProjectId) {
+            return prev
+          }
+          if (prev.llm?.status !== "pending") return prev
+          if (!proposal || !proposal.start) {
+            return {
+              ...prev,
+              llm: result.llm.error
+                ? { status: "failed", error: result.llm.error }
+                : { status: "failed", error: "LLM didn't propose a start command" },
+            }
+          }
+          return {
+            ...prev,
+            initial: {
+              stack: proposal.stack,
+              start: proposal.start,
+              build: proposal.build,
+              env: proposal.env,
+            },
+            llm: {
+              status: "ready",
+              rationale: proposal.rationale,
+              confidence: proposal.confidence,
+            },
+          }
+        })
+      } catch (err) {
+        setEditor((prev) =>
+          prev && prev.mode === "first-run"
+            ? { ...prev, llm: { status: "failed", error: (err as Error).message } }
+            : prev
+        )
+      }
+    })()
+  }, [userId, targetProjectId, services, editor, targetLabel, active])
 
   const startCached = useCallback(async (projectId: string, conversationId: string | null, label: string | null) => {
     if (!userId) return
@@ -219,7 +351,7 @@ const ServicesPanel = observer(function ServicesPanel({ open }: { open: boolean 
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       <div className="flex items-center gap-2 px-4 py-3 border-b">
         <Server className="size-4" />
         <div className="text-sm font-medium">Services</div>
@@ -258,6 +390,17 @@ const ServicesPanel = observer(function ServicesPanel({ open }: { open: boolean 
           <Play className="size-3.5" />
           Run
         </Button>
+        {onClose && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 ml-1"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X className="size-4" />
+          </Button>
+        )}
       </div>
 
       <ScrollArea className="flex-1">
@@ -285,11 +428,13 @@ const ServicesPanel = observer(function ServicesPanel({ open }: { open: boolean 
       {selected && (
         <>
           <Separator />
-          <div className="h-[40%] min-h-[200px] max-h-[50vh]">
+          <div className="h-[40%] min-h-50 max-h-[50vh]">
             <LogViewer key={selected.id} svc={selected} />
           </div>
         </>
       )}
+
+      {!selected && <IntegrationsFooter />}
     </div>
   )
 })
@@ -384,9 +529,27 @@ function ManifestEditor({
   const [start, setStart] = useState<string>(init.start ?? "")
   const [build, setBuild] = useState<string>(init.build ?? "")
   const [envText, setEnvText] = useState<string>(formatEnv(init.env))
+  // Track user edits so LLM arrival doesn't clobber manual typing. Keyed by
+  // mode-projectId so "regenerating" for a different scope resets the guard.
+  const editedRef = useRef(false)
+  const scopeKey = `${state.mode}:${state.projectId}`
+  useEffect(() => { editedRef.current = false }, [scopeKey])
+
+  // When the parent updates `state.initial` (e.g. LLM detection resolved),
+  // refill the fields — but only if the user hasn't already typed something.
+  useEffect(() => {
+    if (editedRef.current) return
+    setStack(init.stack ?? "custom")
+    setStart(init.start ?? "")
+    setBuild(init.build ?? "")
+    setEnvText(formatEnv(init.env))
+  }, [init.stack, init.start, init.build, init.env])
+
+  const markEdited = () => { editedRef.current = true }
 
   const isFirstRun = state.mode === "first-run"
-  const canSave = !!start.trim()
+  const llmPending = state.llm?.status === "pending"
+  const canSave = !!start.trim() && !llmPending
 
   const handleSubmit = (run: boolean) => {
     if (!canSave) return
@@ -419,7 +582,7 @@ function ManifestEditor({
               : "Saved to the project. Applies to every task and chat in this project unless a task override exists."}
           </div>
           <div className="mt-1 font-mono truncate" title={state.cwd}>cwd: {state.cwd}</div>
-          {state.detected && isFirstRun && (
+          {state.detected && isFirstRun && state.llm?.status !== "ready" && (
             <div className="mt-1">
               Detected: <span className="font-mono">{state.detected.stack}</span>
               {state.detected.start && <> · <span className="font-mono">{state.detected.start}</span></>}
@@ -427,11 +590,46 @@ function ManifestEditor({
           )}
         </div>
 
+        {state.llm?.status === "pending" && (
+          <div className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
+            <Loader2 className="size-3.5 animate-spin shrink-0" />
+            <span>Asking the model to inspect this project…</span>
+          </div>
+        )}
+        {state.llm?.status === "ready" && (
+          <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-1">
+            <div className="flex items-center gap-2 font-medium">
+              <Sparkles className="size-3.5 text-amber-500 shrink-0" />
+              <span>Model suggestion</span>
+              <span className={cn(
+                "ml-auto rounded-full px-2 py-0.5 text-[10px] font-mono",
+                state.llm.confidence === "high" && "bg-emerald-500/10 text-emerald-500",
+                state.llm.confidence === "medium" && "bg-amber-500/10 text-amber-500",
+                state.llm.confidence === "low" && "bg-muted-foreground/10 text-muted-foreground",
+              )}>
+                {state.llm.confidence}
+              </span>
+            </div>
+            {state.llm.rationale && (
+              <div className="text-muted-foreground">{state.llm.rationale}</div>
+            )}
+          </div>
+        )}
+        {state.llm?.status === "failed" && (
+          <div className="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs flex items-start gap-2">
+            <CircleAlert className="size-3.5 text-red-500 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-medium text-red-500">LLM detection failed</div>
+              <div className="text-muted-foreground">{state.llm.error}</div>
+            </div>
+          </div>
+        )}
+
         <label className="block space-y-1">
           <div className="text-xs font-medium">Stack</div>
           <select
             value={stack}
-            onChange={(e) => setStack(e.target.value)}
+            onChange={(e) => { setStack(e.target.value); markEdited() }}
             className="w-full h-9 rounded-md border bg-background px-2 text-sm"
           >
             <option value="node">node</option>
@@ -447,7 +645,7 @@ function ManifestEditor({
           <div className="text-xs font-medium">Start command</div>
           <Input
             value={start}
-            onChange={(e) => setStart(e.target.value)}
+            onChange={(e) => { setStart(e.target.value); markEdited() }}
             placeholder="e.g. npm run dev"
             className="font-mono text-sm"
             autoFocus
@@ -461,7 +659,7 @@ function ManifestEditor({
           <div className="text-xs font-medium">Build command <span className="text-muted-foreground">(optional)</span></div>
           <Input
             value={build}
-            onChange={(e) => setBuild(e.target.value)}
+            onChange={(e) => { setBuild(e.target.value); markEdited() }}
             placeholder="e.g. npm ci && npm run build"
             className="font-mono text-sm"
           />
@@ -471,7 +669,7 @@ function ManifestEditor({
           <div className="text-xs font-medium">Environment <span className="text-muted-foreground">(KEY=value per line)</span></div>
           <textarea
             value={envText}
-            onChange={(e) => setEnvText(e.target.value)}
+            onChange={(e) => { setEnvText(e.target.value); markEdited() }}
             placeholder="NODE_ENV=development&#10;DATABASE_URL=postgres://…"
             rows={5}
             className="w-full rounded-md border bg-background px-2 py-1.5 font-mono text-xs resize-y"
@@ -702,3 +900,169 @@ const LogViewer = observer(function LogViewer({ svc }: { svc: Service }) {
     </div>
   )
 })
+
+// ── Integrations footer ─────────────────────────────────────────────────────
+
+const IntegrationsFooter = observer(function IntegrationsFooter() {
+  const userId = workspace.userId
+  const services = workspace.services
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const confirm = useConfirm()
+
+  const railway = services.railway
+
+  const onDisconnect = async () => {
+    if (!userId) return
+    const ok = await confirm({
+      title: "Disconnect Railway?",
+      description: "You can reconnect any time.",
+      variant: "destructive",
+      confirmText: "Disconnect",
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await services.disconnectRailway(userId)
+      toast.success("Railway disconnected")
+    } catch (err) {
+      toast.error("Disconnect failed", { description: (err as Error).message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <Separator />
+      <div className="px-4 py-2.5 flex items-center gap-2 text-xs">
+        {railway.connected ? (
+          <>
+            <Cloud className="size-3.5 text-emerald-500 shrink-0" />
+            <div className="min-w-0 flex-1 truncate">
+              <span className="text-muted-foreground">Railway · </span>
+              <span className="font-medium">
+                {railway.account.username ?? railway.account.email ?? railway.account.id}
+              </span>
+            </div>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6"
+                    onClick={() => { void onDisconnect() }}
+                    disabled={busy}
+                    aria-label="Disconnect Railway"
+                  />
+                }
+              >
+                <Unlink className="size-3" />
+              </TooltipTrigger>
+              <TooltipContent>Disconnect</TooltipContent>
+            </Tooltip>
+          </>
+        ) : (
+          <>
+            <CloudOff className="size-3.5 text-muted-foreground shrink-0" />
+            <div className="flex-1 text-muted-foreground">Railway not connected</div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7"
+              onClick={() => setDialogOpen(true)}
+              disabled={!userId}
+            >
+              <Link2 className="size-3" />
+              Connect
+            </Button>
+          </>
+        )}
+      </div>
+      {dialogOpen && (
+        <RailwayConnectDialog onClose={() => setDialogOpen(false)} />
+      )}
+    </>
+  )
+})
+
+function RailwayConnectDialog({ onClose }: { onClose: () => void }) {
+  const userId = workspace.userId
+  const [token, setToken] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const canSubmit = !!userId && !!token.trim() && !busy
+
+  const onSubmit = async () => {
+    if (!canSubmit) return
+    setBusy(true)
+    setError(null)
+    try {
+      await workspace.services.connectRailway(userId!, token.trim())
+      toast.success("Railway connected")
+      onClose()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 z-10 bg-background flex flex-col">
+      <div className="flex items-center gap-2 px-4 py-3 border-b">
+        <Button variant="ghost" size="sm" onClick={onClose} aria-label="Back">
+          <ChevronLeft className="size-4" />
+        </Button>
+        <div className="text-sm font-medium">Connect Railway</div>
+      </div>
+      <div className="flex-1 overflow-auto px-4 py-4 space-y-4 text-sm">
+        <p className="text-muted-foreground">
+          Paste a Railway personal token. We validate it against Railway's API
+          before saving, and store it encrypted.
+        </p>
+        <p className="text-muted-foreground">
+          Generate one at{" "}
+          <a
+            href="https://railway.com/account/tokens"
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
+            railway.com/account/tokens
+          </a>
+          .
+        </p>
+        <label className="block space-y-1">
+          <div className="text-xs font-medium">Token</div>
+          <Input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="rw_…"
+            className="font-mono text-sm"
+            autoFocus
+          />
+        </label>
+        {error && (
+          <div className="text-xs text-red-500 flex items-start gap-1">
+            <CircleAlert className="size-3.5 shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center gap-2 px-4 py-3 border-t">
+        <Button variant="outline" size="sm" onClick={onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <div className="flex-1" />
+        <Button size="sm" onClick={() => { void onSubmit() }} disabled={!canSubmit}>
+          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Link2 className="size-3.5" />}
+          Connect
+        </Button>
+      </div>
+    </div>
+  )
+}

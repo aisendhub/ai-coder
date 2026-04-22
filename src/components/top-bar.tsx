@@ -17,6 +17,8 @@ type Props = {
   onRightOpenChange: (open: boolean) => void
   terminalOpen: boolean
   onTerminalOpenChange: (open: boolean) => void
+  servicesOpen: boolean
+  onServicesOpenChange: (open: boolean) => void
 }
 
 export const TopBar = observer(function TopBar({
@@ -24,6 +26,8 @@ export const TopBar = observer(function TopBar({
   onRightOpenChange,
   terminalOpen,
   onTerminalOpenChange,
+  servicesOpen,
+  onServicesOpenChange,
 }: Props) {
   const active = workspace.active
   const title = active?.title ?? "New chat"
@@ -88,7 +92,7 @@ export const TopBar = observer(function TopBar({
           </Tooltip>
         )}
         <NotificationsTrigger />
-        <ServicesTrigger />
+        <ServicesTrigger open={servicesOpen} onOpenChange={onServicesOpenChange} />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
         <TerminalTrigger open={terminalOpen} onOpenChange={onTerminalOpenChange} />
       </div>

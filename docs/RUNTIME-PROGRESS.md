@@ -167,12 +167,49 @@ Same manifest, run in Docker/Podman/OrbStack via CLI. Proves the manifest-to-con
 
 ## Phase 5 — Railway adapter
 
-- ⬜ `server/runtime/runners/railway.ts` using Railway GraphQL API
-- ⬜ Per-user Railway token in `user_integrations`
-- ⬜ Create/update service from repo + env vars
-- ⬜ Deploy triggered by pushing the worktree branch
-- ⬜ Log stream via Railway's log API
-- ⬜ UI: "Deploy to Railway" button on worktree header (once user has connected)
+Phase 5 is split into slices because the full scope (token, project binding, deploy, logs) is substantially bigger than Phases 1–4 and each slice is independently useful.
+
+### Slice 1 — Integration foundation
+
+The credential + connect flow, shared by every future cloud target — not Railway-specific.
+
+- ✅ Migration `supabase/migrations/0012_user_integrations.sql`
+  - ✅ `user_integrations` table: `(user_id, provider, token_ciphertext, account jsonb, connected_at, updated_at)` with `unique (user_id, provider)` and RLS (`user_integrations_{select,insert,update,delete}_own`)
+  - ✅ `projects.railway_project_id`, `projects.railway_service_id` (bind columns, unused until Slice 2)
+  - ✅ `conversations.railway_deployment_id` (deploy bookkeeping, unused until Slice 3)
+  - ✅ Applied to Supabase
+- ✅ `server/integrations/crypto.ts` — AES-256-GCM at-rest encryption (`INTEGRATIONS_KEY` env var; 32-byte base64 or SHA-256 of any string). DB never sees plaintext.
+- ✅ `server/integrations/railway.ts` — minimal GraphQL client against `backboard.railway.com/graphql/v2`: `fetchMe`, `fetchProjects`, typed `RailwayApiError` with 401/403 detection
+- ✅ Endpoints:
+  - ✅ `POST /api/integrations/railway/connect` — validates via `me` query, stores encrypted, captures account snapshot
+  - ✅ `GET /api/integrations/railway?userId=` — returns `{ connected: false }` or `{ connected: true, account, connected_at, updated_at }`
+  - ✅ `DELETE /api/integrations/railway?userId=` — disconnect
+- ✅ UI — `IntegrationsFooter` in the services panel:
+  - ✅ Shows `Cloud` + "@username" when connected, `Unlink` icon to disconnect
+  - ✅ `CloudOff` + "Connect" button when disconnected
+  - ✅ `RailwayConnectDialog` — password input, validates against Railway API, shows inline error
+- ✅ Env var documentation: `INTEGRATIONS_KEY` required; generate with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
+
+### Slice 2 — Project binding (next)
+
+- ⬜ `GET /api/integrations/railway/projects?userId=` — list user's Railway projects + services
+- ⬜ `PUT /api/projects/:id/railway` — bind an ai-coder project to a Railway project/service
+- ⬜ UI: project settings row showing Railway binding (select project + service)
+- ⬜ "Create new Railway project" as an inline option if none exists
+
+### Slice 3 — Deploy
+
+- ⬜ `server/runtime/deploy/railway.ts` — adapter that triggers a deploy for a given worktree/manifest
+  - ⬜ Path A: `railway up` CLI shell-out (simpler, requires CLI install + `RAILWAY_TOKEN` env injection)
+  - ⬜ Path B: GraphQL `deploymentTrigger` against an already-bound service that pulls from GitHub (requires GitHub remote)
+- ⬜ `POST /api/services/deploy` — body `{ conversationId, target: "railway" }` → kicks off deploy, persists `conversations.railway_deployment_id`
+- ⬜ UI: "Deploy to Railway" button on worktree header (gated on project binding + live connection)
+
+### Slice 4 — Status & logs
+
+- ⬜ `GET /api/services/deploy/:deploymentId` — current status from Railway
+- ⬜ `GET /api/services/deploy/:deploymentId/logs` — SSE stream (subscribe to Railway's build/deploy logs, pipe through)
+- ⬜ UI: deployment status pill in the services panel + "View logs" → reuses existing log viewer
 
 ## Phase 6 — Fly.io adapter
 

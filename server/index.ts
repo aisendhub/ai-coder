@@ -39,6 +39,7 @@ import {
   feedbackHash,
   runEvaluator,
   summarizeTools,
+  detectManifestWithLLM,
   type EvaluatorResult,
 } from "./agent-loop"
 import {
@@ -2303,6 +2304,48 @@ app.delete("/api/projects/:id/manifest", async (c) => {
     .eq("id", projectId)
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ ok: true })
+})
+
+// Ask the LLM to inspect the project cwd and propose a run manifest. Used by
+// the UI to pre-fill the first-run editor with a smart suggestion when the
+// heuristic detector can't see the whole picture (README-only configs, custom
+// framework conventions, etc.). Does NOT persist — caller saves via PUT after
+// the user confirms.
+app.post("/api/projects/:id/manifest/detect-llm", async (c) => {
+  const projectId = c.req.param("id")
+  const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
+  const userId = body.userId
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, user_id, cwd")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const cwd = resolveProjectCwd(project.cwd)
+
+  // Run the heuristic detector in parallel as a fallback — cheaper and
+  // instant, so if the LLM comes back empty the client still has something.
+  const [heuristic, llm] = await Promise.all([
+    detectManifest(cwd).catch(() => null),
+    detectManifestWithLLM({ cwd }),
+  ])
+
+  return c.json({
+    cwd,
+    heuristic,
+    llm: {
+      proposal: llm.proposal,
+      rationale: llm.proposal?.rationale ?? "",
+      confidence: llm.proposal?.confidence ?? null,
+      costUsd: llm.costUsd,
+      error: llm.error ?? null,
+    },
+  })
 })
 
 app.get("/api/conversations/:id/manifest", async (c) => {

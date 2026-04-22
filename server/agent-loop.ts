@@ -231,3 +231,170 @@ export async function generateCommitMessage({
     .trim()
   return cleaned || null
 }
+
+// ─── LLM-based run-manifest detector ─────────────────────────────────────────
+// The heuristic detector in server/runtime/manifest.ts handles the common
+// cases (package.json scripts, Procfile, Python entrypoints). When none of
+// those match, or the repo is a framework the heuristics don't know, we ask
+// the model to read the tree and propose a start command. Stateless, bounded
+// cost, read-only tools.
+
+export type LlmManifestStack =
+  | "node"
+  | "bun"
+  | "python"
+  | "go"
+  | "ruby"
+  | "static"
+  | "docker"
+  | "custom"
+
+export type LlmManifestProposal = {
+  stack: LlmManifestStack
+  start: string
+  build?: string
+  env: Record<string, string>
+  rationale: string
+  confidence: "high" | "medium" | "low"
+}
+
+export type LlmManifestDetectionResult = {
+  proposal: LlmManifestProposal | null
+  costUsd: number
+  raw: string
+  error?: string
+}
+
+const RUN_DETECT_SYSTEM_PROMPT = `You are a release engineer inspecting an unknown codebase.
+Your job: propose how to START this application for local development.
+
+You have read-only tools (Read, Glob, Grep, Bash). Bash is for small read-only
+commands like \`cat\`, \`ls\`, \`head\`, \`test -f\`. Do NOT modify anything.
+
+Steps you should take:
+1. Look at the repo root for obvious anchors: package.json, Procfile, Dockerfile,
+   pyproject.toml, requirements.txt, go.mod, Gemfile, Cargo.toml, index.html.
+2. If package.json exists: read it. Prefer scripts.dev, then scripts.start.
+   Detect the package manager from the lockfile (bun.lock* → bun, pnpm-lock.yaml
+   → pnpm, yarn.lock → yarn, else npm).
+3. If Procfile exists: its "web:" process wins over heuristics.
+4. If README/READ*.md mentions a run command, read it. It often specifies
+   env vars the user must set.
+5. Keep the start command short and expect the host to inject PORT via env.
+   Use $PORT in the command if the app needs an explicit port argument.
+
+Respond with ONLY valid JSON matching this schema (no markdown fences, no
+commentary):
+{
+  "stack": "node" | "bun" | "python" | "go" | "ruby" | "static" | "docker" | "custom",
+  "start": "exact shell command — e.g. 'npm run dev' or 'bun dev'",
+  "build": "optional build command, omit when none",
+  "env": { "KEY": "value" },
+  "rationale": "one to two sentences explaining why you picked this command",
+  "confidence": "high" | "medium" | "low"
+}
+
+Rules:
+- "start" is REQUIRED and must be a non-empty single-line shell command.
+- "env" is REQUIRED; use an empty object when you have no suggestions.
+- "confidence" is REQUIRED.
+- If you cannot find anything runnable, return: {"stack":"custom","start":"","env":{},"rationale":"…","confidence":"low"}.
+- No preamble. No JSON code fences. No commentary outside the object.`
+
+export async function detectManifestWithLLM({
+  cwd,
+  abort,
+}: {
+  cwd: string
+  abort?: AbortController
+}): Promise<LlmManifestDetectionResult> {
+  const userMessage = [
+    `Worktree: ${cwd}`,
+    "",
+    "Inspect this directory and propose how to start the app locally.",
+    "Return JSON per the schema in your system prompt.",
+  ].join("\n")
+
+  let finalText = ""
+  let costUsd = 0
+  try {
+    const messages = query({
+      prompt: userMessage,
+      options: {
+        cwd,
+        permissionMode: "default",
+        systemPrompt: RUN_DETECT_SYSTEM_PROMPT,
+        allowedTools: ["Read", "Glob", "Grep", "Bash"],
+        settingSources: [],
+        includePartialMessages: false,
+        abortController: abort,
+      },
+    })
+    for await (const msg of messages) {
+      if (msg.type === "assistant") {
+        for (const block of msg.message.content) {
+          if (block.type === "text") finalText += block.text
+        }
+      } else if (msg.type === "result") {
+        costUsd = Number(msg.total_cost_usd ?? 0)
+        break
+      }
+    }
+  } catch (err) {
+    return {
+      proposal: null,
+      costUsd,
+      raw: finalText,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  const proposal = parseRunDetectJson(finalText)
+  return { proposal, costUsd, raw: finalText }
+}
+
+function parseRunDetectJson(raw: string): LlmManifestProposal | null {
+  const cleaned = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim()
+  if (!cleaned) return null
+  let obj: unknown
+  try {
+    obj = JSON.parse(cleaned)
+  } catch {
+    return null
+  }
+  if (!obj || typeof obj !== "object") return null
+  const r = obj as Record<string, unknown>
+
+  const allowedStacks: LlmManifestStack[] = [
+    "node",
+    "bun",
+    "python",
+    "go",
+    "ruby",
+    "static",
+    "docker",
+    "custom",
+  ]
+  const stack = allowedStacks.includes(r.stack as LlmManifestStack)
+    ? (r.stack as LlmManifestStack)
+    : "custom"
+  const start = typeof r.start === "string" ? r.start.trim() : ""
+  const build = typeof r.build === "string" && r.build.trim() ? r.build.trim() : undefined
+  const env: Record<string, string> = {}
+  if (r.env && typeof r.env === "object") {
+    for (const [k, v] of Object.entries(r.env as Record<string, unknown>)) {
+      if (typeof v === "string") env[k] = v
+    }
+  }
+  const confidence =
+    r.confidence === "high" || r.confidence === "medium" || r.confidence === "low"
+      ? r.confidence
+      : "low"
+  const rationale = typeof r.rationale === "string" ? r.rationale : ""
+
+  return { stack, start, env, build, rationale, confidence }
+}

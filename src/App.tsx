@@ -11,10 +11,12 @@ import { NavPanel } from "@/components/nav-panel"
 import { ChatPanel } from "@/components/chat-panel"
 import { CodePanel } from "@/components/code-panel"
 import { FilePanelSlot } from "@/components/file-panel"
+import { ServicesPanel } from "@/components/services-panel"
 import { TerminalPanel } from "@/components/terminal-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { TopBar } from "@/components/top-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { usePersistentState } from "@/hooks/use-persistent-state"
 import { AuthProvider, useAuth } from "@/lib/auth"
 import { SignIn } from "@/components/sign-in"
 import { isSupabaseConfigured } from "@/lib/supabase"
@@ -73,8 +75,11 @@ function Workspace() {
 }
 
 function DesktopLayout() {
-  const [rightOpen, setRightOpen] = useState(true)
-  const [terminalOpen, setTerminalOpen] = useState(false)
+  // Panel open state persists across reloads; widths are handled by
+  // react-resizable-panels via `autoSaveId` (per-combination).
+  const [rightOpen, setRightOpen] = usePersistentState("ai-coder:panels:rightOpen", true)
+  const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
+  const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
   const navRef = useRef<ImperativePanelHandle>(null)
@@ -116,6 +121,8 @@ function DesktopLayout() {
                 onRightOpenChange={setRightOpen}
                 terminalOpen={terminalOpen}
                 onTerminalOpenChange={setTerminalOpen}
+                servicesOpen={servicesOpen}
+                onServicesOpenChange={setServicesOpen}
               />
               <div className="flex-1 min-h-0 overflow-hidden">
                 <ChatPanel />
@@ -157,6 +164,21 @@ function DesktopLayout() {
               </ResizablePanel>
             </>
           )}
+          {servicesOpen && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel
+                id="services"
+                defaultSize={28}
+                minSize={22}
+                maxSize={50}
+              >
+                <div className="h-full min-h-0 overflow-hidden border-l relative">
+                  <ServicesPanel onClose={() => setServicesOpen(false)} />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
           <FilePanelSlot />
         </ResizablePanelGroup>
       </div>
@@ -165,8 +187,9 @@ function DesktopLayout() {
 }
 
 function MobileLayout() {
-  const [rightOpen, setRightOpen] = useState(false)
-  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [rightOpen, setRightOpen] = usePersistentState("ai-coder:panels:mobile:rightOpen", false)
+  const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:mobile:terminalOpen", false)
+  const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:mobile:servicesOpen", false)
   return (
     <ChatStateProvider>
       <SidebarProvider style={{ height: "100svh" } as React.CSSProperties}>
@@ -177,6 +200,8 @@ function MobileLayout() {
             onRightOpenChange={setRightOpen}
             terminalOpen={terminalOpen}
             onTerminalOpenChange={setTerminalOpen}
+            servicesOpen={servicesOpen}
+            onServicesOpenChange={setServicesOpen}
           />
           <div className="flex-1 min-h-0 overflow-hidden">
             <ChatPanel />

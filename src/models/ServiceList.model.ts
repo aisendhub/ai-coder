@@ -18,6 +18,23 @@ export type RunnerInfo = {
   reason?: string
 }
 
+export type RailwayAccount = {
+  id: string
+  username: string | null
+  email: string | null
+  name: string | null
+}
+
+export type RailwayIntegration =
+  | { connected: false }
+  | {
+      connected: true
+      provider: "railway"
+      account: RailwayAccount
+      connected_at: string
+      updated_at: string
+    }
+
 export type RunManifestDto = {
   stack: string
   build?: string
@@ -34,6 +51,23 @@ export type ProjectManifestView = {
   detected: RunManifestDto | null
   effective: RunManifestDto | null
   cwd: string
+}
+
+export type LlmManifestDetection = {
+  cwd: string
+  heuristic: RunManifestDto | null
+  llm: {
+    proposal:
+      | (RunManifestDto & {
+          rationale: string
+          confidence: "high" | "medium" | "low"
+        })
+      | null
+    rationale: string
+    confidence: "high" | "medium" | "low" | null
+    costUsd: number
+    error: string | null
+  }
 }
 
 export type ConversationManifestView = {
@@ -53,6 +87,7 @@ export class ServiceList extends BaseList<typeof Service> {
   @observable loading = false
   @observable lastError: string | null = null
   @observable runners: RunnerInfo[] = []
+  @observable railway: RailwayIntegration = { connected: false }
 
   private logStreams = new Map<string, EventSource>()
 
@@ -97,6 +132,59 @@ export class ServiceList extends BaseList<typeof Service> {
     } finally {
       this.setLoading(false)
     }
+  }
+
+  // ── Integrations (Phase 5) ─────────────────────────────────────────────────
+
+  async refreshRailwayIntegration(userId: string): Promise<void> {
+    try {
+      const res = await fetch(
+        `/api/integrations/railway?userId=${encodeURIComponent(userId)}`
+      )
+      if (!res.ok) return
+      const body = (await res.json()) as RailwayIntegration
+      runInAction(() => { this.railway = body })
+    } catch {
+      /* advisory */
+    }
+  }
+
+  async connectRailway(userId: string, token: string): Promise<void> {
+    const res = await fetch("/api/integrations/railway/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, token }),
+    })
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const fresh = (await res.json()) as {
+      provider: "railway"
+      account: RailwayAccount
+      connected_at: string
+    }
+    runInAction(() => {
+      this.railway = {
+        connected: true,
+        provider: "railway",
+        account: fresh.account,
+        connected_at: fresh.connected_at,
+        updated_at: fresh.connected_at,
+      }
+    })
+  }
+
+  async disconnectRailway(userId: string): Promise<void> {
+    const res = await fetch(
+      `/api/integrations/railway?userId=${encodeURIComponent(userId)}`,
+      { method: "DELETE" }
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    runInAction(() => { this.railway = { connected: false } })
   }
 
   async refreshRunners(): Promise<void> {
@@ -216,6 +304,22 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   // ── Manifest CRUD ──────────────────────────────────────────────────────────
+
+  async detectLlmManifest(
+    userId: string,
+    projectId: string
+  ): Promise<LlmManifestDetection> {
+    const res = await fetch(`/api/projects/${projectId}/manifest/detect-llm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId }),
+    })
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    return (await res.json()) as LlmManifestDetection
+  }
 
   async fetchProjectManifest(
     userId: string,
