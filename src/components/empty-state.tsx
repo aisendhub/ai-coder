@@ -34,6 +34,12 @@ export const EmptyState = observer(function EmptyState() {
   const conv = workspace.active
   if (!conv) return <NoActive />
   if (conv.messages.items.length > 0) return null
+  // Until the messages fetch has committed, `messages.length === 0` is
+  // ambiguous — it could be a draft or a saved task whose rows haven't
+  // arrived yet. Rendering FreshTask/FreshChat here is what causes the
+  // post-reload flash on saved tasks. Wait for `loaded` to commit so we
+  // only show the compose card for genuine empties (true drafts).
+  if (!conv.loaded) return null
   if (conv.kind === "task") return <FreshTask conversation={conv} />
   return <FreshChat />
 })
