@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { X, FileText, RefreshCw } from "lucide-react"
+import { X, FileText, RefreshCw, Code, Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable"
 import { cn } from "@/lib/utils"
 import { highlightCode, languageForPath } from "@/lib/highlight"
 import { workspace } from "@/models"
+import { Markdown } from "@/components/markdown"
+
+/** Files we auto-preview on open. Tiny allow-list — other formats show
+ *  syntax-highlighted source as before. */
+function isMarkdownPath(path: string | null): boolean {
+  if (!path) return false
+  const lower = path.toLowerCase()
+  return lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".mdx")
+}
 
 type LineStatus = "added" | "modified" | "context"
 
@@ -42,6 +51,12 @@ export const FilePanel = observer(function FilePanel() {
   const [loading, setLoading] = useState(false)
   const [html, setHtml] = useState<string | null>(null)
   const [diff, setDiff] = useState<string>("")
+  // Markdown files open in preview. `</>`  toggles to raw source; Eye toggles
+  // back. Reset whenever the user opens a different file so each open lands
+  // in its own default view.
+  const isMarkdown = isMarkdownPath(path)
+  const [showSource, setShowSource] = useState(false)
+  useEffect(() => { setShowSource(false) }, [path])
 
   const fetchFile = useCallback(async () => {
     if (!conversationId || !path) return
@@ -154,6 +169,25 @@ export const FilePanel = observer(function FilePanel() {
             </span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {isMarkdown && (
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowSource((s) => !s)}
+                    aria-label={showSource ? "Show rendered markdown" : "Show source"}
+                  >
+                    {showSource
+                      ? <Eye className="size-3.5" />
+                      : <Code className="size-3.5" />}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {showSource ? "Show rendered markdown" : "Show source"}
+                </TooltipContent>
+              </Tooltip>
+            )}
             <Tooltip>
               <TooltipTrigger>
                 <Button size="sm" variant="ghost" onClick={fetchFile} disabled={loading}>
@@ -186,17 +220,50 @@ export const FilePanel = observer(function FilePanel() {
           <div className="px-3 pb-2 text-xs text-red-600">{error}</div>
         )}
       </div>
-      <FilePanelBody
-        loading={loading}
-        error={error}
-        content={content}
-        html={language ? html : null}
-        byLine={lineStatuses.byLine}
-        removedAfter={lineStatuses.removedAfter}
-      />
+      {isMarkdown && !showSource ? (
+        <MarkdownPreviewBody
+          loading={loading}
+          error={error}
+          content={content}
+        />
+      ) : (
+        <FilePanelBody
+          loading={loading}
+          error={error}
+          content={content}
+          html={language ? html : null}
+          byLine={lineStatuses.byLine}
+          removedAfter={lineStatuses.removedAfter}
+        />
+      )}
     </div>
   )
 })
+
+/** Rendered-markdown view for .md/.mdx/.markdown files. No gutter — the
+ *  source view already covers diff inspection; this is for reading. */
+function MarkdownPreviewBody({
+  loading,
+  error,
+  content,
+}: {
+  loading: boolean
+  error: string | null
+  content: string | null
+}) {
+  return (
+    <div className="flex-1 min-h-0 overflow-auto">
+      {!loading && !error && content !== null && (
+        <div className="max-w-3xl mx-auto px-6 py-4">
+          <Markdown>{content}</Markdown>
+        </div>
+      )}
+      {loading && content === null && (
+        <div className="p-6 text-center text-xs text-muted-foreground">Loading…</div>
+      )}
+    </div>
+  )
+}
 
 function FilePanelBody({
   loading,
