@@ -7,6 +7,7 @@ import { Separator } from "@/components/ui/separator"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ChangesTrigger, TerminalTrigger } from "@/components/right-panel"
+import { ServicesTrigger } from "@/components/services-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { showOsNotification } from "@/hooks/use-turn-notifications"
 import { workspace } from "@/models"
@@ -87,6 +88,7 @@ export const TopBar = observer(function TopBar({
           </Tooltip>
         )}
         <NotificationsTrigger />
+        <ServicesTrigger />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
         <TerminalTrigger open={terminalOpen} onOpenChange={onTerminalOpenChange} />
       </div>

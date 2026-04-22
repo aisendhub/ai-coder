@@ -43,6 +43,21 @@ import {
   summarizeTools,
   type EvaluatorResult,
 } from "./agent-loop"
+import {
+  detect as detectManifest,
+  mergeManifest,
+  startService,
+  stopService,
+  getService,
+  listServices,
+  subscribeLogs,
+  removeService,
+  listRunners,
+  getRunnersInfo,
+  RuntimeError,
+  type ManifestOverride,
+  type RunnerId,
+} from "./runtime/index.ts"
 
 const execFileP = promisify(execFile)
 
@@ -1743,6 +1758,479 @@ async function reapTrashedConversations(): Promise<void> {
 // again on an interval. Errors are swallowed — the next tick will retry.
 setTimeout(() => { void reapTrashedConversations() }, 30_000)
 setInterval(() => { void reapTrashedConversations() }, REAPER_INTERVAL_MS)
+
+
+// ─── Local runtime: /api/services/* ─────────────────────────────────────────
+// Spawns the user's app from a project or worktree cwd, captures logs,
+// and lists/streams. See docs/RUNTIME.md; runner code lives in
+// server/runtime/. Chat/agent code must not import runtime internals.
+
+function runtimeErrorStatus(code: RuntimeError["code"]): 403 | 404 | 409 | 429 | 500 | 503 {
+  switch (code) {
+    case "user_cap_reached": return 429
+    case "port_range_exhausted": return 503
+    case "runner_unavailable": return 503
+    case "not_found": return 404
+    case "not_owner": return 403
+    case "already_stopped": return 409
+  }
+}
+
+type ManifestContext = {
+  ok: true
+  projectCwd: string
+  effectiveCwd: string
+  cachedProjectManifest: RunManifest | null
+  override: ManifestOverride | null
+  assignedPort: number | null
+  conversationId: string | null
+  worktreePath: string | null
+}
+
+async function loadManifestContext(
+  userId: string,
+  projectId: string,
+  conversationId: string | undefined
+): Promise<
+  | ManifestContext
+  | { ok: false; status: 403 | 404 | 503; error: string }
+> {
+  if (!sb) return { ok: false, status: 503, error: "persistence disabled" }
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, user_id, cwd, run_manifest")
+    .eq("id", projectId)
+    .single()
+  if (!project) return { ok: false, status: 404, error: "project not found" }
+  if (project.user_id !== userId) return { ok: false, status: 403, error: "forbidden" }
+
+  const projectCwd = resolveProjectCwd(project.cwd)
+  const cached = (project.run_manifest ?? null) as RunManifest | null
+
+  if (!conversationId) {
+    return {
+      ok: true,
+      projectCwd,
+      effectiveCwd: projectCwd,
+      cachedProjectManifest: cached,
+      override: null,
+      assignedPort: null,
+      conversationId: null,
+      worktreePath: null,
+    }
+  }
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, project_id, worktree_path, run_manifest_override, assigned_port")
+    .eq("id", conversationId)
+    .single()
+  if (!conv || conv.project_id !== projectId) {
+    return { ok: false, status: 404, error: "conversation not found" }
+  }
+
+  return {
+    ok: true,
+    projectCwd,
+    effectiveCwd: conv.worktree_path ? resolve(conv.worktree_path) : projectCwd,
+    cachedProjectManifest: cached,
+    override: (conv.run_manifest_override ?? null) as ManifestOverride | null,
+    assignedPort: (conv.assigned_port ?? null) as number | null,
+    conversationId: conv.id as string,
+    worktreePath: (conv.worktree_path ?? null) as string | null,
+  }
+}
+
+// Whitelist the fields we're willing to persist into run_manifest / override.
+// Keeps users (and future bugs) from stashing arbitrary JSON on a shared row.
+function sanitizeManifest(raw: unknown): RunManifest | null {
+  if (!raw || typeof raw !== "object") return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.start !== "string") return null
+  const stack = typeof r.stack === "string" ? r.stack : "custom"
+  const env = r.env && typeof r.env === "object" ? (r.env as Record<string, string>) : {}
+  const out: RunManifest = {
+    stack: stack as RunManifest["stack"],
+    start: r.start,
+    cwd: "", // server-side only; always re-anchored at start time
+    env,
+  }
+  if (typeof r.build === "string") out.build = r.build
+  if (typeof r.port === "number") out.port = r.port
+  if (typeof r.dockerfile === "string") out.dockerfile = r.dockerfile
+  if (
+    r.healthcheck &&
+    typeof r.healthcheck === "object" &&
+    typeof (r.healthcheck as Record<string, unknown>).path === "string" &&
+    typeof (r.healthcheck as Record<string, unknown>).timeoutMs === "number"
+  ) {
+    out.healthcheck = r.healthcheck as RunManifest["healthcheck"]
+  }
+  return out
+}
+
+function sanitizeOverride(raw: unknown): ManifestOverride | null {
+  const full = sanitizeManifest({ ...(raw as object), start: (raw as { start?: string })?.start ?? "x" })
+  if (!full) return null
+  const out: ManifestOverride = {}
+  const r = raw as Record<string, unknown>
+  if (typeof r.stack === "string") out.stack = r.stack as RunManifest["stack"]
+  if (typeof r.start === "string") out.start = r.start
+  if (typeof r.build === "string") out.build = r.build
+  if (typeof r.port === "number") out.port = r.port
+  if (typeof r.dockerfile === "string") out.dockerfile = r.dockerfile
+  if (r.env && typeof r.env === "object") out.env = r.env as Record<string, string>
+  if (full.healthcheck) out.healthcheck = full.healthcheck
+  return out
+}
+
+app.post("/api/services/start", async (c) => {
+  const body = await c.req.json<{
+    userId?: string
+    projectId?: string
+    conversationId?: string
+    label?: string
+    overrides?: ManifestOverride
+    runnerId?: RunnerId
+  }>().catch(() => ({}))
+  const { userId, projectId, conversationId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!projectId) return c.json({ error: "projectId required" }, 400)
+
+  const ctx = await loadManifestContext(userId, projectId, conversationId)
+  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
+
+  // Prefer cached project manifest; fall back to on-the-fly detection. The
+  // first-run UX caches the detected manifest via PUT /api/projects/:id/manifest
+  // before calling start, so on well-behaved flows `cached` is always set.
+  let base: RunManifest | null = ctx.cachedProjectManifest
+  if (!base) {
+    try {
+      base = await detectManifest(ctx.effectiveCwd)
+    } catch (err) {
+      return c.json({ error: `detection failed: ${(err as Error).message}` }, 500)
+    }
+  }
+  if (!base) {
+    return c.json(
+      {
+        error: "no runnable manifest — project has no cached start command and detection found nothing",
+        cwd: ctx.effectiveCwd,
+      },
+      422
+    )
+  }
+
+  // Re-anchor cwd to the effective worktree. The stored manifest's cwd is
+  // server-only and may be stale.
+  let effective: RunManifest = { ...base, cwd: ctx.effectiveCwd }
+  if (ctx.override) effective = mergeManifest(effective, ctx.override)
+  if (body.overrides) effective = mergeManifest(effective, body.overrides)
+
+  if (!effective.start || !effective.start.trim()) {
+    return c.json(
+      { error: "manifest has no start command — edit it before running", cwd: ctx.effectiveCwd },
+      422
+    )
+  }
+
+  try {
+    const snap = await startService(
+      effective,
+      {
+        ownerId: userId,
+        projectId,
+        worktreeId: conversationId ?? null,
+        label: body.label ?? null,
+      },
+      { preferredPort: ctx.assignedPort, runnerId: body.runnerId }
+    )
+    // Persist assigned_port on the conversation so localhost:<port> stays
+    // stable across restarts. Write what we actually bound to; if the
+    // preferred port was taken, we picked a new one.
+    if (conversationId && sb && ctx.assignedPort !== snap.port) {
+      await sb
+        .from("conversations")
+        .update({ assigned_port: snap.port })
+        .eq("id", conversationId)
+    }
+    return c.json(snap)
+  } catch (err) {
+    if (err instanceof RuntimeError) {
+      return c.json({ error: err.message, code: err.code }, runtimeErrorStatus(err.code))
+    }
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
+// Read the project's manifest state: what's cached (stored default), what
+// detection currently proposes, and what would actually run. The UI calls
+// this on Run-click when there's no cached row, to drive the confirm dialog.
+app.get("/api/projects/:id/manifest", async (c) => {
+  const projectId = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+
+  const ctx = await loadManifestContext(userId, projectId, undefined)
+  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
+
+  let detected: RunManifest | null = null
+  try {
+    detected = await detectManifest(ctx.effectiveCwd)
+  } catch {
+    detected = null
+  }
+
+  return c.json({
+    cached: ctx.cachedProjectManifest,
+    detected,
+    effective: ctx.cachedProjectManifest ?? detected,
+    cwd: ctx.effectiveCwd,
+  })
+})
+
+app.put("/api/projects/:id/manifest", async (c) => {
+  const projectId = c.req.param("id")
+  const body = await c.req.json<{ userId?: string; manifest?: unknown }>().catch(() => ({}))
+  const { userId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const manifest = sanitizeManifest(body.manifest)
+  if (!manifest) return c.json({ error: "invalid manifest — need at least { start: string }" }, 400)
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, user_id")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const toStore: Record<string, unknown> = { ...manifest }
+  delete toStore.cwd // never store cwd; always derived at run time
+
+  const { error } = await sb
+    .from("projects")
+    .update({ run_manifest: toStore })
+    .eq("id", projectId)
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true, manifest: toStore })
+})
+
+app.delete("/api/projects/:id/manifest", async (c) => {
+  const projectId = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, user_id")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const { error } = await sb
+    .from("projects")
+    .update({ run_manifest: null })
+    .eq("id", projectId)
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true })
+})
+
+app.get("/api/conversations/:id/manifest", async (c) => {
+  const conversationId = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, user_id, project_id, worktree_path, run_manifest_override, assigned_port")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const ctx = await loadManifestContext(userId, conv.project_id as string, conversationId)
+  if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
+
+  let detected: RunManifest | null = null
+  try {
+    detected = await detectManifest(ctx.effectiveCwd)
+  } catch {
+    detected = null
+  }
+
+  const base = ctx.cachedProjectManifest ?? detected
+  const effective = base
+    ? (ctx.override ? mergeManifest({ ...base, cwd: ctx.effectiveCwd }, ctx.override) : { ...base, cwd: ctx.effectiveCwd })
+    : null
+
+  return c.json({
+    projectCached: ctx.cachedProjectManifest,
+    override: ctx.override,
+    detected,
+    effective,
+    assignedPort: ctx.assignedPort,
+    cwd: ctx.effectiveCwd,
+  })
+})
+
+app.put("/api/conversations/:id/manifest-override", async (c) => {
+  const conversationId = c.req.param("id")
+  const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
+  const { userId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const override = sanitizeOverride(body.override)
+  if (!override) return c.json({ error: "invalid override — need at least one manifest field" }, 400)
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, user_id")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const { error } = await sb
+    .from("conversations")
+    .update({ run_manifest_override: override })
+    .eq("id", conversationId)
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true, override })
+})
+
+app.delete("/api/conversations/:id/manifest-override", async (c) => {
+  const conversationId = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, user_id")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const { error } = await sb
+    .from("conversations")
+    .update({ run_manifest_override: null })
+    .eq("id", conversationId)
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true })
+})
+
+app.post("/api/services/:id/stop", async (c) => {
+  const id = c.req.param("id")
+  const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
+  const userId = body.userId
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  try {
+    await stopService(id, userId)
+    const snap = getService(id, userId)
+    return c.json(snap ?? { id, status: "stopped" })
+  } catch (err) {
+    if (err instanceof RuntimeError) {
+      return c.json({ error: err.message, code: err.code }, runtimeErrorStatus(err.code))
+    }
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
+app.delete("/api/services/:id", async (c) => {
+  const id = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const svc = getService(id, userId)
+  if (!svc) return c.json({ error: "service not found" }, 404)
+  if (svc.status === "running" || svc.status === "starting" || svc.status === "stopping") {
+    try {
+      await stopService(id, userId)
+    } catch (err) {
+      if (err instanceof RuntimeError && err.code !== "already_stopped") {
+        return c.json({ error: err.message, code: err.code }, runtimeErrorStatus(err.code))
+      }
+    }
+  }
+  try {
+    removeService(id, userId)
+  } catch {
+    // Still running after stop attempt — leave the row, client can retry.
+  }
+  return c.json({ ok: true })
+})
+
+// Which runners are registered and usable right now. UI calls this to decide
+// whether to grey out "Docker" (and surface the install hint as a tooltip).
+// Registered before the `/:id` route so Hono doesn't match "runners" as an id.
+app.get("/api/services/runners", async (c) => {
+  const runners = await getRunnersInfo()
+  return c.json({ runners })
+})
+
+app.get("/api/services", (c) => {
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const projectId = c.req.query("projectId") ?? undefined
+  const conversationId = c.req.query("conversationId")
+  const worktreeId =
+    conversationId === "null" ? null : conversationId ?? undefined
+  return c.json({
+    services: listServices({ ownerId: userId, projectId, worktreeId }),
+  })
+})
+
+app.get("/api/services/:id", (c) => {
+  const id = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const snap = getService(id, userId)
+  if (!snap) return c.json({ error: "service not found" }, 404)
+  return c.json(snap)
+})
+
+app.get("/api/services/:id/logs", (c) => {
+  const id = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const sub = subscribeLogs(id, userId)
+  if (!sub) return c.json({ error: "service not found" }, 404)
+
+  return streamSSE(c, async (stream) => {
+    for (const line of sub.history) {
+      await stream.writeSSE({ event: "log", data: JSON.stringify(line) })
+    }
+    const snap = getService(id, userId)
+    if (snap) {
+      await stream.writeSSE({ event: "status", data: JSON.stringify(snap) })
+    }
+    await new Promise<void>((resolveStream) => {
+      const finish = () => {
+        sub.unsubscribe()
+        resolveStream()
+      }
+      sub.onLine((line) => {
+        void stream.writeSSE({ event: "log", data: JSON.stringify(line) })
+      })
+      sub.onStatus((s) => {
+        void stream.writeSSE({ event: "status", data: JSON.stringify(s) })
+      })
+      sub.onEnd(() => {
+        void stream.writeSSE({ event: "end", data: "{}" })
+        finish()
+      })
+      stream.onAbort(finish)
+    })
+  })
+})
+
 
 // ─── Worktree reconciliation ─────────────────────────────────────────────────
 // Runs once at boot. Compares per-project `git worktree list` against the

@@ -3,6 +3,7 @@ import { BaseList } from "./BaseList.model"
 import { BaseModel } from "./Base.model"
 import { Conversation } from "./Conversation.model"
 import { Project } from "./Project.model"
+import { ServiceList } from "./ServiceList.model"
 import { supabase } from "@/lib/supabase"
 
 class ConversationList extends BaseList<typeof Conversation> {
@@ -35,6 +36,7 @@ export class Workspace extends BaseModel {
 
   conversations = ConversationList.create()
   projects = ProjectList.create()
+  services = ServiceList.create()
 
   private convChannel: ReturnType<typeof supabase.channel> | null = null
   private projectChannel: ReturnType<typeof supabase.channel> | null = null
