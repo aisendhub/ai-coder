@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { useConfirm } from "@/lib/confirm"
 import { supabase } from "@/lib/supabase"
 import { workspace } from "@/models"
 
@@ -260,6 +261,7 @@ const BoardCard = observer(function BoardCard({
   columnKey: ColumnKey
   onOpen: (id: string) => void
 }) {
+  const confirm = useConfirm()
   const cost = Number(task.loop_cost_usd ?? 0)
   const maxCost = Number(task.max_cost_usd ?? 0)
   const shortBranch = task.branch?.replace(/^ai-coder\//, "") ?? null
@@ -281,7 +283,12 @@ const BoardCard = observer(function BoardCard({
 
   const handleTrash = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (!confirm(`Delete "${task.title}"?`)) return
+    const ok = await confirm({
+      title: `Delete "${task.title}"?`,
+      variant: "destructive",
+      confirmText: "Delete",
+    })
+    if (!ok) return
     try { await workspace.remove(task.id) } catch (err) {
       toast.error("Delete failed", {
         description: err instanceof Error ? err.message : String(err),

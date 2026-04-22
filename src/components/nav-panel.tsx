@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { workspace } from "@/models"
 import { cn } from "@/lib/utils"
+import { useConfirm } from "@/lib/confirm"
 import { useSidebarOptional } from "@/components/ui/sidebar"
 import { NewProjectDialog } from "@/components/new-project-dialog"
 import { Board } from "@/components/board"
@@ -61,6 +62,7 @@ export const NavPanel = observer(function NavPanel({
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [boardOpen, setBoardOpen] = useState(false)
   const { dark, toggle: toggleTheme } = useTheme()
+  const confirm = useConfirm()
 
   const filtered = query
     ? conversations.filter((c) =>
@@ -79,7 +81,12 @@ export const NavPanel = observer(function NavPanel({
   // the user doesn't accidentally trash work that's only on the local branch.
   const handleDelete = useCallback(async (id: string, label: string, hasWorktree: boolean) => {
     if (!hasWorktree) {
-      if (!confirm(`Delete ${label}?`)) return
+      const ok = await confirm({
+        title: `Delete ${label}?`,
+        variant: "destructive",
+        confirmText: "Delete",
+      })
+      if (!ok) return
       try { await workspace.remove(id) } catch (err) { console.error("delete failed", err) }
       return
     }
@@ -97,14 +104,20 @@ export const NavPanel = observer(function NavPanel({
         if (s.unpushedCommits > 0) {
           bits.push(`${s.unpushedCommits} ${s.hasUpstream ? "unpushed" : "local-only"} commit${s.unpushedCommits === 1 ? "" : "s"}`)
         }
-        if (bits.length) warning = `\n\nThis branch has ${bits.join(" and ")}. They'll be permanently lost when the reaper runs in 7 days.`
+        if (bits.length) warning = `This branch has ${bits.join(" and ")}. They'll be permanently lost when the reaper runs in 7 days.`
       }
     } catch {
       // Probe failed — fall through and use the generic confirm.
     }
-    if (!confirm(`Delete ${label}?${warning}`)) return
+    const ok = await confirm({
+      title: `Delete ${label}?`,
+      description: warning || undefined,
+      variant: "destructive",
+      confirmText: "Delete",
+    })
+    if (!ok) return
     try { await workspace.remove(id) } catch (err) { console.error("delete failed", err) }
-  }, [])
+  }, [confirm])
 
   const handleNew = async () => {
     if (!activeProject) {

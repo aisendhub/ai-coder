@@ -21,6 +21,7 @@ import { isSupabaseConfigured } from "@/lib/supabase"
 import { ChatStateProvider } from "@/lib/chat-context"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
+import { ConfirmProvider } from "@/lib/confirm"
 import { workspace } from "@/models"
 import { useUrlSync } from "@/lib/url-sync"
 import { useTurnNotifications } from "@/hooks/use-turn-notifications"
@@ -29,10 +30,12 @@ export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
   return (
     <TooltipProvider delay={300}>
-      <AuthProvider>
-        <AuthGate />
-        <Toaster position="top-right" expand={false} richColors closeButton />
-      </AuthProvider>
+      <ConfirmProvider>
+        <AuthProvider>
+          <AuthGate />
+          <Toaster position="top-right" expand={false} richColors closeButton />
+        </AuthProvider>
+      </ConfirmProvider>
     </TooltipProvider>
   )
 }

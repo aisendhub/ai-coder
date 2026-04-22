@@ -25,6 +25,7 @@ import {
   MAX_TOTAL_SIZE,
 } from "@/lib/attachment"
 import { EmptyState } from "@/components/empty-state"
+import { useConfirm } from "@/lib/confirm"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -221,6 +222,7 @@ const ShippedCard = observer(function ShippedCard({
   conversation,
 }: { conversation: Conversation }) {
   const [reverting, setReverting] = useState(false)
+  const confirm = useConfirm()
   const baseRef = conversation.baseRef ?? "base"
   const shaShort = conversation.shippedCommitSha?.slice(0, 8) ?? null
   // Revert is always enabled for shipped tasks. The server fills in missing
@@ -254,9 +256,13 @@ const ShippedCard = observer(function ShippedCard({
     const legacyNote = shaShort
       ? `This will hard-reset ${baseRef} back one commit (before ${shaShort}) and rebuild the worktree so you can keep working.`
       : `The squash commit wasn't recorded — we'll use the current HEAD of ${baseRef} as our best guess. If anything else has landed since the merge, the agent will stop.`
-    const ok = confirm(
-      `Revert this merge?\n\n${legacyNote}\n\nIf ${baseRef} has been pushed to a remote, the agent will stop rather than rewrite shared history.\n\nProceed?`
-    )
+    const description = `${legacyNote}\n\nIf ${baseRef} has been pushed to a remote, the agent will stop rather than rewrite shared history.`
+    const ok = await confirm({
+      title: "Revert this merge?",
+      description,
+      variant: "destructive",
+      confirmText: "Revert merge",
+    })
     if (!ok) return
     setReverting(true)
     try {

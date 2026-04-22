@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { useConfirm } from "@/lib/confirm"
 import { highlightCode, languageForPath } from "@/lib/highlight"
 import { workspace } from "@/models"
 
@@ -53,12 +54,18 @@ export const CodePanel = observer(function CodePanel({
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
   const [search, setSearch] = useState("")
   const [merging, setMerging] = useState(false)
+  const confirm = useConfirm()
 
   const handleMerge = useCallback(async () => {
     if (!conversationId) return
     const label = active?.title || "this task"
     const base = active?.baseRef ?? "base"
-    if (!confirm(`Ask the agent to merge ${label} into ${base}? The merge will run in the chat — you'll see each step.`)) return
+    const ok = await confirm({
+      title: `Merge ${label} into ${base}?`,
+      description: "The agent will run the merge in the chat — you'll see each step.",
+      confirmText: "Merge",
+    })
+    if (!ok) return
     setMerging(true)
     try {
       await workspace.mergeConversation(conversationId)
@@ -74,7 +81,7 @@ export const CodePanel = observer(function CodePanel({
     } finally {
       setMerging(false)
     }
-  }, [conversationId, active])
+  }, [conversationId, active, confirm])
 
   const fetchChanges = useCallback(async () => {
     if (!conversationId) {
