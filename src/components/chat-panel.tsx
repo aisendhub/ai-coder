@@ -6,7 +6,7 @@ import {
   type KeyboardEvent,
 } from "react"
 import { observer } from "mobx-react-lite"
-import { Paperclip, Send, Square, Wrench, Brain, Check, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon, Gauge, Flag, Loader2, Pause, Play, Clock } from "lucide-react"
+import { Paperclip, Send, Square, Wrench, Brain, Check, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon, Gauge, Flag, Loader2, Pause, Play, Clock, GitMerge } from "lucide-react"
 import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -139,6 +139,9 @@ const MessageBubble = observer(function MessageBubble({
   message: Message
   isStreaming: boolean
 }) {
+  if (message.role === "notice") {
+    return <NoticeCard message={message} />
+  }
   if (message.role === "user") {
     const pending = message.deliveredAt == null && !message.isOptimistic
     return (
@@ -203,6 +206,24 @@ const MessageBubble = observer(function MessageBubble({
         </div>
       )}
       {isStreaming && hasContent && !message.text && <ThinkingDots />}
+    </div>
+  )
+})
+
+/** App-generated notice shown in the message flow — e.g. "Merging…". The
+ *  agent doesn't write these; the server does. Rendered as a centered card
+ *  so it reads as meta-info, not as a participant in the conversation. */
+const NoticeCard = observer(function NoticeCard({ message }: { message: Message }) {
+  return (
+    <div className="self-stretch w-full flex justify-center my-1">
+      <div className="w-full max-w-170 rounded-lg border border-blue-200/70 dark:border-blue-900/60 bg-blue-50/70 dark:bg-blue-950/30 px-4 py-3">
+        <div className="flex items-start gap-2.5">
+          <GitMerge className="size-4 shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
+          <div className="flex-1 min-w-0 text-[13px] leading-relaxed text-blue-900/90 dark:text-blue-100/90">
+            <Markdown>{message.text}</Markdown>
+          </div>
+        </div>
+      </div>
     </div>
   )
 })

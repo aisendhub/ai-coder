@@ -123,10 +123,7 @@ Create symlinks after `git worktree add`, before spawning the agent. Fail loudly
 
 3. **Changes panel** ([server/index.ts:475-509](../server/index.ts#L475-L509)) — already uses the resolved conv cwd via `cwdForConversation()`. No change needed once step 2 ships.
 
-4. **Ship** — `POST /api/conversations/:id/ship`:
-   - `commit` — commit uncommitted changes, **fast-forward** the base ref via `git update-ref` (never touches the base working tree), delete worktree + branch on success. Non-fast-forward returns `{ warning }` and leaves the worktree intact for the user to rebase or hand back to the agent.
-   - `pr` (future) — push branch to origin, open PR via `gh` CLI, leave worktree until PR closes.
-   - True-merge (merge commit, not ff-only) + agent-driven conflict resolution are a Phase 3 follow-up. Commit message today uses the conversation title; agent-generated summary messages are follow-up too.
+4. **Merge** — `POST /api/conversations/:id/merge`. AI-driven: the server injects a scripted merge prompt and the agent runs `git` in the chat (cwd = base checkout) to commit, squash-merge, clean up, and restore the prior branch. Conflicts and dirty-base conditions surface as normal chat messages. Success signalled by `shipped_at` flipping via the end-of-turn reconcile. See [MERGE-FLOW.md](MERGE-FLOW.md). PR mode has been removed; revisit later if wanted.
 
 5. **Discard** — `DELETE /api/conversations/:id` → `git worktree remove --force <path>`, `git branch -D <branch>` (prompt first if branch has unpushed commits). Soft trash with a 7-day grace period before hard cleanup, preserving Kanban's resume pattern.
 

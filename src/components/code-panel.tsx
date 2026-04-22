@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, GitPullRequest, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, FileText, Ship, X } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, FileText, GitMerge, X } from "lucide-react"
 import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -42,70 +42,37 @@ export const CodePanel = observer(function CodePanel({
 }: { collapsed?: boolean; onClose?: () => void } = {}) {
   const active = workspace.active
   const conversationId = active?.id ?? null
-  // Ship actions (Merge/PR) only make sense on tasks with their own worktree
-  // branch. Plain chats — even ones that happen to carry a legacy
-  // `worktree_path` from before this rule was tightened — get the standard
-  // Commit/Push prompts, which act in whatever cwd the chat resolves to.
-  const showShipActions = active?.kind === "task" && !!active?.worktreePath
+  // Merge action only makes sense on tasks with their own worktree branch.
+  // Plain chats — even ones that happen to carry a legacy `worktree_path` —
+  // get the standard Commit/Push prompts instead.
+  const showMergeAction = active?.kind === "task" && !!active?.worktreePath
+  const mergePending = !!active?.mergeRequestedAt && !active?.shippedAt
   const [data, setData] = useState<ChangesResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
   const [search, setSearch] = useState("")
-  const [shipping, setShipping] = useState<null | "merge" | "pr">(null)
+  const [merging, setMerging] = useState(false)
 
-  const handleShip = useCallback(async (mode: "merge" | "pr") => {
+  const handleMerge = useCallback(async () => {
     if (!conversationId) return
-    const label = active?.title || "this conversation"
-    const prompt = mode === "merge"
-      ? `Merge ${label}? Pending changes will be committed and the branch fast-forwarded into ${active?.baseRef ?? "base"}.`
-      : `Open a PR for ${label}? Pending changes will be committed, the branch pushed to origin, and a PR opened via gh.`
-    if (!confirm(prompt)) return
-    setShipping(mode)
+    const label = active?.title || "this task"
+    const base = active?.baseRef ?? "base"
+    if (!confirm(`Ask the agent to merge ${label} into ${base}? The merge will run in the chat — you'll see each step.`)) return
+    setMerging(true)
     try {
-      const result = await workspace.shipConversation(conversationId, { mode })
-      if (result.warning) {
-        // Server already handed the warning to the agent as a new turn — the
-        // chat panel will show the agent working on it. Just announce that.
-        if (result.handedOffToAgent) {
-          toast.info("Handed to the agent", {
-            description: "I've asked the worker to resolve the merge. Watch the chat.",
-            duration: 6000,
-          })
-        } else {
-          toast.warning("Ship needs attention", {
-            description: result.warning,
-            duration: 10000,
-          })
-        }
-      } else if (result.merged) {
-        const base = active?.baseRef ?? "base"
-        toast.success("Merged", {
-          description: result.workingTreeUpdated
-            ? `Fast-forwarded ${base} and updated the base working tree. Worktree removed.`
-            : `Fast-forwarded ${base} (ref only — base checkout was busy). Run \`git pull\` in the base repo to see the files.`,
-          duration: 8000,
-        })
-      } else if (result.prUrl) {
-        toast.success("PR opened", {
-          description: result.prUrl,
-          action: { label: "Open", onClick: () => window.open(result.prUrl!, "_blank") },
-          duration: 10000,
-        })
-      } else if (result.committed) {
-        toast.success("Committed", {
-          description: "Changes committed on the task branch.",
-        })
-      } else {
-        toast.info("Nothing to ship", { description: "No pending changes on this worktree." })
-      }
+      await workspace.mergeConversation(conversationId)
+      toast.info("Merging…", {
+        description: "I've asked the agent to merge. Watch the chat for progress and any conflicts.",
+        duration: 6000,
+      })
     } catch (err) {
-      toast.error("Ship failed", {
+      toast.error("Couldn't start merge", {
         description: err instanceof Error ? err.message : String(err),
         duration: 8000,
       })
     } finally {
-      setShipping(null)
+      setMerging(false)
     }
   }, [conversationId, active])
 
@@ -185,7 +152,11 @@ export const CodePanel = observer(function CodePanel({
       window.removeEventListener("ai-coder:turn-done", onTurnDone)
       if (refetchTimer.current) clearTimeout(refetchTimer.current)
     }
-  }, [fetchChanges, debouncedRefetch, conversationId])
+    // shippedAt/worktreePath flip when a merge completes (realtime update):
+    // including them re-runs this effect, which re-resolves cwd server-side
+    // and refetches the diff. Without this, the panel keeps showing the
+    // pre-merge worktree diff until the user refreshes.
+  }, [fetchChanges, debouncedRefetch, conversationId, active?.shippedAt, active?.worktreePath])
 
   const files = data?.files ?? []
 
@@ -242,45 +213,29 @@ export const CodePanel = observer(function CodePanel({
             <span className="text-xs text-muted-foreground">{files.length}</span>
           </div>
           <div className="flex items-center gap-1">
-            {showShipActions ? (
-              // Worktree-backed conversation → Ship actions (merge or PR).
-              // Commit/Push aren't shown because shipping handles the commit
-              // step automatically, and pushing a per-conversation branch
-              // outside of the ship flow is rarely what the user wants.
-              <>
-                <Tooltip>
-                  <TooltipTrigger>
-                    <Button
-                      size="sm"
-                      variant="default"
-                      onClick={() => handleShip("merge")}
-                      disabled={shipping !== null}
-                    >
-                      <Ship className={cn("size-3.5", shipping === "merge" && "animate-pulse")} />
-                      Merge
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Commit + fast-forward into {active?.baseRef ?? "base"}
-                  </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => handleShip("pr")}
-                      disabled={shipping !== null}
-                    >
-                      <GitPullRequest className={cn("size-3.5", shipping === "pr" && "animate-pulse")} />
-                      PR
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Commit + push + open PR via gh
-                  </TooltipContent>
-                </Tooltip>
-              </>
+            {showMergeAction ? (
+              // Task with a worktree → Merge button. The server injects a
+              // scripted prompt; the agent runs the merge in the chat. Commit
+              // and Push buttons are hidden because the merge flow handles
+              // both stages.
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={handleMerge}
+                    disabled={merging || mergePending}
+                  >
+                    <GitMerge className={cn("size-3.5", (merging || mergePending) && "animate-pulse")} />
+                    {mergePending ? "Merging…" : "Merge"}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {mergePending
+                    ? "Agent is merging — watch the chat"
+                    : `Ask the agent to merge into ${active?.baseRef ?? "base"}`}
+                </TooltipContent>
+              </Tooltip>
             ) : (
               // Shared-cwd conversation → plain Commit + Push prompts to the
               // agent. No ship flow because there's no task branch to merge.

@@ -15,10 +15,8 @@ export type WorktreeEvent =
   | "symlink.repaired"
   | "remove"
   | "remove.failed"
-  | "ship.commit"
-  | "ship.merge"
-  | "ship.pr"
-  | "ship.warning"
+  | "merge.request"
+  | "merge.reconciled"
   | "arm"
   | "prune"
   | "reconcile.orphan"
@@ -34,7 +32,7 @@ export function logWorktreeEvent(
     .filter(([, v]) => v !== undefined && v !== null && v !== "")
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ")
-  const isError = event.endsWith(".failed") || event === "ship.warning"
+  const isError = event.endsWith(".failed")
   const log = isError ? console.warn : console.log
   log(`[worktree] ${event}${tail ? " " + tail : ""}`)
 }
@@ -231,319 +229,68 @@ export async function removeWorktree({
   if (removedOk) logWorktreeEvent("remove", { branch, path: worktreePath })
 }
 
-/** Ship a worktree. Three modes:
- *  - `commit`: stage + commit pending changes on the branch; leave worktree + branch.
- *  - `merge` : commit + fast-forward baseRef to the branch tip; remove worktree + branch on success.
- *  - `pr`    : commit + push branch to origin + `gh pr create`; leave worktree + branch until the PR closes.
- *  On any failure the worktree is left intact so the user can inspect + retry. */
-export type ShipMode = "commit" | "merge" | "pr"
-
-export type ShipResult = {
-  mode: ShipMode
-  committed: boolean
-  commitSha: string | null
-  merged: boolean
-  baseAdvanced: string | null // new sha for base_ref if we fast-forwarded it
-  /** True when the branch diverged and we rebased it onto baseRef as part of
-   *  the merge. False = branch was already strictly ahead (classic ff). */
-  rebased: boolean
-  /** True when we also updated the base checkout's working tree (it was on
-   *  baseRef and clean). False = ref-only advance; the user must `git pull`
-   *  in the base cwd to see the files. */
-  workingTreeUpdated: boolean
-  pushed: boolean
-  prUrl: string | null
-  warning: string | null
-  /** When set, the user can hand the conflict to the agent via the existing
-   *  rebase endpoint. The UI uses this to decide whether to show the action. */
-  needsRebase: boolean
-}
-
-export type ShipInput = {
-  baseCwd: string
+/** Build the scripted prompt that drives the AI-led merge. The agent runs
+ *  with cwd = baseCwd, uses `git -C` for worktree-side commands, and is told
+ *  explicitly when to STOP and surface problems to the user (dirty base, merge
+ *  conflicts, branch mismatch). Keep the steps narrow and numbered — merges
+ *  are not the place for agent creativity. See docs/MERGE-FLOW.md. */
+export function buildMergePrompt(input: {
   worktreePath: string
+  baseCwd: string
   branch: string
   baseRef: string
-  message: string
-  /** What to do after the commit step. Defaults to `merge` when omitted. */
-  mode?: ShipMode
-  /** Body text for PR mode; ignored otherwise. */
-  prBody?: string
+  title: string
+  goal: string | null
+}): string {
+  const commitSubject = input.title.trim() || `Merge ${input.branch}`
+  const commitBody = input.goal?.trim() ? `\n\n${input.goal.trim()}` : ""
+  return [
+    "[Host task — merge]",
+    "",
+    `Merge branch \`${input.branch}\` into \`${input.baseRef}\` and clean up the worktree.`,
+    "",
+    `- Worktree path: \`${input.worktreePath}\``,
+    `- Base checkout: \`${input.baseCwd}\``,
+    `- Base branch: \`${input.baseRef}\``,
+    "",
+    "Run these steps **in order**. If any step fails or requires judgement, STOP and report what you see — do not retry or improvise.",
+    "",
+    `1. Verify the worktree is still on its branch: \`git -C ${sh(input.worktreePath)} rev-parse --abbrev-ref HEAD\` must print \`${input.branch}\`. If not, STOP and explain.`,
+    "",
+    `2. Commit any pending work in the worktree. Check \`git -C ${sh(input.worktreePath)} status --porcelain\`. If output is non-empty, run:`,
+    `   \`git -C ${sh(input.worktreePath)} add -A\``,
+    `   \`git -C ${sh(input.worktreePath)} commit -m "<concise message>"\``,
+    "",
+    `3. Verify the base checkout is clean: \`git -C ${sh(input.baseCwd)} status --porcelain\`. If non-empty, STOP — ask the user to commit or stash in the base repo before retrying. Do NOT run git stash yourself.`,
+    "",
+    `4. Remember the current branch in the base checkout: \`git -C ${sh(input.baseCwd)} rev-parse --abbrev-ref HEAD\`. Save it as ORIG_BRANCH.`,
+    "",
+    `5. Check out the base branch: \`git -C ${sh(input.baseCwd)} checkout ${input.baseRef}\`.`,
+    "",
+    `6. Squash-merge the task branch:`,
+    `   \`git -C ${sh(input.baseCwd)} merge --squash -- ${input.branch}\``,
+    `   If git reports a conflict, STOP. Report the conflicting files (\`git -C ${sh(input.baseCwd)} status --short\`) and wait for the user's instructions. Do NOT attempt to resolve conflicts on your own unless the user asks you to.`,
+    "",
+    `7. Commit the squash with a message summarizing the task:`,
+    `   \`git -C ${sh(input.baseCwd)} commit -m ${sh(commitSubject + commitBody)}\``,
+    "",
+    `8. Remove the worktree and delete the branch:`,
+    `   \`git -C ${sh(input.baseCwd)} worktree remove --force ${sh(input.worktreePath)}\``,
+    `   \`git -C ${sh(input.baseCwd)} branch -D ${input.branch}\``,
+    "",
+    `9. If ORIG_BRANCH is different from \`${input.baseRef}\`, restore it:`,
+    `   \`git -C ${sh(input.baseCwd)} checkout <ORIG_BRANCH>\``,
+    "",
+    "10. Report the final state: the new commit SHA on the base branch and a one-line summary. Then stop.",
+  ].join("\n")
 }
 
-/** True when `git status --porcelain` shows anything — untracked, staged, or
- *  modified. Exported so the ship endpoint can skip the commit-message LLM
- *  call on a clean worktree. */
-export async function hasDirtyWorktree(cwd: string): Promise<boolean> {
-  try {
-    const { stdout } = await execFileP("git", ["status", "--porcelain"], { cwd })
-    return stdout.trim().length > 0
-  } catch {
-    return false
-  }
-}
-
-async function hasUncommittedChanges(cwd: string): Promise<boolean> {
-  return hasDirtyWorktree(cwd)
-}
-
-async function headSha(cwd: string, ref = "HEAD"): Promise<string | null> {
-  try {
-    const { stdout } = await execFileP("git", ["rev-parse", ref], { cwd })
-    return stdout.trim() || null
-  } catch {
-    return null
-  }
-}
-
-async function isAncestor(cwd: string, ancestor: string, descendant: string): Promise<boolean> {
-  try {
-    await execFileP("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd })
-    return true
-  } catch {
-    return false
-  }
-}
-
-export async function shipWorktree({
-  baseCwd,
-  worktreePath,
-  branch,
-  baseRef,
-  message,
-  mode = "merge",
-  prBody,
-}: ShipInput): Promise<ShipResult> {
-  const result: ShipResult = {
-    mode,
-    committed: false,
-    commitSha: null,
-    merged: false,
-    baseAdvanced: null,
-    rebased: false,
-    workingTreeUpdated: false,
-    pushed: false,
-    prUrl: null,
-    warning: null,
-    needsRebase: false,
-  }
-
-  // 1. Stage + commit anything uncommitted in the worktree. Log the file
-  // list + per-file size (post-stage) so empty-file surprises are diagnosable
-  // from server logs — we caught a case where a zero-byte commit landed on
-  // main because the worker had emptied a file mid-turn.
-  if (await hasUncommittedChanges(worktreePath)) {
-    await execFileP("git", ["add", "-A"], { cwd: worktreePath })
-    try {
-      const { stdout } = await execFileP(
-        "git",
-        ["diff", "--cached", "--numstat"],
-        { cwd: worktreePath }
-      )
-      const lines = stdout.trim().split("\n").filter(Boolean).slice(0, 20)
-      if (lines.length) {
-        logWorktreeEvent("ship.commit", {
-          branch,
-          phase: "staged",
-          files: lines.length,
-          // numstat: "<added>\t<deleted>\t<path>" — surface the ones that
-          // netted to zero so we can spot empty writes before they land.
-          preview: lines.map((l) => l.replace(/\t/g, ":")).join(" | "),
-        })
-      }
-    } catch {
-      // diagnostic only — fall through if git diff fails for any reason
-    }
-    await execFileP("git", ["commit", "-m", message], { cwd: worktreePath })
-    result.committed = true
-  }
-  result.commitSha = await headSha(worktreePath)
-
-  if (mode === "commit") {
-    logWorktreeEvent("ship.commit", { branch, committed: result.committed, sha: result.commitSha?.slice(0, 8) })
-    return result
-  }
-
-  if (mode === "pr") {
-    // Push the branch with upstream tracking so subsequent pushes from the
-    // worktree are one-step, then let `gh` open the PR. `gh` picks up its
-    // auth from the host (`gh auth login` or GH_TOKEN).
-    try {
-      await execFileP("git", ["push", "-u", "origin", branch], { cwd: worktreePath })
-      result.pushed = true
-    } catch (err) {
-      result.warning = `push failed: ${err instanceof Error ? err.message : String(err)}`
-      logWorktreeEvent("ship.warning", { branch, phase: "push", reason: result.warning })
-      return result
-    }
-
-    try {
-      const args = [
-        "pr", "create",
-        "--base", baseRef,
-        "--head", branch,
-        "--title", firstLine(message) || branch,
-        "--body", prBody ?? message,
-      ]
-      const { stdout } = await execFileP("gh", args, { cwd: worktreePath })
-      // gh prints the PR URL on the last non-empty line.
-      result.prUrl = stdout.trim().split("\n").filter(Boolean).pop() ?? null
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      result.warning = /command not found|ENOENT/i.test(message)
-        ? "gh CLI is not installed on the server — install it or run with GH_TOKEN"
-        : `gh pr create failed: ${message}`
-      logWorktreeEvent("ship.warning", { branch, phase: "gh", reason: result.warning })
-      return result
-    }
-
-    // PR mode intentionally leaves the worktree + branch intact until the PR
-    // closes, matching Kanban's "inspect + steer mid-flight" pattern.
-    logWorktreeEvent("ship.pr", { branch, url: result.prUrl ?? "" })
-    return result
-  }
-
-  // mode === "merge": fast-forward baseRef to the branch tip. If the base
-  // checkout is already on baseRef and clean, do a real `git merge --ff-only`
-  // from it so the working tree updates too. Otherwise fall back to
-  // update-ref (branch pointer only) and warn the user their working tree
-  // will be stale until they `git pull`.
-  const branchSha = await headSha(baseCwd, `refs/heads/${branch}`)
-  const baseSha = await headSha(baseCwd, `refs/heads/${baseRef}`)
-  if (!branchSha || !baseSha) {
-    result.warning = `could not resolve ${branch} or ${baseRef}`
-    return result
-  }
-
-  // If the branch and baseRef have diverged (neither is ancestor of the other
-  // via the ff path below), try to rebase the branch onto baseRef first.
-  // Clean rebase → falls through to the ff-only path. Rebase with conflicts
-  // → aborted cleanly, returned as a rebase-needs-attention warning so the UI
-  // can offer "Ask agent to rebase".
-  let workingBranchSha = branchSha
-  if (
-    branchSha !== baseSha &&
-    !(await isAncestor(baseCwd, baseSha, branchSha))
-  ) {
-    const rebaseClean = await tryRebaseWorktree(worktreePath, baseRef)
-    if (rebaseClean.ok) {
-      // Worktree's branch now sits on top of baseRef. Grab the new tip and
-      // fall through to the standard ff path.
-      workingBranchSha = (await headSha(worktreePath)) ?? workingBranchSha
-      result.rebased = true
-      logWorktreeEvent("ship.merge", { branch, phase: "rebase.clean" })
-    } else {
-      result.warning = rebaseClean.message
-      result.needsRebase = true
-      logWorktreeEvent("ship.warning", { branch, phase: "rebase", reason: result.warning })
-      return result
-    }
-  }
-
-  if (workingBranchSha === baseSha) {
-    // Branch had no new commits — nothing to merge, just clean up.
-  } else if (await isAncestor(baseCwd, baseSha, workingBranchSha)) {
-    // Prefer `git merge --ff-only` from the base cwd so the working tree
-    // updates alongside the ref. Git itself will refuse only if dirty files
-    // OVERLAP with files we'd update — unrelated untracked/modified files
-    // are fine. We try it optimistically and fall back to update-ref on
-    // actual refusal.
-    const baseOnBaseRef = await currentBranchMatches(baseCwd, baseRef)
-    if (baseOnBaseRef) {
-      try {
-        await execFileP("git", ["merge", "--ff-only", workingBranchSha], { cwd: baseCwd })
-        result.baseAdvanced = workingBranchSha
-        result.merged = true
-        result.workingTreeUpdated = true
-      } catch (err) {
-        // Git refused — almost always because the base cwd has uncommitted
-        // edits on a file the ff would overwrite. Leave the user's work
-        // alone and fall through to the ref-only path below.
-        const raw = err instanceof Error ? err.message : String(err)
-        logWorktreeEvent("ship.warning", {
-          branch, phase: "merge-ff", reason: raw.split("\n")[0],
-        })
-      }
-    }
-    if (!result.merged) {
-      // Either the base cwd isn't on baseRef, or the ff-only refused.
-      // Advance the ref without touching the working tree so we don't stomp
-      // on in-progress edits; the user must pull to see the files.
-      await execFileP(
-        "git",
-        ["update-ref", `refs/heads/${baseRef}`, workingBranchSha, baseSha],
-        { cwd: baseCwd }
-      )
-      result.baseAdvanced = workingBranchSha
-      result.merged = true
-      result.workingTreeUpdated = false
-      result.warning = !baseOnBaseRef
-        ? `${baseRef} advanced on disk, but the base checkout at ${baseCwd} is on a different branch. ` +
-          `Check it out and \`git pull\` to see the files.`
-        : `${baseRef} advanced on disk, but files you have uncommitted in ${baseCwd} would be overwritten by the ff. ` +
-          `Commit or stash there, then \`git pull\` to see the files.`
-    }
-  } else {
-    // This branch *really* can't be merged cleanly — isAncestor check passed
-    // only if rebase put it there. Shouldn't happen in practice; keep the
-    // rebase-fallback warning for users.
-    result.warning = `${baseRef} has commits not in ${branch}; rebase before shipping`
-    result.needsRebase = true
-    logWorktreeEvent("ship.warning", { branch, phase: "merge", reason: result.warning })
-    return result
-  }
-
-  // Clean up the worktree + branch now that its contents are in baseRef.
-  await removeWorktree({ baseCwd, worktreePath, branch, force: true })
-  logWorktreeEvent("ship.merge", {
-    branch,
-    baseRef,
-    advanced: result.baseAdvanced?.slice(0, 8) ?? "noop",
-    workingTreeUpdated: result.workingTreeUpdated,
-  })
-  return result
-}
-
-/** Rebase the worktree's branch onto `baseRef`. Returns ok=true if the rebase
- *  completed without conflicts; otherwise `git rebase --abort` is run so the
- *  worktree is left in its pre-rebase state and the caller can surface a
- *  user-friendly conflict warning. */
-async function tryRebaseWorktree(
-  worktreePath: string,
-  baseRef: string
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  try {
-    await execFileP("git", ["rebase", baseRef], { cwd: worktreePath })
-    return { ok: true }
-  } catch (err) {
-    // Abort so the branch state is restored. Ignore errors from abort itself.
-    try {
-      await execFileP("git", ["rebase", "--abort"], { cwd: worktreePath })
-    } catch {
-      /* best effort */
-    }
-    const raw = err instanceof Error ? err.message : String(err)
-    const conflict = /conflict|could not apply|Merge conflict/i.test(raw)
-    return {
-      ok: false,
-      message: conflict
-        ? `Rebasing onto ${baseRef} hit conflicts. Click "Ask agent to rebase" to have the worker resolve them, then retry Merge.`
-        : `Rebase onto ${baseRef} failed: ${raw.split("\n")[0]}`,
-    }
-  }
-}
-
-async function currentBranchMatches(cwd: string, branch: string): Promise<boolean> {
-  try {
-    const { stdout } = await execFileP("git", ["symbolic-ref", "--short", "HEAD"], { cwd })
-    return stdout.trim() === branch
-  } catch {
-    return false
-  }
-}
-
-function firstLine(s: string): string {
-  return s.split("\n")[0].trim()
+/** Shell-quote a path/string for inclusion in a command the agent will run.
+ *  We're generating prose, not executing — this is a hint to the agent to use
+ *  the quoted form, not a real shell quote. */
+function sh(value: string): string {
+  if (/^[\w./@=:+-]+$/.test(value)) return value
+  return `'${value.replace(/'/g, "'\\''")}'`
 }
 
 /** Repair a single worktree's symlinks if any have been broken (e.g. user

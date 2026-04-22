@@ -24,7 +24,7 @@ export type StreamEvent =
     }
   | { kind: "loop_evaluating"; iteration: number }
 
-export type MessageRole = "user" | "assistant"
+export type MessageRole = "user" | "assistant" | "notice"
 
 export class Message extends BaseModel {
   @observable conversationId = ""

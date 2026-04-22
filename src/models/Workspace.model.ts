@@ -342,36 +342,17 @@ export class Workspace extends BaseModel {
     })
   }
 
-  /** Ship a conversation's worktree. On `merge=true` (default) the worktree
-   *  + branch are removed on success and the conversation is soft-trashed.
-   *  Returns the ship result so callers can surface warnings/commit sha. */
-  async shipConversation(
-    id: string,
-    opts: { mode?: "commit" | "merge" | "pr"; message?: string; prBody?: string } = {}
-  ): Promise<{
-    mode: "commit" | "merge" | "pr"
-    committed: boolean
-    commitSha: string | null
-    merged: boolean
-    baseAdvanced: string | null
-    rebased: boolean
-    workingTreeUpdated: boolean
-    pushed: boolean
-    prUrl: string | null
-    warning: string | null
-    needsRebase: boolean
-    handedOffToAgent?: boolean
-  }> {
-    const res = await fetch(`/api/conversations/${id}/ship`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts),
-    })
+  /** Ask the agent to merge a task's worktree into its base branch. The
+   *  server injects a scripted merge prompt; the agent runs git commands in
+   *  chat, visible to the user. Success is signalled by conversations.shipped_at
+   *  flipping (via the end-of-turn reconcile); conflicts become a normal chat
+   *  back-and-forth. See docs/MERGE-FLOW.md. */
+  async mergeConversation(id: string): Promise<void> {
+    const res = await fetch(`/api/conversations/${id}/merge`, { method: "POST" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
     }
-    return await res.json()
   }
 
   /** Pause a task: flips `auto_loop_enabled = false`. Current worker turn
@@ -408,16 +389,6 @@ export class Workspace extends BaseModel {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversationId: id }),
     })
-  }
-
-  /** Hand a non-ff ship off to the worker: it rebases the branch onto base_ref
-   *  and resolves conflicts. User retries ship after. */
-  async rebaseConversation(id: string): Promise<void> {
-    const res = await fetch(`/api/conversations/${id}/rebase`, { method: "POST" })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${res.status}`)
-    }
   }
 
   async restore(id: string) {

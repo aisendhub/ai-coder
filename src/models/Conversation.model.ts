@@ -23,6 +23,7 @@ export class Conversation extends BaseModel {
   @observable baseRef: string | null = null
   @observable deletedAt: string | null = null
   @observable shippedAt: string | null = null
+  @observable mergeRequestedAt: string | null = null
   @observable kind: "chat" | "task" = "chat"
   @observable autoLoopEnabled = false
   @observable autoLoopGoal: string | null = null
@@ -71,6 +72,7 @@ export class Conversation extends BaseModel {
     base_ref?: string | null
     deleted_at?: string | null
     shipped_at?: string | null
+    merge_requested_at?: string | null
     kind?: "chat" | "task" | null
     auto_loop_enabled?: boolean | null
     auto_loop_goal?: string | null
@@ -93,6 +95,7 @@ export class Conversation extends BaseModel {
     this.baseRef = row.base_ref ?? null
     this.deletedAt = row.deleted_at ?? null
     this.shippedAt = row.shipped_at ?? null
+    this.mergeRequestedAt = row.merge_requested_at ?? null
     this.kind = (row.kind ?? "chat") as "chat" | "task"
     this.autoLoopEnabled = row.auto_loop_enabled ?? false
     this.autoLoopGoal = row.auto_loop_goal ?? null
@@ -495,7 +498,7 @@ export class Conversation extends BaseModel {
 type MessageRow = {
   id: string
   conversation_id: string
-  role: "user" | "assistant"
+  role: "user" | "assistant" | "notice"
   text: string
   events: unknown
   attachments: unknown

@@ -25,20 +25,18 @@ import { WebSocketServer } from "ws"
 import {
   addWorktree,
   branchNameFor,
+  buildMergePrompt,
   detectDefaultBaseRef,
-  hasDirtyWorktree,
   isGitRepo,
   listWorktrees,
   logWorktreeEvent,
   pruneWorktreeMetadata,
   removeWorktree,
   repairSymlinks,
-  shipWorktree,
   worktreePathFor,
 } from "./worktrees"
 import {
   feedbackHash,
-  generateCommitMessage,
   runEvaluator,
   summarizeTools,
   type EvaluatorResult,
@@ -308,9 +306,31 @@ async function startRunner(args: {
   /** When true, skip inserting the user message row for the FIRST iteration —
    *  the caller already wrote it (e.g. nudge sweep on /api/chat). */
   skipFirstUserInsert?: boolean
+  /** Force a specific cwd for the agent, ignoring conversations.worktree_path.
+   *  Used by the merge flow: the agent runs in the base checkout so it can
+   *  `git worktree remove <worktreePath>` without killing its own cwd. */
+  cwdOverride?: string
+  /** When true, run exactly one iteration and break, regardless of the
+   *  auto-loop flag. Used by the merge flow. */
+  oneShot?: boolean
+  /** When set, replaces the default system-prompt append. Used by the merge
+   *  flow so the agent sees merge-specific context instead of the task rules
+   *  that say "don't run git worktree commands". */
+  systemPromptOverride?: string
+  /** When set, the inserted row uses this shorter text (and `displayRole`)
+   *  for the UI, while the agent still sees the full `prompt` via query().
+   *  Used by the merge flow so the chat shows a concise notice instead of
+   *  a wall of numbered steps. */
+  displayText?: string
+  /** Role to use for the inserted row. Defaults to 'user'. The merge flow
+   *  passes 'notice' so the row renders as an app-generated badge. */
+  displayRole?: "user" | "notice"
 }): Promise<Runner> {
   const { conversationId, prompt, attachments, resumeSessionId } = args
   const skipFirstUserInsert = args.skipFirstUserInsert ?? false
+  const oneShot = args.oneShot ?? false
+  const displayTextOverride = args.displayText ?? null
+  const displayRole = args.displayRole ?? "user"
   const bus = new EventEmitter()
   bus.setMaxListeners(50)
   const abort = new AbortController()
@@ -328,7 +348,7 @@ async function startRunner(args: {
     const log = (event: string, payload: Record<string, unknown> = {}) => {
       console.log(`[${turnId} conv=${conversationId.slice(0, 6)}] ${event}`, payload)
     }
-    const cwd = await cwdForConversation(conversationId)
+    const cwd = args.cwdOverride ?? (await cwdForConversation(conversationId))
 
     // Pull worktree metadata once so the worker's system-prompt append can
     // tell the agent where it's working. Keeps Claude from guessing
@@ -344,7 +364,7 @@ async function startRunner(args: {
         .single()
       if (data) convMeta = data as typeof convMeta
     }
-    const systemPromptAppend = buildSystemPromptAppend({
+    const systemPromptAppend = args.systemPromptOverride ?? buildSystemPromptAppend({
       cwd,
       kind: convMeta.kind,
       branch: convMeta.branch,
@@ -407,14 +427,20 @@ async function startRunner(args: {
                 mimeType: a.mimeType,
                 sizeBytes: a.sizeBytes,
               }))
+              // First iteration of a merge (or future service-driven turn)
+              // writes a shorter display row with role='notice' so the chat
+              // shows a centered badge, not a wall of scripted text. The
+              // agent still sees the full prompt via query() below.
+              const useNotice =
+                isFirstIteration && displayTextOverride !== null
               await sb.from("messages").insert({
                 conversation_id: conversationId,
-                role: "user",
-                text: currentPrompt,
+                role: useNotice ? displayRole : "user",
+                text: useNotice ? displayTextOverride : currentPrompt,
                 events: [],
-                attachments: attachmentMeta,
+                attachments: useNotice ? [] : attachmentMeta,
                 // First-class delivery: this prompt is being handed to the
-                // agent right now, so the user row never sits in the queue.
+                // agent right now, so the row never sits in the queue.
                 delivered_at: new Date().toISOString(),
               })
             }
@@ -646,6 +672,8 @@ async function startRunner(args: {
         }
 
         // ── Decide whether to iterate ─────────────────────────────────────
+        // One-shot runs (e.g. the merge flow) break here unconditionally.
+        if (oneShot) break
         // Refresh loop state at each boundary so UI edits to limits or goal
         // take effect on the next iteration without restarting.
         loopState = await loadLoopState(conversationId)
@@ -725,14 +753,59 @@ async function startRunner(args: {
         }
       }
     } finally {
+      // Merge reconcile: if this conversation had a merge requested and the
+      // worktree directory is now missing on disk, the agent completed the
+      // merge — clear worktree fields and mark shipped. If the directory
+      // still exists, the merge either didn't finish or stopped for user
+      // input; leave state alone so the UI keeps showing the "merging" pill.
+      await reconcileMergeIfCompleted(conversationId).catch((err) => {
+        console.error("merge reconcile failed", err)
+      })
       runner.done = true
-      runners.delete(conversationId)
+      // Only clear the map slot if it still points at US — otherwise a newer
+      // runner (e.g. merge aborting this one) has taken our place.
+      if (runners.get(conversationId) === runner) {
+        runners.delete(conversationId)
+      }
       emit("closed", {})
       bus.emit("closed")
     }
   })()
 
   return runner
+}
+
+async function reconcileMergeIfCompleted(conversationId: string): Promise<void> {
+  if (!sb) return
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("merge_requested_at, worktree_path, shipped_at, branch, base_ref")
+    .eq("id", conversationId)
+    .single()
+  if (!conv?.merge_requested_at) return
+  if (conv.shipped_at) return
+  if (!conv.worktree_path) return
+  let worktreeExists = true
+  try {
+    await fsp.stat(conv.worktree_path)
+  } catch {
+    worktreeExists = false
+  }
+  if (worktreeExists) return
+  await sb
+    .from("conversations")
+    .update({
+      shipped_at: new Date().toISOString(),
+      worktree_path: null,
+      branch: null,
+      base_ref: null,
+    })
+    .eq("id", conversationId)
+  logWorktreeEvent("merge.reconciled", {
+    conv: conversationId.slice(0, 8),
+    branch: conv.branch,
+    baseRef: conv.base_ref,
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1215,28 +1288,28 @@ app.post("/api/conversations/:id/arm", async (c) => {
   return c.json(updated)
 })
 
-// Ship a conversation's worktree: commit pending changes, optionally
-// fast-forward the base ref, then remove the worktree + branch. If the base
-// ref has advanced past a pure fast-forward, the worktree is left intact and
-// a warning is returned.
-app.post("/api/conversations/:id/ship", async (c) => {
+// Merge a task's worktree back into its base branch, AI-driven. The server
+// does no git work itself — it records intent (merge_requested_at), builds a
+// scripted prompt, and injects it as the next turn for the agent. The agent
+// runs with cwd = baseCwd (not the worktree, which it will delete) and walks
+// the numbered steps. On conflict or dirty base, the agent STOPs and the
+// conversation becomes a normal back-and-forth until the user resolves it.
+// See docs/MERGE-FLOW.md.
+app.post("/api/conversations/:id/merge", async (c) => {
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
   const conversationId = c.req.param("id")
-  const body = await c.req.json<{
-    message?: string
-    mode?: "commit" | "merge" | "pr"
-    prBody?: string
-  }>().catch(() => ({}))
-  const mode = body.mode ?? "merge"
 
   const { data: conv } = await sb
     .from("conversations")
-    .select("id, title, project_id, worktree_path, branch, base_ref, auto_loop_goal")
+    .select("id, title, kind, project_id, worktree_path, branch, base_ref, auto_loop_goal, session_id")
     .eq("id", conversationId)
     .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.kind !== "task") {
+    return c.json({ error: "only tasks can be merged" }, 400)
+  }
   if (!conv.worktree_path || !conv.branch || !conv.base_ref) {
-    return c.json({ error: "conversation has no worktree to ship" }, 400)
+    return c.json({ error: "conversation has no worktree to merge" }, 400)
   }
 
   const { data: project } = await sb
@@ -1247,126 +1320,105 @@ app.post("/api/conversations/:id/ship", async (c) => {
   if (!project) return c.json({ error: "project not found" }, 404)
 
   const baseCwd = resolveProjectCwd(project.cwd)
-  // Only synthesize a commit message if the user didn't supply one AND we
-  // actually need to commit (i.e. the worktree has dirty state). Skipping the
-  // LLM call on already-clean worktrees keeps fast-forward merges snappy.
-  let message = body.message
-  if (!message) {
-    const needsCommit = await hasDirtyWorktree(conv.worktree_path)
-    if (needsCommit) {
-      const generated = await generateCommitMessage({
-        cwd: conv.worktree_path,
-        title: conv.title,
-        goal: conv.auto_loop_goal,
-      })
-      message = generated ?? `${conv.title}\n\nShipped from ai-coder conversation ${conversationId}.`
-    } else {
-      message = conv.title
-    }
-  }
+  const prompt = buildMergePrompt({
+    worktreePath: conv.worktree_path,
+    baseCwd,
+    branch: conv.branch,
+    baseRef: conv.base_ref,
+    title: conv.title,
+    goal: conv.auto_loop_goal,
+  })
 
-  try {
-    const result = await shipWorktree({
-      baseCwd,
-      worktreePath: conv.worktree_path,
-      branch: conv.branch,
-      baseRef: conv.base_ref,
-      message,
-      mode,
-      prBody: body.prBody,
+  // Record intent first so the UI can reflect the pending state even if the
+  // runner takes a moment to start. shipped_at flipping is still what marks
+  // success — merge_requested_at just means "we asked".
+  await sb
+    .from("conversations")
+    .update({
+      merge_requested_at: new Date().toISOString(),
+      // Stop the evaluator loop from chasing the original goal after merge.
+      // The user can resume a task by opening a new one if needed.
+      auto_loop_enabled: false,
     })
-    // merge mode: worktree is gone. Mark the conversation as shipped (not
-    // deleted) so it stays visible in the sidebar and board with a shipped
-    // badge. `worktree_path` is nulled to mirror disk state. The row stays
-    // live until the user explicitly trashes it.
-    if (result.merged) {
-      await sb
-        .from("conversations")
-        .update({
-          shipped_at: new Date().toISOString(),
-          worktree_path: null,
-        })
-        .eq("id", conversationId)
-    } else if (result.warning) {
-      // Something stood in the way of merging. Hand the problem to the agent
-      // by firing a new turn with a system-style user message describing the
-      // situation — the agent can investigate, fix what it can, or ask the
-      // user for direction. The conversation stays otherwise untouched.
-      const prompt = buildMergeHandoffPrompt({
-        mode,
-        warning: result.warning,
-        branch: conv.branch,
-        baseRef: conv.base_ref,
-        needsRebase: result.needsRebase,
-      })
-      await handMergeOffToAgent(conversationId, prompt)
-      return c.json({ ...result, handedOffToAgent: true })
-    }
-    return c.json(result)
-  } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
-  }
-})
+    .eq("id", conversationId)
+  logWorktreeEvent("merge.request", {
+    conv: conversationId.slice(0, 8),
+    branch: conv.branch,
+    baseRef: conv.base_ref,
+  })
 
-function buildMergeHandoffPrompt(input: {
-  mode: "commit" | "merge" | "pr"
-  warning: string
-  branch: string
-  baseRef: string
-  needsRebase: boolean
-}): string {
-  const intro = input.mode === "pr"
-    ? `The PR ship flow couldn't complete.`
-    : input.mode === "merge"
-      ? `The merge into \`${input.baseRef}\` couldn't complete.`
-      : `The ship flow reported an issue.`
-  const fixHint = input.needsRebase
-    ? [
-        "",
-        "Resolve the conflicts here in the worktree:",
-        `1. \`git fetch\` to refresh refs.`,
-        `2. \`git rebase ${input.baseRef}\` (or merge, whichever you prefer).`,
-        "3. Resolve each conflicted file — preserve the intent of both sides.",
-        `4. \`git status\` should be clean when done; stop and let me know.`,
-        "",
-        "After you finish, I'll retry the ship.",
-      ].join("\n")
-    : [
-        "",
-        "Investigate what's blocking the ship. If it's safe to fix without destructive actions, go ahead. If not, explain the situation and ask how I'd like to proceed.",
-      ].join("\n")
-  return [
-    `[Host notice — ship/${input.mode}]`,
-    "",
-    intro,
-    "",
-    `Branch: \`${input.branch}\``,
-    `Base ref: \`${input.baseRef}\``,
-    "",
-    `Reason: ${input.warning}`,
-    fixHint,
-  ].join("\n")
-}
-
-async function handMergeOffToAgent(conversationId: string, prompt: string): Promise<void> {
-  // Wait for any active runner to finish (rare; shipping usually happens
-  // when the task is idle) so we don't fight over the runner slot.
+  // If the task's runner is still in flight (auto-loop mid-iteration,
+  // earlier chat still streaming), abort it so the merge can start now.
+  // Waiting for it to finish could take minutes and confuses the UI. The
+  // aborted runner's finally block removes it from the map; startRunner
+  // will overwrite the map slot when it sets up the merge runner.
   const existing = runners.get(conversationId)
   if (existing && !existing.done) {
-    await existing.promise.catch(() => {})
+    existing.abort.abort()
+    logWorktreeEvent("merge.request", {
+      conv: conversationId.slice(0, 8),
+      aborted_existing: true,
+    })
   }
-  const { data: conv } = sb
-    ? await sb
-        .from("conversations")
-        .select("session_id")
-        .eq("id", conversationId)
-        .single()
-    : { data: null }
+  // Fire the merge turn fresh (no resume) — the scripted prompt is
+  // self-contained, and resuming a session that was created with
+  // cwd=worktreePath against a new cwd=baseCwd has been flaky. The agent gets
+  // all the context it needs from buildMergePrompt + buildMergeSystemPrompt.
+  //
+  // The chat sees a short `role: 'notice'` row (displayText). The agent sees
+  // the full scripted prompt via query() — not via the DB row.
+  console.log("[merge]", conversationId.slice(0, 8), "→ starting runner at cwd", baseCwd)
   void startRunner({
     conversationId,
     prompt,
-    resumeSessionId: conv?.session_id ?? undefined,
+    resumeSessionId: undefined,
+    cwdOverride: baseCwd,
+    oneShot: true,
+    systemPromptOverride: buildMergeSystemPrompt({
+      baseCwd,
+      branch: conv.branch,
+      baseRef: conv.base_ref,
+      worktreePath: conv.worktree_path,
+    }),
+    displayText: buildMergeNoticeText({
+      branch: conv.branch,
+      baseRef: conv.base_ref,
+    }),
+    displayRole: "notice",
   })
+
+  return c.json({ started: true })
+})
+
+function buildMergeNoticeText(input: { branch: string; baseRef: string }): string {
+  return [
+    `Merging **\`${input.branch}\`** into **\`${input.baseRef}\`**.`,
+    "",
+    "The agent will:",
+    "- Commit any pending work on the branch",
+    `- Squash-merge into \`${input.baseRef}\``,
+    "- Remove the worktree and delete the branch",
+    "",
+    "If the base repo is dirty or there's a merge conflict, the agent will stop and ask you how to proceed.",
+  ].join("\n")
+}
+
+function buildMergeSystemPrompt(input: {
+  baseCwd: string
+  worktreePath: string
+  branch: string
+  baseRef: string
+}): string {
+  return [
+    "You are performing a merge operation for the host.",
+    "",
+    `- Working directory (cwd): ${input.baseCwd}`,
+    `- Task worktree: ${input.worktreePath}`,
+    `- Task branch: ${input.branch}`,
+    `- Base branch: ${input.baseRef}`,
+    "",
+    "Use `git -C <path>` to direct commands at a specific repo path. Follow the numbered steps in the user message exactly. If any step reveals a problem (dirty base repo, branch mismatch, merge conflict), STOP immediately and describe the situation — do not attempt to fix it on your own unless the user asks.",
+  ].join("\n")
 }
 
 // Quick probe used by the sidebar's delete confirm to warn before discarding
@@ -1448,48 +1500,6 @@ app.delete("/api/conversations/:id", async (c) => {
     .single()
   if (error || !data) return c.json({ error: error?.message ?? "not found" }, 404)
   return c.json(data)
-})
-
-// When `ship { mode: "merge" }` returns a non-fast-forward warning, the UI
-// can call this to hand the problem to the worker: kick off a new turn with a
-// focused rebase prompt. The worker runs in the same worktree with full
-// write access, resolves conflicts, and stops. User then retries ship.
-app.post("/api/conversations/:id/rebase", async (c) => {
-  if (!sb) return c.json({ error: "persistence disabled" }, 503)
-  const conversationId = c.req.param("id")
-  const { data: conv } = await sb
-    .from("conversations")
-    .select("id, session_id, worktree_path, branch, base_ref")
-    .eq("id", conversationId)
-    .single()
-  if (!conv) return c.json({ error: "conversation not found" }, 404)
-  if (!conv.worktree_path || !conv.branch || !conv.base_ref) {
-    return c.json({ error: "conversation has no worktree" }, 400)
-  }
-
-  const prompt = [
-    `The base branch \`${conv.base_ref}\` has advanced past \`${conv.branch}\`, so shipping cannot fast-forward.`,
-    "",
-    "Please do the following in this worktree:",
-    `1. Fetch the latest state: \`git fetch --all\``,
-    `2. Rebase \`${conv.branch}\` onto \`${conv.base_ref}\`: \`git rebase ${conv.base_ref}\``,
-    `3. Resolve any conflicts. When each file is fixed, \`git add <file>\` and continue with \`git rebase --continue\`.`,
-    `4. Stop when \`git status\` is clean and \`git log --oneline ${conv.base_ref}..HEAD\` shows the expected commits.`,
-    "",
-    "Do not push or force-push; the user will retry shipping once you're done.",
-  ].join("\n")
-
-  // Reuse the existing runner queue — waits for any in-flight turn, then runs.
-  let runner = runners.get(conversationId)
-  if (runner && !runner.done) {
-    await runner.promise.catch(() => {})
-  }
-  runner = await startRunner({
-    conversationId,
-    prompt,
-    resumeSessionId: conv.session_id ?? undefined,
-  })
-  return c.json({ started: true })
 })
 
 // Pause a task: flip auto_loop_enabled off. The loop checks this at each
@@ -1758,7 +1768,6 @@ async function reapTrashedConversations(): Promise<void> {
 // again on an interval. Errors are swallowed — the next tick will retry.
 setTimeout(() => { void reapTrashedConversations() }, 30_000)
 setInterval(() => { void reapTrashedConversations() }, REAPER_INTERVAL_MS)
-
 
 // ─── Local runtime: /api/services/* ─────────────────────────────────────────
 // Spawns the user's app from a project or worktree cwd, captures logs,
@@ -2230,7 +2239,6 @@ app.get("/api/services/:id/logs", (c) => {
     })
   })
 })
-
 
 // ─── Worktree reconciliation ─────────────────────────────────────────────────
 // Runs once at boot. Compares per-project `git worktree list` against the
