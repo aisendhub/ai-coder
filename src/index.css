@@ -129,6 +129,25 @@
   html {
     @apply font-sans;
     }
+
+  /* Tailwind v4's Preflight drops `cursor: pointer` on buttons (browser
+     defaults removed). Restore it globally for every clickable element so
+     shadcn Buttons, anchors, role=button, and native <summary>/<label for>
+     all show the pointer without each component having to opt in. */
+  button,
+  [role="button"],
+  a[href],
+  label[for],
+  summary,
+  ::file-selector-button {
+    cursor: pointer;
+  }
+  button:disabled,
+  button[aria-disabled="true"],
+  [role="button"][aria-disabled="true"],
+  [role="button"][data-disabled] {
+    cursor: not-allowed;
+  }
 }
 
 /* Hide the native scrollbar on opt-in containers (we render our own minimap) */
