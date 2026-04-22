@@ -100,6 +100,7 @@ function DesktopLayout() {
           <ResizablePanel
             ref={navRef}
             id="nav"
+            order={1}
             defaultSize={18}
             minSize={15}
             maxSize={30}
@@ -114,7 +115,7 @@ function DesktopLayout() {
             </div>
           </ResizablePanel>
           <ResizableHandle />
-          <ResizablePanel id="chat" defaultSize={50} minSize={30}>
+          <ResizablePanel id="chat" order={2} defaultSize={50} minSize={30}>
             <div className="h-full min-h-0 overflow-hidden flex flex-col">
               <TopBar
                 rightOpen={rightOpen}
@@ -134,6 +135,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="code"
+                order={3}
                 defaultSize={32}
                 minSize={20}
                 maxSize={70}
@@ -154,6 +156,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="terminal"
+                order={4}
                 defaultSize={28}
                 minSize={18}
                 maxSize={60}
@@ -169,6 +172,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="services"
+                order={5}
                 defaultSize={28}
                 minSize={22}
                 maxSize={50}

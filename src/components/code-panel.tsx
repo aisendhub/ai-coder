@@ -211,15 +211,15 @@ export const CodePanel = observer(function CodePanel({
   }
 
   return (
-    <div className="flex h-full flex-col min-h-0">
+    <div className="@container flex h-full flex-col min-h-0">
       <div className="shrink-0 border-b">
-        <div className="flex h-14 items-center justify-between px-3">
+        <div className="flex h-14 items-center justify-between px-3 gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <FileCode className="size-4 shrink-0" />
-            <h2 className="text-sm font-medium">Changes</h2>
+            <h2 className="text-sm font-medium @max-[280px]:hidden">Changes</h2>
             <span className="text-xs text-muted-foreground">{files.length}</span>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             {showMergeAction ? (
               // Task with a worktree → Merge button. The server injects a
               // scripted prompt; the agent runs the merge in the chat. Commit
@@ -232,9 +232,11 @@ export const CodePanel = observer(function CodePanel({
                     variant="default"
                     onClick={handleMerge}
                     disabled={merging || mergePending}
+                    aria-label={mergePending ? "Merging" : "Merge"}
+                    className="@max-[360px]:px-1.5"
                   >
                     <GitMerge className={cn("size-3.5", (merging || mergePending) && "animate-pulse")} />
-                    {mergePending ? "Merging…" : "Merge"}
+                    <span className="@max-[360px]:hidden">{mergePending ? "Merging…" : "Merge"}</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
@@ -254,9 +256,11 @@ export const CodePanel = observer(function CodePanel({
                       variant="outline"
                       onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
                       disabled={files.length === 0}
+                      aria-label="Commit"
+                      className="@max-[360px]:px-1.5"
                     >
                       <GitCommitVertical className="size-3.5" />
-                      Commit
+                      <span className="@max-[360px]:hidden">Commit</span>
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Commit all current changes</TooltipContent>
@@ -270,9 +274,11 @@ export const CodePanel = observer(function CodePanel({
                         ? "Commit the latest changes with a concise message and then push."
                         : "Push the latest commits to the remote repository.")}
                       disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
+                      aria-label="Push"
+                      className="@max-[360px]:px-1.5"
                     >
                       <ArrowUpFromLine className="size-3.5" />
-                      Push
+                      <span className="@max-[360px]:hidden">Push</span>
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Push to remote</TooltipContent>
