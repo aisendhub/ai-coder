@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { workspace } from "@/models"
 import type { Conversation } from "@/models"
+import { usePersistentState } from "@/hooks/use-persistent-state"
 
 type IconType = typeof MessageSquare
 
@@ -148,12 +149,16 @@ function FreshChat() {
 // ── Fresh task ──────────────────────────────────────────────────────────────
 
 const FreshTask = observer(function FreshTask({ conversation }: { conversation: Conversation }) {
-  // Pre-fill from the row so Spin off and page-reload preserve drafts. When
-  // the server-side goal changes (e.g. server normalized whitespace), sync
-  // once — but don't clobber what the user is typing.
-  const [goal, setGoal] = useState(conversation.autoLoopGoal ?? "")
-  const [maxIterations, setMaxIterations] = useState(conversation.maxIterations || 5)
-  const [maxCostUsd, setMaxCostUsd] = useState(conversation.maxCostUsd || 1)
+  // Draft inputs persist locally, keyed per conversation — so a user who
+  // types a goal and reloads (or opens the tab elsewhere) gets their input
+  // back. The server's autoLoopGoal is the fallback only; localStorage wins
+  // once there's anything there. Cleared after a successful `armTask`.
+  const goalKey = `ai-coder:draft:${conversation.id}:goal`
+  const maxIterKey = `ai-coder:draft:${conversation.id}:maxIterations`
+  const maxCostKey = `ai-coder:draft:${conversation.id}:maxCostUsd`
+  const [goal, setGoal] = usePersistentState(goalKey, conversation.autoLoopGoal ?? "")
+  const [maxIterations, setMaxIterations] = usePersistentState(maxIterKey, conversation.maxIterations || 5)
+  const [maxCostUsd, setMaxCostUsd] = usePersistentState(maxCostKey, conversation.maxCostUsd || 1)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -175,6 +180,13 @@ const FreshTask = observer(function FreshTask({ conversation }: { conversation: 
         maxIterations,
         maxCostUsd,
       })
+      // Draft is armed — drop the saved input so stale drafts don't linger
+      // in localStorage forever.
+      try {
+        window.localStorage.removeItem(goalKey)
+        window.localStorage.removeItem(maxIterKey)
+        window.localStorage.removeItem(maxCostKey)
+      } catch { /* ignore */ }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {

@@ -78,6 +78,23 @@ export const ChatPanel = observer(function ChatPanel() {
     void target.send(prompt, attachments)
   }
 
+  // On reload, the URL contains the conversation id but the workspace hasn't
+  // fetched conversations yet — for a tick, `conversation` is null and the
+  // default EmptyState ("Chat or Task?") + generic Composer would flash
+  // through before the real task view resolves. Gate that window: if the URL
+  // targets a specific conversation and we haven't found it yet, render a
+  // quiet loading shell. Drafts (no messages) still render via the normal
+  // path once `conversation` arrives, with their input pre-filled.
+  const pathname = typeof window !== "undefined" ? window.location.pathname : ""
+  const urlTargetsConversation = pathname.startsWith("/c/") && pathname.length > 3
+  if (urlTargetsConversation && !conversation) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        Loading…
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {conversation?.kind === "task" && <TaskHeader conversation={conversation} />}
