@@ -7,8 +7,11 @@
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
+    "start": "concurrently -n server,web -c magenta,cyan \"npm:start:server\" \"npm:start:web\"",
+    "start:server": "PORT=3082 tsx server/index.ts",
+    "start:web": "BACKEND_PORT=3082 vite --port 3083 --strictPort",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "serve": "NODE_ENV=production tsx server/index.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true"

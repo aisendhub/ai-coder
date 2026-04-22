@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, GitBranch, FileText, X } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, GitPullRequest, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, FileText, Ship, X } from "lucide-react"
+import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -39,12 +40,74 @@ export const CodePanel = observer(function CodePanel({
   collapsed = false,
   onClose,
 }: { collapsed?: boolean; onClose?: () => void } = {}) {
-  const conversationId = workspace.active?.id ?? null
+  const active = workspace.active
+  const conversationId = active?.id ?? null
+  // Ship actions (Merge/PR) only make sense on tasks with their own worktree
+  // branch. Plain chats — even ones that happen to carry a legacy
+  // `worktree_path` from before this rule was tightened — get the standard
+  // Commit/Push prompts, which act in whatever cwd the chat resolves to.
+  const showShipActions = active?.kind === "task" && !!active?.worktreePath
   const [data, setData] = useState<ChangesResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
   const [search, setSearch] = useState("")
+  const [shipping, setShipping] = useState<null | "merge" | "pr">(null)
+
+  const handleShip = useCallback(async (mode: "merge" | "pr") => {
+    if (!conversationId) return
+    const label = active?.title || "this conversation"
+    const prompt = mode === "merge"
+      ? `Merge ${label}? Pending changes will be committed and the branch fast-forwarded into ${active?.baseRef ?? "base"}.`
+      : `Open a PR for ${label}? Pending changes will be committed, the branch pushed to origin, and a PR opened via gh.`
+    if (!confirm(prompt)) return
+    setShipping(mode)
+    try {
+      const result = await workspace.shipConversation(conversationId, { mode })
+      if (result.warning) {
+        // Server already handed the warning to the agent as a new turn — the
+        // chat panel will show the agent working on it. Just announce that.
+        if (result.handedOffToAgent) {
+          toast.info("Handed to the agent", {
+            description: "I've asked the worker to resolve the merge. Watch the chat.",
+            duration: 6000,
+          })
+        } else {
+          toast.warning("Ship needs attention", {
+            description: result.warning,
+            duration: 10000,
+          })
+        }
+      } else if (result.merged) {
+        const base = active?.baseRef ?? "base"
+        toast.success("Merged", {
+          description: result.workingTreeUpdated
+            ? `Fast-forwarded ${base} and updated the base working tree. Worktree removed.`
+            : `Fast-forwarded ${base} (ref only — base checkout was busy). Run \`git pull\` in the base repo to see the files.`,
+          duration: 8000,
+        })
+      } else if (result.prUrl) {
+        toast.success("PR opened", {
+          description: result.prUrl,
+          action: { label: "Open", onClick: () => window.open(result.prUrl!, "_blank") },
+          duration: 10000,
+        })
+      } else if (result.committed) {
+        toast.success("Committed", {
+          description: "Changes committed on the task branch.",
+        })
+      } else {
+        toast.info("Nothing to ship", { description: "No pending changes on this worktree." })
+      }
+    } catch (err) {
+      toast.error("Ship failed", {
+        description: err instanceof Error ? err.message : String(err),
+        duration: 8000,
+      })
+    } finally {
+      setShipping(null)
+    }
+  }, [conversationId, active])
 
   const fetchChanges = useCallback(async () => {
     if (!conversationId) {
@@ -179,42 +242,81 @@ export const CodePanel = observer(function CodePanel({
             <span className="text-xs text-muted-foreground">{files.length}</span>
           </div>
           <div className="flex items-center gap-1">
-            {data?.branch && (
-              <div className="flex items-center gap-1 mr-1 text-xs text-muted-foreground min-w-0 max-w-30">
-                <GitBranch className="size-3 shrink-0" />
-                <span className="truncate font-mono" title={data.branch}>{data.branch}</span>
-              </div>
+            {showShipActions ? (
+              // Worktree-backed conversation → Ship actions (merge or PR).
+              // Commit/Push aren't shown because shipping handles the commit
+              // step automatically, and pushing a per-conversation branch
+              // outside of the ship flow is rarely what the user wants.
+              <>
+                <Tooltip>
+                  <TooltipTrigger>
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={() => handleShip("merge")}
+                      disabled={shipping !== null}
+                    >
+                      <Ship className={cn("size-3.5", shipping === "merge" && "animate-pulse")} />
+                      Merge
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Commit + fast-forward into {active?.baseRef ?? "base"}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleShip("pr")}
+                      disabled={shipping !== null}
+                    >
+                      <GitPullRequest className={cn("size-3.5", shipping === "pr" && "animate-pulse")} />
+                      PR
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Commit + push + open PR via gh
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            ) : (
+              // Shared-cwd conversation → plain Commit + Push prompts to the
+              // agent. No ship flow because there's no task branch to merge.
+              <>
+                <Tooltip>
+                  <TooltipTrigger>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
+                      disabled={files.length === 0}
+                    >
+                      <GitCommitVertical className="size-3.5" />
+                      Commit
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Commit all current changes</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => dispatchPrompt(files.length > 0
+                        ? "Commit the latest changes with a concise message and then push."
+                        : "Push the latest commits to the remote repository.")}
+                      disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
+                    >
+                      <ArrowUpFromLine className="size-3.5" />
+                      Push
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Push to remote</TooltipContent>
+                </Tooltip>
+              </>
             )}
-            <Tooltip>
-              <TooltipTrigger>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
-                  disabled={files.length === 0}
-                >
-                  <GitCommitVertical className="size-3.5" />
-                  Commit
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Commit all current changes</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => dispatchPrompt(files.length > 0
-                    ? "Commit the latest changes with a concise message and then push."
-                    : "Push the latest commits to the remote repository.")}
-                  disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
-                >
-                  <ArrowUpFromLine className="size-3.5" />
-                  Push
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Push to remote</TooltipContent>
-            </Tooltip>
             <Tooltip>
               <TooltipTrigger>
                 <Button
@@ -410,7 +512,7 @@ function NewFileBody({ path, content }: { path: string; content: string }) {
   if (html) {
     return (
       <div
-        className="[&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:leading-snug"
+        className="[&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:scrollbar-thin [&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:leading-snug"
         dangerouslySetInnerHTML={{ __html: html }}
       />
     )
@@ -447,7 +549,7 @@ function SimpleDiff({ hunks }: { hunks: string[] }) {
             return (
               <div
                 key={j}
-                className={cn("px-3 whitespace-pre overflow-x-auto", cls)}
+                className={cn("px-3 whitespace-pre overflow-x-auto scrollbar-thin", cls)}
               >
                 {line || "\u00A0"}
               </div>

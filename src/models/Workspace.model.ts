@@ -163,6 +163,7 @@ export class Workspace extends BaseModel {
         .from("conversations")
         .select("*")
         .eq("user_id", this.userId)
+        .is("deleted_at", null)
         .order("updated_at", { ascending: false })
       if (error) throw error
       runInAction(() => {
@@ -206,14 +207,22 @@ export class Workspace extends BaseModel {
     }
   }
 
-  async createProject(name: string, cwd: string): Promise<Project> {
+  async createProject(
+    name: string,
+    cwd: string,
+    worktreeMode: "shared" | "per_conversation" = "shared"
+  ): Promise<Project> {
     if (!this.userId) throw new Error("not signed in")
-    const { data, error } = await supabase
-      .from("projects")
-      .insert({ user_id: this.userId, name, cwd })
-      .select()
-      .single()
-    if (error) throw error
+    const res = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: this.userId, name, cwd, worktreeMode }),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
     const p = Project.create()
     p.setFromRow(data)
     runInAction(() => {
@@ -234,19 +243,77 @@ export class Workspace extends BaseModel {
     })
   }
 
+  /** Create a *draft* task. No worktree, no worker fire — the empty-state
+   *  form in the chat pane collects the goal + caps and calls `armTask()`.
+   *  `initialGoal` pre-fills the form (used by Spin off from a chat). */
+  async createTaskDraft(input: { initialGoal?: string; title?: string } = {}): Promise<Conversation> {
+    if (!this.userId) throw new Error("not signed in")
+    if (!this.activeProjectId) throw new Error("no active project")
+    const res = await fetch("/api/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: this.userId,
+        projectId: this.activeProjectId,
+        title: input.title,
+        kind: "task",
+        autoLoopGoal: input.initialGoal,
+      }),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
+    const c = Conversation.create()
+    c.setFromRow(data)
+    runInAction(() => {
+      this.conversations.addItem(c)
+      this.setActive(c.id)
+    })
+    return c
+  }
+
+  /** Arm a draft task: persist goal + caps, provision the worktree, kick the
+   *  first worker turn. Called from the empty-state form when the user hits
+   *  Start. The server updates the row and starts the runner; realtime
+   *  delivers the updated row + streamed messages. */
+  async armTask(id: string, input: {
+    goal: string
+    maxIterations?: number
+    maxCostUsd?: number
+  }): Promise<void> {
+    const res = await fetch(`/api/conversations/${id}/arm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
   async createNew(): Promise<Conversation> {
     if (!this.userId) throw new Error("not signed in")
     if (!this.activeProjectId) throw new Error("no active project")
-    const { data, error } = await supabase
-      .from("conversations")
-      .insert({
-        user_id: this.userId,
-        project_id: this.activeProjectId,
+    // Server-side create so the worktree can be provisioned alongside the row.
+    // Projects in "shared" mode get the row back with worktree_path = null and
+    // behavior is unchanged.
+    const res = await fetch("/api/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: this.userId,
+        projectId: this.activeProjectId,
         title: "New chat",
-      })
-      .select()
-      .single()
-    if (error) throw error
+      }),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
     const c = Conversation.create()
     c.setFromRow(data)
     runInAction(() => {
@@ -257,13 +324,111 @@ export class Workspace extends BaseModel {
   }
 
   async remove(id: string) {
-    const { error } = await supabase.from("conversations").delete().eq("id", id)
-    if (error) throw error
+    // Soft-trash via the server: flips deleted_at, preserves worktree + branch
+    // so the user can restore within the grace window. The reaper hard-deletes
+    // and tears down the worktree after 7 days.
+    const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
     const target = this.conversations.find(id)
     target?.unsubscribe()
     runInAction(() => {
       this.conversations.removeItem(id)
       if (this.activeId === id) this.activeId = null
+    })
+  }
+
+  /** Ship a conversation's worktree. On `merge=true` (default) the worktree
+   *  + branch are removed on success and the conversation is soft-trashed.
+   *  Returns the ship result so callers can surface warnings/commit sha. */
+  async shipConversation(
+    id: string,
+    opts: { mode?: "commit" | "merge" | "pr"; message?: string; prBody?: string } = {}
+  ): Promise<{
+    mode: "commit" | "merge" | "pr"
+    committed: boolean
+    commitSha: string | null
+    merged: boolean
+    baseAdvanced: string | null
+    rebased: boolean
+    workingTreeUpdated: boolean
+    pushed: boolean
+    prUrl: string | null
+    warning: string | null
+    needsRebase: boolean
+    handedOffToAgent?: boolean
+  }> {
+    const res = await fetch(`/api/conversations/${id}/ship`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    return await res.json()
+  }
+
+  /** Pause a task: flips `auto_loop_enabled = false`. Current worker turn
+   *  finishes, then the loop breaks cleanly at the next iteration boundary. */
+  async pauseTask(id: string): Promise<void> {
+    const res = await fetch(`/api/conversations/${id}/pause`, { method: "POST" })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
+  /** Resume a paused task: flips the flag on and kicks a fresh worker turn
+   *  so the evaluator can drive next steps without the user typing. */
+  async resumeTask(id: string): Promise<void> {
+    const res = await fetch(`/api/conversations/${id}/resume`, { method: "POST" })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
+  /** Stop a running conversation immediately. Aborts the in-flight runner
+   *  (the loop's abort controller trips at the next iteration check) and —
+   *  for tasks — flips `auto_loop_enabled` off so it doesn't auto-continue. */
+  async stopConversation(id: string): Promise<void> {
+    const target = this.conversations.find(id)
+    // Flip the loop off first so a racing iteration-boundary check catches it.
+    if (target?.kind === "task" && target.autoLoopEnabled) {
+      try { await this.pauseTask(id) } catch { /* ignore */ }
+    }
+    await fetch("/api/chat/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId: id }),
+    })
+  }
+
+  /** Hand a non-ff ship off to the worker: it rebases the branch onto base_ref
+   *  and resolves conflicts. User retries ship after. */
+  async rebaseConversation(id: string): Promise<void> {
+    const res = await fetch(`/api/conversations/${id}/rebase`, { method: "POST" })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
+  async restore(id: string) {
+    const res = await fetch(`/api/conversations/${id}/restore`, { method: "POST" })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const row = await res.json()
+    const c = Conversation.create()
+    c.setFromRow(row)
+    runInAction(() => {
+      this.conversations.addItem(c)
     })
   }
 
@@ -282,6 +447,17 @@ export class Workspace extends BaseModel {
         (payload) => {
           if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
             const row = payload.new as Parameters<Conversation["setFromRow"]>[0]
+            // Only hard/soft-trashed rows drop out of the sidebar. Shipped
+            // tasks stay visible so the user can open them, review the
+            // transcript, and see the status badge — they're still part of
+            // the workflow until explicitly deleted.
+            if (row.deleted_at) {
+              runInAction(() => {
+                this.conversations.removeItem(row.id)
+                if (this.activeId === row.id) this.activeId = null
+              })
+              return
+            }
             runInAction(() => {
               const existing = this.conversations.find(row.id)
               if (existing) {

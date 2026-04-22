@@ -22,6 +22,27 @@ import { EventEmitter } from "node:events"
 import { createClient } from "@supabase/supabase-js"
 import * as pty from "node-pty"
 import { WebSocketServer } from "ws"
+import {
+  addWorktree,
+  branchNameFor,
+  detectDefaultBaseRef,
+  hasDirtyWorktree,
+  isGitRepo,
+  listWorktrees,
+  logWorktreeEvent,
+  pruneWorktreeMetadata,
+  removeWorktree,
+  repairSymlinks,
+  shipWorktree,
+  worktreePathFor,
+} from "./worktrees"
+import {
+  feedbackHash,
+  generateCommitMessage,
+  runEvaluator,
+  summarizeTools,
+  type EvaluatorResult,
+} from "./agent-loop"
 
 const execFileP = promisify(execFile)
 
@@ -61,12 +82,18 @@ async function cwdForConversation(conversationId: string): Promise<string> {
   if (!sb) return WORKSPACE_DIR
   const { data: conv, error: convErr } = await sb
     .from("conversations")
-    .select("project_id")
+    .select("project_id, worktree_path")
     .eq("id", conversationId)
     .single()
   if (convErr || !conv?.project_id) {
     console.warn("[cwd] no project_id for conv", conversationId, convErr?.message)
     return WORKSPACE_DIR
+  }
+  // Per-conversation worktree wins when set; falls back to the project cwd.
+  if (conv.worktree_path) {
+    const resolved = resolve(conv.worktree_path)
+    console.log("[cwd]", conversationId.slice(0, 8), "→", resolved, "(worktree)")
+    return resolved
   }
   const { data: proj, error: projErr } = await sb
     .from("projects")
@@ -80,6 +107,81 @@ async function cwdForConversation(conversationId: string): Promise<string> {
   const resolved = resolveProjectCwd(proj.cwd)
   console.log("[cwd]", conversationId.slice(0, 8), "→", resolved)
   return resolved
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loop state — evaluator-optimizer orchestrator reads/writes these
+// ─────────────────────────────────────────────────────────────────────────────
+
+type LoopState = {
+  autoLoopEnabled: boolean
+  autoLoopGoal: string | null
+  loopIteration: number
+  loopCostUsd: number
+  maxIterations: number
+  maxCostUsd: number
+}
+
+async function loadLoopState(conversationId: string): Promise<LoopState | null> {
+  if (!sb) return null
+  const { data, error } = await sb
+    .from("conversations")
+    .select("auto_loop_enabled, auto_loop_goal, loop_iteration, loop_cost_usd, max_iterations, max_cost_usd")
+    .eq("id", conversationId)
+    .single()
+  if (error || !data) {
+    if (error) console.warn("[loop] load failed", conversationId.slice(0, 8), error.message)
+    return null
+  }
+  return {
+    autoLoopEnabled: Boolean(data.auto_loop_enabled),
+    autoLoopGoal: data.auto_loop_goal ?? null,
+    loopIteration: Number(data.loop_iteration ?? 0),
+    loopCostUsd: Number(data.loop_cost_usd ?? 0),
+    maxIterations: Number(data.max_iterations ?? 5),
+    maxCostUsd: Number(data.max_cost_usd ?? 1),
+  }
+}
+
+async function persistLoopState(
+  conversationId: string,
+  iteration: number,
+  costUsd: number
+): Promise<void> {
+  if (!sb) return
+  const { error } = await sb
+    .from("conversations")
+    .update({ loop_iteration: iteration, loop_cost_usd: costUsd })
+    .eq("id", conversationId)
+  if (error) console.warn("[loop] persist failed", conversationId.slice(0, 8), error.message)
+}
+
+// Returns the combined text of any pending user nudges (delivered_at IS NULL)
+// after marking them delivered. Returns null if there are none. Called from
+// `canUseTool` (early boundary) and at end-of-turn (safety net).
+async function flushPendingNudges(conversationId: string): Promise<string | null> {
+  if (!sb) return null
+  const { data, error } = await sb
+    .from("messages")
+    .select("id, text")
+    .eq("conversation_id", conversationId)
+    .eq("role", "user")
+    .is("delivered_at", null)
+    .order("created_at", { ascending: true })
+  if (error) {
+    console.warn("[nudge] fetch failed", error.message)
+    return null
+  }
+  if (!data || data.length === 0) return null
+  const ids = data.map((r) => r.id as string)
+  const { error: upErr } = await sb
+    .from("messages")
+    .update({ delivered_at: new Date().toISOString() })
+    .in("id", ids)
+  if (upErr) console.warn("[nudge] mark-delivered failed", upErr.message)
+  // Multiple nudges: present as separate paragraphs so the agent reads them in
+  // order. The LLM treats these as the user's combined steering message.
+  return data.map((r) => (r.text as string).trim()).filter(Boolean).join("\n\n")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,13 +248,54 @@ type AttachmentPayload = {
 
 const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
+/** Builds text appended to Claude Code's default system prompt so the worker
+ *  knows where it's running. Critical for tasks: without it, Claude
+ *  occasionally guesses placeholder paths like /Users/user/ when asked to
+ *  create a file with a bare name, hits EACCES, then recovers via `pwd`. */
+function buildSystemPromptAppend(input: {
+  cwd: string
+  kind: string | null
+  branch: string | null
+  baseRef: string | null
+  worktreePath: string | null
+}): string {
+  const isTaskWorktree = input.kind === "task" && !!input.worktreePath
+  if (!isTaskWorktree) {
+    // Chats: one short line to prevent placeholder-path hallucinations.
+    return [
+      `You are working in: ${input.cwd}`,
+      `Use relative paths (e.g. "./src/foo.ts") or absolute paths inside the cwd. Never invent placeholder absolute paths like "/Users/user/...".`,
+    ].join("\n")
+  }
+  const lines = [
+    "You are running an autonomous task in an isolated git worktree.",
+    "",
+    `- Working directory (cwd): ${input.cwd}`,
+    `- Branch: ${input.branch ?? "(unknown)"}`,
+    `- Base ref: ${input.baseRef ?? "(unknown)"}`,
+    "",
+    "Rules for file paths:",
+    `- ALWAYS write files inside the cwd above. Use relative paths (e.g. "./test.txt") or absolute paths starting with "${input.cwd}".`,
+    `- NEVER invent placeholder absolute paths like "/Users/user/" or "/home/user/" — they will fail with permission errors. If unsure, run "pwd" first.`,
+    "",
+    "Rules for git:",
+    "- You're on a dedicated branch. Commit freely; the orchestrator will merge or open a PR when the user ships the task.",
+    "- Do not switch branches or run `git worktree` commands — this worktree is managed by the host.",
+  ]
+  return lines.join("\n")
+}
+
 async function startRunner(args: {
   conversationId: string
   prompt: string
   attachments?: AttachmentPayload[]
   resumeSessionId?: string
+  /** When true, skip inserting the user message row for the FIRST iteration —
+   *  the caller already wrote it (e.g. nudge sweep on /api/chat). */
+  skipFirstUserInsert?: boolean
 }): Promise<Runner> {
   const { conversationId, prompt, attachments, resumeSessionId } = args
+  const skipFirstUserInsert = args.skipFirstUserInsert ?? false
   const bus = new EventEmitter()
   bus.setMaxListeners(50)
   const abort = new AbortController()
@@ -171,212 +314,402 @@ async function startRunner(args: {
       console.log(`[${turnId} conv=${conversationId.slice(0, 6)}] ${event}`, payload)
     }
     const cwd = await cwdForConversation(conversationId)
-    log("turn.start", { prompt: prompt.slice(0, 80), resume: resumeSessionId, cwd })
 
-    let assistantText = ""
-    const assistantEvents: StreamEvent[] = []
-    let assistantDbId: string | null = null
-    let pendingFlush = false
-    let lastFlushAt = 0
+    // Pull worktree metadata once so the worker's system-prompt append can
+    // tell the agent where it's working. Keeps Claude from guessing
+    // placeholder paths like /Users/user/ for underspecified filenames.
+    let convMeta: { kind: string | null; branch: string | null; base_ref: string | null; worktree_path: string | null } = {
+      kind: null, branch: null, base_ref: null, worktree_path: null,
+    }
+    if (sb) {
+      const { data } = await sb
+        .from("conversations")
+        .select("kind, branch, base_ref, worktree_path")
+        .eq("id", conversationId)
+        .single()
+      if (data) convMeta = data as typeof convMeta
+    }
+    const systemPromptAppend = buildSystemPromptAppend({
+      cwd,
+      kind: convMeta.kind,
+      branch: convMeta.branch,
+      baseRef: convMeta.base_ref,
+      worktreePath: convMeta.worktree_path,
+    })
+
+    log("turn.start", { prompt: prompt.slice(0, 80), resume: resumeSessionId, cwd })
 
     const emit = (event: string, data: unknown) => {
       bus.emit("event", { event, data })
     }
 
-    // Insert user + assistant placeholder rows up front so the UI can show
-    // them immediately (and any reconnecting client sees them).
-    if (sb) {
-      try {
-        const attachmentMeta = (attachments ?? []).map((a) => ({
-          filename: a.filename,
-          mimeType: a.mimeType,
-          sizeBytes: a.sizeBytes,
-        }))
-        await sb.from("messages").insert({
-          conversation_id: conversationId,
-          role: "user",
-          text: prompt,
-          events: [],
-          attachments: attachmentMeta,
-        })
-        const { data } = await sb
-          .from("messages")
-          .insert({
-            conversation_id: conversationId,
-            role: "assistant",
-            text: "",
-            events: [],
-          })
-          .select("id")
-          .single()
-        assistantDbId = data?.id ?? null
-        emit("assistant_row", { id: assistantDbId })
-      } catch (err) {
-        console.error("insert messages failed", err)
-      }
-    }
-
-    const flushPersist = async (force = false) => {
-      if (!sb || !assistantDbId) return
-      const now = Date.now()
-      if (!force && now - lastFlushAt < PERSIST_INTERVAL_MS) return
-      if (pendingFlush) return
-      pendingFlush = true
-      lastFlushAt = now
-      try {
-        await sb
-          .from("messages")
-          .update({ text: assistantText, events: assistantEvents })
-          .eq("id", assistantDbId)
-      } catch (err) {
-        console.error("flush update failed", err)
-      } finally {
-        pendingFlush = false
-      }
-    }
+    // ── Loop state (evaluator-optimizer) ────────────────────────────────────
+    // Shared across iterations. The worker turn runs once per iteration; the
+    // evaluator fires between iterations with a fresh session + read-only
+    // tools. Stop conditions live here, not in the prompt.
+    let loopState = await loadLoopState(conversationId)
+    let currentPrompt = prompt
+    let currentResume = resumeSessionId
+    let iterationAttachments = attachments
+    let prevFeedbackHash: string | null = null
+    let iterationIndex = 0
+    let erroredThisTurn = false
+    // If the FIRST iteration's user row was already inserted by the caller
+    // (nudge sweep on /api/chat), don't write a duplicate. Subsequent
+    // iterations always need their own row (auto-loop nextSteps; nudge
+    // re-entry handles its skip via the same flag flipped per iteration).
+    let skipUserInsertThisIteration = skipFirstUserInsert
 
     try {
-      // Build the prompt — either a plain string or an AsyncIterable with
-      // structured content blocks when file attachments are present.
-      let queryPrompt: string | AsyncIterable<SDKUserMessage> = prompt
+      while (true) {
+        iterationIndex += 1
+        const isFirstIteration = iterationIndex === 1
+        erroredThisTurn = false
 
-      if (attachments && attachments.length > 0) {
-        const contentBlocks: MessageParam["content"] = []
+        // Per-iteration state. The flushPersist closure captures these by
+        // reference so it always writes the current iteration's transcript.
+        let assistantText = ""
+        const assistantEvents: StreamEvent[] = []
+        let assistantDbId: string | null = null
+        let pendingFlush = false
+        let lastFlushAt = 0
+        let workerCostUsd = 0
+        let workerSessionId: string | null = currentResume ?? null
+        // Set by the canUseTool callback (or end-of-turn safety net) when a
+        // user nudge has been flushed. Triggers immediate re-entry below.
+        let nudgeInterruptText: string | null = null
 
-        for (const att of attachments) {
-          if (SUPPORTED_IMAGE_TYPES.includes(att.mimeType)) {
-            contentBlocks.push({
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: att.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-                data: att.base64,
-              },
-            })
-          } else if (att.mimeType === "application/pdf") {
-            // PDFs: use DocumentBlockParam with base64 source
-            contentBlocks.push({
-              type: "document",
-              source: {
-                type: "base64",
-                media_type: "application/pdf",
-                data: att.base64,
-              },
-              title: att.filename,
-            } as never) // cast needed — agent SDK types lag behind API support
-          } else {
-            // Text-based files: decode base64 to text
-            const textContent = Buffer.from(att.base64, "base64").toString("utf-8")
-            contentBlocks.push({
-              type: "text",
-              text: `[File: ${att.filename}]\n${textContent}`,
-            })
-          }
-        }
-
-        // Add the user's text prompt
-        if (prompt) {
-          contentBlocks.push({ type: "text", text: prompt })
-        }
-
-        async function* singleMessage(): AsyncIterable<SDKUserMessage> {
-          yield {
-            type: "user",
-            message: { role: "user", content: contentBlocks },
-            parent_tool_use_id: null,
-          }
-        }
-        queryPrompt = singleMessage()
-      }
-
-      const messages = query({
-        prompt: queryPrompt,
-        options: {
-          resume: resumeSessionId,
-          cwd,
-          permissionMode: "bypassPermissions",
-          settingSources: [],
-          includePartialMessages: false,
-          abortController: abort,
-        },
-      })
-
-      for await (const msg of messages) {
-        if (msg.type === "system" && msg.subtype === "init") {
-          log("session", { sessionId: msg.session_id })
-          emit("session", { sessionId: msg.session_id, model: msg.model, cwd: msg.cwd })
-          if (sb) {
-            void sb
-              .from("conversations")
-              .update({ session_id: msg.session_id })
-              .eq("id", conversationId)
-              .then(({ error }) => {
-                if (error) console.error("update session_id failed", error)
+        // Insert user + assistant placeholder rows up front so the UI can show
+        // them immediately (and any reconnecting client sees them). Skip the
+        // user row when the caller already wrote it (nudge-flush sweep, or
+        // nudge interrupt re-entry where the row was inserted via
+        // /api/messages/nudge and just got marked delivered).
+        if (sb) {
+          try {
+            if (!skipUserInsertThisIteration) {
+              const attachmentMeta = (iterationAttachments ?? []).map((a) => ({
+                filename: a.filename,
+                mimeType: a.mimeType,
+                sizeBytes: a.sizeBytes,
+              }))
+              await sb.from("messages").insert({
+                conversation_id: conversationId,
+                role: "user",
+                text: currentPrompt,
+                events: [],
+                attachments: attachmentMeta,
+                // First-class delivery: this prompt is being handed to the
+                // agent right now, so the user row never sits in the queue.
+                delivered_at: new Date().toISOString(),
               })
-          }
-          continue
-        }
-        if (msg.type === "assistant") {
-          for (const block of msg.message.content) {
-            if (block.type === "text") {
-              assistantText += block.text
-              assistantEvents.push({ kind: "text", text: block.text })
-              emit("text", { text: block.text })
-            } else if (block.type === "thinking") {
-              assistantEvents.push({ kind: "thinking", text: block.thinking })
-              emit("thinking", { text: block.thinking })
-            } else if (block.type === "tool_use") {
-              const ev: StreamEvent = {
-                kind: "tool_use",
-                id: block.id,
-                name: block.name,
-                input: block.input,
-              }
-              assistantEvents.push(ev)
-              emit("tool_use", ev)
             }
+            const { data } = await sb
+              .from("messages")
+              .insert({
+                conversation_id: conversationId,
+                role: "assistant",
+                text: "",
+                events: [],
+                delivered_at: new Date().toISOString(),
+              })
+              .select("id")
+              .single()
+            assistantDbId = data?.id ?? null
+            emit("assistant_row", { id: assistantDbId })
+          } catch (err) {
+            console.error("insert messages failed", err)
           }
-          void flushPersist()
-          continue
         }
-        if (msg.type === "user") {
-          const content = msg.message.content
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (typeof block === "object" && block && "type" in block && block.type === "tool_result") {
-                const output =
-                  typeof block.content === "string"
-                    ? block.content
-                    : Array.isArray(block.content)
-                      ? block.content.map((p) => (p.type === "text" ? p.text : "")).join("")
-                      : ""
-                const ev: StreamEvent = {
-                  kind: "tool_result",
-                  toolUseId: block.tool_use_id,
-                  isError: Boolean(block.is_error),
-                  output: output.slice(0, 4000),
+        // Reset for the next iteration; nudge interrupts opt back in below.
+        skipUserInsertThisIteration = false
+
+        const flushPersist = async (force = false) => {
+          if (!sb || !assistantDbId) return
+          const now = Date.now()
+          if (!force && now - lastFlushAt < PERSIST_INTERVAL_MS) return
+          if (pendingFlush) return
+          pendingFlush = true
+          lastFlushAt = now
+          try {
+            await sb
+              .from("messages")
+              .update({ text: assistantText, events: assistantEvents })
+              .eq("id", assistantDbId)
+          } catch (err) {
+            console.error("flush update failed", err)
+          } finally {
+            pendingFlush = false
+          }
+        }
+
+        try {
+          // Build the prompt — either a plain string or an AsyncIterable with
+          // structured content blocks when file attachments are present. Only
+          // the first iteration honors attachments; subsequent loop turns are
+          // driven by the evaluator's text-only nextSteps.
+          let queryPrompt: string | AsyncIterable<SDKUserMessage> = currentPrompt
+
+          if (isFirstIteration && iterationAttachments && iterationAttachments.length > 0) {
+            const contentBlocks: MessageParam["content"] = []
+
+            for (const att of iterationAttachments) {
+              if (SUPPORTED_IMAGE_TYPES.includes(att.mimeType)) {
+                contentBlocks.push({
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: att.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+                    data: att.base64,
+                  },
+                })
+              } else if (att.mimeType === "application/pdf") {
+                // PDFs: use DocumentBlockParam with base64 source
+                contentBlocks.push({
+                  type: "document",
+                  source: {
+                    type: "base64",
+                    media_type: "application/pdf",
+                    data: att.base64,
+                  },
+                  title: att.filename,
+                } as never) // cast needed — agent SDK types lag behind API support
+              } else {
+                // Text-based files: decode base64 to text
+                const textContent = Buffer.from(att.base64, "base64").toString("utf-8")
+                contentBlocks.push({
+                  type: "text",
+                  text: `[File: ${att.filename}]\n${textContent}`,
+                })
+              }
+            }
+
+            if (currentPrompt) {
+              contentBlocks.push({ type: "text", text: currentPrompt })
+            }
+
+            async function* singleMessage(): AsyncIterable<SDKUserMessage> {
+              yield {
+                type: "user",
+                message: { role: "user", content: contentBlocks },
+                parent_tool_use_id: null,
+              }
+            }
+            queryPrompt = singleMessage()
+          }
+
+          const messages = query({
+            prompt: queryPrompt,
+            options: {
+              resume: currentResume,
+              cwd,
+              permissionMode: "bypassPermissions",
+              settingSources: [],
+              includePartialMessages: false,
+              abortController: abort,
+              systemPrompt: {
+                type: "preset",
+                preset: "claude_code",
+                append: systemPromptAppend,
+              },
+              // Earliest natural injection boundary. Before each tool runs we
+              // sweep any pending nudges; if there are any, deny the tool and
+              // interrupt the turn so we can re-enter with the nudge as the
+              // next prompt. See docs/WORKTREES.md § Mid-turn nudges.
+              canUseTool: async () => {
+                const flushed = await flushPendingNudges(conversationId)
+                if (flushed) {
+                  nudgeInterruptText = flushed
+                  emit("nudge_flushed", { iteration: iterationIndex })
+                  return {
+                    behavior: "deny",
+                    message: "User nudged the agent — re-entering with new instructions.",
+                    interrupt: true,
+                  }
                 }
-                assistantEvents.push(ev)
-                emit("tool_result", ev)
+                return { behavior: "allow" }
+              },
+            },
+          })
+
+          for await (const msg of messages) {
+            if (msg.type === "system" && msg.subtype === "init") {
+              workerSessionId = msg.session_id
+              log("session", { sessionId: msg.session_id })
+              emit("session", { sessionId: msg.session_id, model: msg.model, cwd: msg.cwd })
+              if (sb) {
+                void sb
+                  .from("conversations")
+                  .update({ session_id: msg.session_id })
+                  .eq("id", conversationId)
+                  .then(({ error }) => {
+                    if (error) console.error("update session_id failed", error)
+                  })
               }
+              continue
             }
-            void flushPersist()
+            if (msg.type === "assistant") {
+              for (const block of msg.message.content) {
+                if (block.type === "text") {
+                  assistantText += block.text
+                  assistantEvents.push({ kind: "text", text: block.text })
+                  emit("text", { text: block.text })
+                } else if (block.type === "thinking") {
+                  assistantEvents.push({ kind: "thinking", text: block.thinking })
+                  emit("thinking", { text: block.thinking })
+                } else if (block.type === "tool_use") {
+                  const ev: StreamEvent = {
+                    kind: "tool_use",
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                  }
+                  assistantEvents.push(ev)
+                  emit("tool_use", ev)
+                }
+              }
+              void flushPersist()
+              continue
+            }
+            if (msg.type === "user") {
+              const content = msg.message.content
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (typeof block === "object" && block && "type" in block && block.type === "tool_result") {
+                    const output =
+                      typeof block.content === "string"
+                        ? block.content
+                        : Array.isArray(block.content)
+                          ? block.content.map((p) => (p.type === "text" ? p.text : "")).join("")
+                          : ""
+                    const ev: StreamEvent = {
+                      kind: "tool_result",
+                      toolUseId: block.tool_use_id,
+                      isError: Boolean(block.is_error),
+                      output: output.slice(0, 4000),
+                    }
+                    assistantEvents.push(ev)
+                    emit("tool_result", ev)
+                  }
+                }
+                void flushPersist()
+              }
+              continue
+            }
+            if (msg.type === "result") {
+              workerCostUsd = Number(msg.total_cost_usd ?? 0)
+              log("done", { durationMs: msg.duration_ms, turns: msg.num_turns, costUsd: workerCostUsd })
+              emit("done", { durationMs: msg.duration_ms, numTurns: msg.num_turns })
+              break
+            }
           }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          log("error", { message })
+          assistantText += assistantText ? `\n⚠️ ${message}` : `⚠️ ${message}`
+          emit("error", { message })
+          erroredThisTurn = true
+        } finally {
+          await flushPersist(true)
+        }
+
+        // ── Nudge interrupt: highest priority re-entry ─────────────────────
+        // If the canUseTool callback set this OR the end-of-turn safety net
+        // catches a nudge that arrived after the last tool call, re-enter
+        // immediately with the combined nudge text as the next prompt. The
+        // user row(s) are already in the DB and already marked delivered, so
+        // skip the user-insert on re-entry.
+        if (!nudgeInterruptText && !erroredThisTurn) {
+          nudgeInterruptText = await flushPendingNudges(conversationId)
+          if (nudgeInterruptText) emit("nudge_flushed", { iteration: iterationIndex, lateBoundary: true })
+        }
+        if (nudgeInterruptText) {
+          currentPrompt = nudgeInterruptText
+          currentResume = workerSessionId ?? undefined
+          iterationAttachments = undefined
+          skipUserInsertThisIteration = true
           continue
         }
-        if (msg.type === "result") {
-          log("done", { durationMs: msg.duration_ms, turns: msg.num_turns })
-          emit("done", { durationMs: msg.duration_ms, numTurns: msg.num_turns })
+
+        // ── Decide whether to iterate ─────────────────────────────────────
+        // Refresh loop state at each boundary so UI edits to limits or goal
+        // take effect on the next iteration without restarting.
+        loopState = await loadLoopState(conversationId)
+        const shouldLoop =
+          !erroredThisTurn &&
+          !abort.signal.aborted &&
+          loopState?.autoLoopEnabled === true &&
+          !!loopState.autoLoopGoal
+        if (!shouldLoop) break
+
+        const nextIteration = loopState.loopIteration + 1
+        const runningCostUsd = loopState.loopCostUsd + workerCostUsd
+
+        // Hard stops that the evaluator cannot override.
+        if (nextIteration > loopState.maxIterations) {
+          emit("auto_loop_stopped", { reason: "max_iterations", iteration: nextIteration - 1, costUsd: runningCostUsd })
+          log("loop.stop", { reason: "max_iterations" })
+          await persistLoopState(conversationId, loopState.loopIteration, runningCostUsd)
           break
         }
+        if (runningCostUsd >= loopState.maxCostUsd) {
+          emit("auto_loop_stopped", { reason: "max_cost", iteration: loopState.loopIteration, costUsd: runningCostUsd })
+          log("loop.stop", { reason: "max_cost" })
+          await persistLoopState(conversationId, loopState.loopIteration, runningCostUsd)
+          break
+        }
+
+        // Fire the evaluator — fresh session, read-only tools, same cwd so it
+        // can Read/Glob/Grep the files the worker just edited.
+        emit("auto_loop_evaluating", { iteration: nextIteration })
+        const evalResult: EvaluatorResult = await runEvaluator({
+          goal: loopState.autoLoopGoal ?? "",
+          lastAssistantText: assistantText,
+          toolsUsed: summarizeTools(assistantEvents),
+          cwd,
+          abort,
+        })
+        const totalCostUsd = runningCostUsd + evalResult.costUsd
+        log("loop.eval", { status: evalResult.status, costUsd: evalResult.costUsd })
+
+        emit("auto_loop_iteration", {
+          iteration: nextIteration,
+          maxIterations: loopState.maxIterations,
+          status: evalResult.status,
+          feedback: evalResult.feedback,
+          nextSteps: evalResult.nextSteps,
+          costUsd: totalCostUsd,
+        })
+        await persistLoopState(conversationId, nextIteration, totalCostUsd)
+
+        if (evalResult.status !== "continue" || !evalResult.nextSteps.trim()) {
+          emit("auto_loop_stopped", {
+            reason: evalResult.status === "done" ? "done" : "evaluator_stop",
+            iteration: nextIteration,
+            costUsd: totalCostUsd,
+          })
+          break
+        }
+
+        const hash = feedbackHash(evalResult.feedback)
+        if (hash === prevFeedbackHash) {
+          emit("auto_loop_stopped", { reason: "no_progress", iteration: nextIteration, costUsd: totalCostUsd })
+          log("loop.stop", { reason: "no_progress" })
+          break
+        }
+        prevFeedbackHash = hash
+
+        // Prepare next worker turn. Session resumes to keep the worker's own
+        // context intact; only the evaluator runs stateless.
+        currentPrompt = evalResult.nextSteps
+        currentResume = workerSessionId ?? undefined
+        iterationAttachments = undefined
+        loopState = {
+          ...loopState,
+          loopIteration: nextIteration,
+          loopCostUsd: totalCostUsd,
+        }
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      log("error", { message })
-      assistantText += assistantText ? `\n⚠️ ${message}` : `⚠️ ${message}`
-      emit("error", { message })
     } finally {
-      await flushPersist(true)
       runner.done = true
       runners.delete(conversationId)
       emit("closed", {})
@@ -479,14 +812,28 @@ app.get("/api/changes", async (c) => {
       return c.json({ workspace: "", files: [], unpushedCount: 0, branch: "" })
     }
     const cwd = await cwdForConversation(conversationId)
-    const { stdout: porcelain } = await execFileP(
-      "git",
-      ["status", "--porcelain=v1", "-z"],
-      { cwd, maxBuffer: 5 * 1024 * 1024 }
-    )
-    const files = parsePorcelain(porcelain)
+    // Worktree-backed conversations (tasks) show *everything that would ship*:
+    // committed-ahead-of-base + staged + uncommitted + untracked, all diffed
+    // against base_ref. Chats show only uncommitted (today's behavior).
+    let baseRef: string | null = null
+    if (sb) {
+      const { data } = await sb
+        .from("conversations")
+        .select("worktree_path, base_ref")
+        .eq("id", conversationId)
+        .single()
+      if (data?.worktree_path && data.base_ref) baseRef = data.base_ref
+    }
+
+    const files = baseRef
+      ? await listChangesSinceRef(cwd, baseRef)
+      : parsePorcelain(
+          (await execFileP("git", ["status", "--porcelain=v1", "-z"], {
+            cwd, maxBuffer: 5 * 1024 * 1024,
+          })).stdout
+        )
     const withDiffs = await Promise.all(
-      files.map(async (f) => ({ ...f, diff: await fileDiff(cwd, f) }))
+      files.map(async (f) => ({ ...f, diff: await fileDiff(cwd, f, baseRef) }))
     )
     let unpushedCount = 0
     try {
@@ -502,11 +849,65 @@ app.get("/api/changes", async (c) => {
     } catch {
       // not a git repo or detached HEAD
     }
-    return c.json({ workspace: cwd, files: withDiffs, unpushedCount, branch })
+    return c.json({ workspace: cwd, files: withDiffs, unpushedCount, branch, baseRef })
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
+
+// For worktree-backed conversations: union of
+//   1. `git diff --name-status <baseRef>` — committed + staged + modified
+//   2. `git ls-files --others --exclude-standard` — untracked (diff doesn't see these)
+// Yields one ChangedFile per real path. Renames are collapsed into a single
+// entry with oldPath populated.
+async function listChangesSinceRef(cwd: string, baseRef: string): Promise<ChangedFile[]> {
+  const files = new Map<string, ChangedFile>()
+
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["diff", "--name-status", "-z", baseRef, "--"],
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
+    )
+    // Format: "M\0<path>\0" or "R<score>\0<oldPath>\0<newPath>\0"
+    const parts = stdout.split("\0").filter(Boolean)
+    let i = 0
+    while (i < parts.length) {
+      const code = parts[i]
+      if (code.startsWith("R")) {
+        const oldPath = parts[i + 1]
+        const newPath = parts[i + 2]
+        files.set(newPath, { path: newPath, status: "renamed", oldPath })
+        i += 3
+        continue
+      }
+      const path = parts[i + 1]
+      const letter = code[0]
+      let status: ChangedFile["status"] = "modified"
+      if (letter === "A") status = "added"
+      else if (letter === "D") status = "deleted"
+      files.set(path, { path, status })
+      i += 2
+    }
+  } catch {
+    // Fall through — list will be empty if diff failed.
+  }
+
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
+    )
+    for (const path of stdout.split("\0").filter(Boolean)) {
+      if (!files.has(path)) files.set(path, { path, status: "untracked" })
+    }
+  } catch {
+    // ignore — untracked list optional
+  }
+
+  return Array.from(files.values())
+}
 
 // Directory browser — lists subdirectories of `path`. Defaults to PROJECTS_ROOT
 // but allows traversal anywhere the server process can read (single-tenant host).
@@ -561,7 +962,7 @@ function parsePorcelain(z: string): ChangedFile[] {
   return files
 }
 
-async function fileDiff(cwd: string, f: ChangedFile): Promise<string> {
+async function fileDiff(cwd: string, f: ChangedFile, baseRef: string | null = null): Promise<string> {
   try {
     if (f.status === "untracked") {
       const { stdout } = await execFileP("cat", [f.path], {
@@ -570,10 +971,13 @@ async function fileDiff(cwd: string, f: ChangedFile): Promise<string> {
       }).catch(() => ({ stdout: "" }))
       return stdout
     }
+    // Worktree (task): diff against base_ref so committed-ahead-of-base
+    // changes show up. Shared cwd (chat): diff against HEAD (uncommitted only).
+    const left = baseRef ?? "HEAD"
     const args =
       f.status === "renamed" && f.oldPath
-        ? ["diff", "HEAD", "--", f.oldPath, f.path]
-        : ["diff", "HEAD", "--", f.path]
+        ? ["diff", left, "--", f.oldPath, f.path]
+        : ["diff", left, "--", f.path]
     const { stdout } = await execFileP("git", args, {
       cwd,
       maxBuffer: 5 * 1024 * 1024,
@@ -583,6 +987,621 @@ async function fileDiff(cwd: string, f: ChangedFile): Promise<string> {
     return ""
   }
 }
+
+// Create a project. Captures default_base_ref from git HEAD if the cwd is a
+// git repo, which is used later as the base for per-conversation worktrees.
+// Falls back to worktree_mode = "shared" automatically for non-git dirs.
+app.post("/api/projects", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const body = await c.req.json<{
+    userId?: string
+    name?: string
+    cwd?: string
+    worktreeMode?: "shared" | "per_conversation"
+  }>().catch(() => ({}))
+  const { userId, name, cwd } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!name) return c.json({ error: "name required" }, 400)
+  if (!cwd) return c.json({ error: "cwd required" }, 400)
+
+  const absCwd = resolve(cwd)
+  const git = await isGitRepo(absCwd)
+  // Non-git dirs can never be per-conversation. Respect user choice otherwise.
+  const worktreeMode = git && body.worktreeMode === "per_conversation"
+    ? "per_conversation"
+    : "shared"
+  const defaultBaseRef = git ? await detectDefaultBaseRef(absCwd) : null
+
+  const { data, error } = await sb
+    .from("projects")
+    .insert({
+      user_id: userId,
+      name,
+      cwd: absCwd,
+      worktree_mode: worktreeMode,
+      default_base_ref: defaultBaseRef,
+    })
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "insert failed" }, 500)
+  return c.json(data)
+})
+
+// Quick "is this path a git repo?" probe for the new-project dialog — lets
+// the UI enable/disable the per-conversation worktree toggle accurately.
+app.get("/api/fs/git-info", async (c) => {
+  const path = c.req.query("path")
+  if (!path) return c.json({ isGitRepo: false, defaultBaseRef: null })
+  const absPath = resolve(path)
+  const git = await isGitRepo(absPath)
+  const defaultBaseRef = git ? await detectDefaultBaseRef(absPath) : null
+  return c.json({ isGitRepo: git, defaultBaseRef })
+})
+
+// Create a conversation. For projects in per_conversation worktree mode,
+// provision a worktree + branch on a git repo and store them on the row.
+// Falls back to shared mode (no worktree) if the project isn't a git repo or
+// if worktree creation fails — the conversation is always usable.
+app.post("/api/conversations", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const body = await c.req.json<{
+    userId?: string
+    projectId?: string
+    title?: string
+    kind?: "chat" | "task"
+    autoLoopGoal?: string | null
+    maxIterations?: number
+    maxCostUsd?: number
+  }>().catch(() => ({}))
+  const { userId, projectId } = body
+  const kind: "chat" | "task" = body.kind === "task" ? "task" : "chat"
+  const fallbackTitle = kind === "task" ? "New task" : "New chat"
+  const title = body.title ?? fallbackTitle
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!projectId) return c.json({ error: "projectId required" }, 400)
+  // Tasks are drafts at creation: goal optional, no worktree, no worker fire.
+  // The empty-state form in the UI collects the goal/caps and calls
+  // POST /api/conversations/:id/arm to provision the worktree and kick off
+  // the first worker turn.
+
+  const { data: project, error: projErr } = await sb
+    .from("projects")
+    .select("id, user_id, cwd, worktree_mode, default_base_ref")
+    .eq("id", projectId)
+    .single()
+  if (projErr || !project) return c.json({ error: "project not found" }, 404)
+  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const insertRow: Record<string, unknown> = {
+    user_id: userId,
+    project_id: projectId,
+    title,
+    kind,
+  }
+  if (kind === "task") {
+    // Drafts start with the loop off; arm later via /arm. If a goal came
+    // along (e.g. Spin off from chat), store it so the empty-state form
+    // renders pre-filled.
+    insertRow.auto_loop_enabled = false
+    if (body.autoLoopGoal?.trim()) insertRow.auto_loop_goal = body.autoLoopGoal.trim()
+    if (typeof body.maxIterations === "number") insertRow.max_iterations = body.maxIterations
+    if (typeof body.maxCostUsd === "number") insertRow.max_cost_usd = body.maxCostUsd
+  }
+
+  const { data: conv, error: convErr } = await sb
+    .from("conversations")
+    .insert(insertRow)
+    .select()
+    .single()
+  if (convErr || !conv) {
+    return c.json({ error: convErr?.message ?? "insert failed" }, 500)
+  }
+
+  // Chats (and draft tasks) don't get a worktree. Tasks get theirs when
+  // armed — see POST /api/conversations/:id/arm.
+  return c.json(conv)
+})
+
+// Arm a draft task: persist the goal + caps, provision the worktree, and
+// kick off the first worker turn. Called by the fresh-task empty-state form
+// once the user types a goal and hits Start.
+app.post("/api/conversations/:id/arm", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const body = await c.req.json<{
+    goal?: string
+    maxIterations?: number
+    maxCostUsd?: number
+  }>().catch(() => ({}))
+  const goal = body.goal?.trim()
+  if (!goal) return c.json({ error: "goal required" }, 400)
+
+  const { data: conv, error: convErr } = await sb
+    .from("conversations")
+    .select("id, kind, project_id, title, worktree_path")
+    .eq("id", conversationId)
+    .single()
+  if (convErr || !conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.kind !== "task") return c.json({ error: "only tasks can be armed" }, 400)
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("cwd, worktree_mode, default_base_ref")
+    .eq("id", conv.project_id)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+
+  // Persist goal + caps up front. Worker turn fires below uses the live row.
+  const updates: Record<string, unknown> = {
+    auto_loop_enabled: true,
+    auto_loop_goal: goal,
+    // If the first line of the goal looks usable and the user hasn't picked
+    // a custom title yet, upgrade the title so it's easier to find in the
+    // sidebar/board.
+  }
+  if (typeof body.maxIterations === "number") updates.max_iterations = body.maxIterations
+  if (typeof body.maxCostUsd === "number") updates.max_cost_usd = body.maxCostUsd
+  if (conv.title === "New task") {
+    const derived = goal.split("\n")[0].slice(0, 60).trim()
+    if (derived) updates.title = derived
+  }
+
+  // Provision a worktree if the project cwd is a git repo and we don't
+  // already have one (guards against double-arming). We don't gate on
+  // project.worktree_mode anymore: tasks are the ship-able unit and always
+  // benefit from their own branch. The column is preserved for manual
+  // opt-out / future scheduling flags.
+  const baseCwd = resolveProjectCwd(project.cwd)
+  const wantWorktree = !conv.worktree_path
+  const canWorktree = wantWorktree && (await isGitRepo(baseCwd))
+  if (canWorktree) {
+    const baseRef =
+      project.default_base_ref ?? (await detectDefaultBaseRef(baseCwd)) ?? "main"
+    const branch = branchNameFor((updates.title as string) ?? conv.title, conv.id)
+    const worktreePath = worktreePathFor(conv.project_id, conv.id)
+    try {
+      await addWorktree({ baseCwd, worktreePath, branch, baseRef })
+      updates.worktree_path = worktreePath
+      updates.branch = branch
+      updates.base_ref = baseRef
+      logWorktreeEvent("arm", {
+        conv: conv.id.slice(0, 8),
+        branch,
+        baseRef,
+        path: worktreePath,
+      })
+    } catch (err) {
+      logWorktreeEvent("create.failed", {
+        conv: conv.id.slice(0, 8),
+        phase: "arm",
+        reason: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  const { data: updated, error: updErr } = await sb
+    .from("conversations")
+    .update(updates)
+    .eq("id", conversationId)
+    .select()
+    .single()
+  if (updErr || !updated) {
+    return c.json({ error: updErr?.message ?? "update failed" }, 500)
+  }
+
+  // Kick the first worker turn with the goal as the prompt. Don't await —
+  // return immediately so the UI transitions fast; the SSE streams the rest.
+  void startRunner({
+    conversationId,
+    prompt: goal,
+    resumeSessionId: undefined,
+  })
+
+  return c.json(updated)
+})
+
+// Ship a conversation's worktree: commit pending changes, optionally
+// fast-forward the base ref, then remove the worktree + branch. If the base
+// ref has advanced past a pure fast-forward, the worktree is left intact and
+// a warning is returned.
+app.post("/api/conversations/:id/ship", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const body = await c.req.json<{
+    message?: string
+    mode?: "commit" | "merge" | "pr"
+    prBody?: string
+  }>().catch(() => ({}))
+  const mode = body.mode ?? "merge"
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, title, project_id, worktree_path, branch, base_ref, auto_loop_goal")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (!conv.worktree_path || !conv.branch || !conv.base_ref) {
+    return c.json({ error: "conversation has no worktree to ship" }, 400)
+  }
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("cwd")
+    .eq("id", conv.project_id)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+
+  const baseCwd = resolveProjectCwd(project.cwd)
+  // Only synthesize a commit message if the user didn't supply one AND we
+  // actually need to commit (i.e. the worktree has dirty state). Skipping the
+  // LLM call on already-clean worktrees keeps fast-forward merges snappy.
+  let message = body.message
+  if (!message) {
+    const needsCommit = await hasDirtyWorktree(conv.worktree_path)
+    if (needsCommit) {
+      const generated = await generateCommitMessage({
+        cwd: conv.worktree_path,
+        title: conv.title,
+        goal: conv.auto_loop_goal,
+      })
+      message = generated ?? `${conv.title}\n\nShipped from ai-coder conversation ${conversationId}.`
+    } else {
+      message = conv.title
+    }
+  }
+
+  try {
+    const result = await shipWorktree({
+      baseCwd,
+      worktreePath: conv.worktree_path,
+      branch: conv.branch,
+      baseRef: conv.base_ref,
+      message,
+      mode,
+      prBody: body.prBody,
+    })
+    // merge mode: worktree is gone. Mark the conversation as shipped (not
+    // deleted) so it stays visible in the sidebar and board with a shipped
+    // badge. `worktree_path` is nulled to mirror disk state. The row stays
+    // live until the user explicitly trashes it.
+    if (result.merged) {
+      await sb
+        .from("conversations")
+        .update({
+          shipped_at: new Date().toISOString(),
+          worktree_path: null,
+        })
+        .eq("id", conversationId)
+    } else if (result.warning) {
+      // Something stood in the way of merging. Hand the problem to the agent
+      // by firing a new turn with a system-style user message describing the
+      // situation — the agent can investigate, fix what it can, or ask the
+      // user for direction. The conversation stays otherwise untouched.
+      const prompt = buildMergeHandoffPrompt({
+        mode,
+        warning: result.warning,
+        branch: conv.branch,
+        baseRef: conv.base_ref,
+        needsRebase: result.needsRebase,
+      })
+      await handMergeOffToAgent(conversationId, prompt)
+      return c.json({ ...result, handedOffToAgent: true })
+    }
+    return c.json(result)
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+function buildMergeHandoffPrompt(input: {
+  mode: "commit" | "merge" | "pr"
+  warning: string
+  branch: string
+  baseRef: string
+  needsRebase: boolean
+}): string {
+  const intro = input.mode === "pr"
+    ? `The PR ship flow couldn't complete.`
+    : input.mode === "merge"
+      ? `The merge into \`${input.baseRef}\` couldn't complete.`
+      : `The ship flow reported an issue.`
+  const fixHint = input.needsRebase
+    ? [
+        "",
+        "Resolve the conflicts here in the worktree:",
+        `1. \`git fetch\` to refresh refs.`,
+        `2. \`git rebase ${input.baseRef}\` (or merge, whichever you prefer).`,
+        "3. Resolve each conflicted file — preserve the intent of both sides.",
+        `4. \`git status\` should be clean when done; stop and let me know.`,
+        "",
+        "After you finish, I'll retry the ship.",
+      ].join("\n")
+    : [
+        "",
+        "Investigate what's blocking the ship. If it's safe to fix without destructive actions, go ahead. If not, explain the situation and ask how I'd like to proceed.",
+      ].join("\n")
+  return [
+    `[Host notice — ship/${input.mode}]`,
+    "",
+    intro,
+    "",
+    `Branch: \`${input.branch}\``,
+    `Base ref: \`${input.baseRef}\``,
+    "",
+    `Reason: ${input.warning}`,
+    fixHint,
+  ].join("\n")
+}
+
+async function handMergeOffToAgent(conversationId: string, prompt: string): Promise<void> {
+  // Wait for any active runner to finish (rare; shipping usually happens
+  // when the task is idle) so we don't fight over the runner slot.
+  const existing = runners.get(conversationId)
+  if (existing && !existing.done) {
+    await existing.promise.catch(() => {})
+  }
+  const { data: conv } = sb
+    ? await sb
+        .from("conversations")
+        .select("session_id")
+        .eq("id", conversationId)
+        .single()
+    : { data: null }
+  void startRunner({
+    conversationId,
+    prompt,
+    resumeSessionId: conv?.session_id ?? undefined,
+  })
+}
+
+// Quick probe used by the sidebar's delete confirm to warn before discarding
+// a task whose worktree has uncommitted changes or whose branch has commits
+// the remote doesn't know about. Worktree-less rows return all-zero.
+app.get("/api/conversations/:id/discard-status", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("worktree_path, branch")
+    .eq("id", conversationId)
+    .single()
+  if (!conv?.worktree_path) {
+    return c.json({ uncommittedFiles: 0, unpushedCommits: 0, hasUpstream: true, hasWorktree: false })
+  }
+
+  let uncommittedFiles = 0
+  let unpushedCommits = 0
+  let hasUpstream = true
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["status", "--porcelain"],
+      { cwd: conv.worktree_path }
+    )
+    uncommittedFiles = stdout.split("\n").filter(Boolean).length
+  } catch {
+    // worktree path missing — treat as zero (reconcile will surface this)
+  }
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["rev-list", "--count", "@{u}..HEAD"],
+      { cwd: conv.worktree_path }
+    )
+    unpushedCommits = parseInt(stdout.trim(), 10) || 0
+  } catch {
+    // No upstream configured — branch exists only locally. Count all commits
+    // since base_ref as "unpushed" so the user is warned before discard.
+    hasUpstream = false
+    try {
+      const { data: convFull } = await sb
+        .from("conversations")
+        .select("base_ref")
+        .eq("id", conversationId)
+        .single()
+      if (convFull?.base_ref) {
+        const { stdout } = await execFileP(
+          "git",
+          ["rev-list", "--count", `${convFull.base_ref}..HEAD`],
+          { cwd: conv.worktree_path }
+        )
+        unpushedCommits = parseInt(stdout.trim(), 10) || 0
+      }
+    } catch {
+      // give up — leave at 0
+    }
+  }
+  return c.json({
+    uncommittedFiles,
+    unpushedCommits,
+    hasUpstream,
+    hasWorktree: true,
+  })
+})
+
+// Soft-delete: flag the row; the reaper tears down the worktree + branch once
+// the grace window expires. DELETE on the row itself is reserved for the
+// reaper's hard cleanup.
+app.delete("/api/conversations/:id", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data, error } = await sb
+    .from("conversations")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", conversationId)
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "not found" }, 404)
+  return c.json(data)
+})
+
+// When `ship { mode: "merge" }` returns a non-fast-forward warning, the UI
+// can call this to hand the problem to the worker: kick off a new turn with a
+// focused rebase prompt. The worker runs in the same worktree with full
+// write access, resolves conflicts, and stops. User then retries ship.
+app.post("/api/conversations/:id/rebase", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, session_id, worktree_path, branch, base_ref")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (!conv.worktree_path || !conv.branch || !conv.base_ref) {
+    return c.json({ error: "conversation has no worktree" }, 400)
+  }
+
+  const prompt = [
+    `The base branch \`${conv.base_ref}\` has advanced past \`${conv.branch}\`, so shipping cannot fast-forward.`,
+    "",
+    "Please do the following in this worktree:",
+    `1. Fetch the latest state: \`git fetch --all\``,
+    `2. Rebase \`${conv.branch}\` onto \`${conv.base_ref}\`: \`git rebase ${conv.base_ref}\``,
+    `3. Resolve any conflicts. When each file is fixed, \`git add <file>\` and continue with \`git rebase --continue\`.`,
+    `4. Stop when \`git status\` is clean and \`git log --oneline ${conv.base_ref}..HEAD\` shows the expected commits.`,
+    "",
+    "Do not push or force-push; the user will retry shipping once you're done.",
+  ].join("\n")
+
+  // Reuse the existing runner queue — waits for any in-flight turn, then runs.
+  let runner = runners.get(conversationId)
+  if (runner && !runner.done) {
+    await runner.promise.catch(() => {})
+  }
+  runner = await startRunner({
+    conversationId,
+    prompt,
+    resumeSessionId: conv.session_id ?? undefined,
+  })
+  return c.json({ started: true })
+})
+
+// Pause a task: flip auto_loop_enabled off. The loop checks this at each
+// iteration boundary and will break cleanly after the current worker turn.
+app.post("/api/conversations/:id/pause", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data, error } = await sb
+    .from("conversations")
+    .update({ auto_loop_enabled: false })
+    .eq("id", conversationId)
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "not found" }, 404)
+  return c.json(data)
+})
+
+// Resume a paused task: flip auto_loop_enabled back on AND kick a new worker
+// turn with a generic "continue" prompt so the evaluator drives next steps.
+// Worker session resumes via conversations.session_id, so context is intact.
+app.post("/api/conversations/:id/resume", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data: conv, error } = await sb
+    .from("conversations")
+    .update({ auto_loop_enabled: true })
+    .eq("id", conversationId)
+    .select("id, session_id, auto_loop_goal")
+    .single()
+  if (error || !conv) return c.json({ error: error?.message ?? "not found" }, 404)
+
+  // Don't stomp on an already-running turn.
+  const existing = runners.get(conversationId)
+  if (existing && !existing.done) return c.json({ started: false, reason: "already-running" })
+
+  const prompt = conv.auto_loop_goal
+    ? `Continuing the task. Goal: ${conv.auto_loop_goal}`
+    : "Continuing the task."
+  await startRunner({
+    conversationId,
+    prompt,
+    resumeSessionId: conv.session_id ?? undefined,
+  })
+  return c.json({ started: true })
+})
+
+app.post("/api/conversations/:id/restore", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data, error } = await sb
+    .from("conversations")
+    .update({ deleted_at: null })
+    .eq("id", conversationId)
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "not found" }, 404)
+  return c.json(data)
+})
+
+// Insert a user message during an active turn. Stays `delivered_at = null`
+// in the DB and shows a clock icon client-side. The runner's canUseTool
+// callback flushes pending nudges at the next tool boundary, marks them
+// delivered, and re-enters the turn with the combined nudge as the prompt.
+//
+// If no runner is currently active for this conversation, the message is
+// inserted as immediately-delivered and a fresh runner is started — this
+// covers the race where a user "nudges" right as the previous turn ended.
+app.post("/api/messages/nudge", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const body = await c.req.json<{
+    conversationId?: string
+    text?: string
+    attachments?: AttachmentPayload[]
+  }>().catch(() => ({}))
+  const conversationId = body.conversationId
+  const text = body.text
+  if (!conversationId) return c.json({ error: "conversationId required" }, 400)
+  if (!text || !text.trim()) return c.json({ error: "text required" }, 400)
+
+  const runner = runners.get(conversationId)
+  const runnerActive = runner && !runner.done
+
+  const attachmentMeta = (body.attachments ?? []).map((a) => ({
+    filename: a.filename,
+    mimeType: a.mimeType,
+    sizeBytes: a.sizeBytes,
+  }))
+
+  const { data, error } = await sb
+    .from("messages")
+    .insert({
+      conversation_id: conversationId,
+      role: "user",
+      text,
+      events: [],
+      attachments: attachmentMeta,
+      // null while a turn is running → canUseTool sweeps it. now() when there's
+      // no runner so it doesn't sit pending forever; the runner we kick below
+      // already gets the prompt directly.
+      delivered_at: runnerActive ? null : new Date().toISOString(),
+    })
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "insert failed" }, 500)
+
+  if (!runnerActive) {
+    // No turn in flight — promote to a normal turn.
+    const { data: conv } = await sb
+      .from("conversations")
+      .select("session_id")
+      .eq("id", conversationId)
+      .single()
+    void startRunner({
+      conversationId,
+      prompt: text,
+      attachments: body.attachments,
+      resumeSessionId: conv?.session_id ?? undefined,
+      // The user row above is already in the DB and marked delivered, so the
+      // runner's first iteration must skip the duplicate insert.
+      skipFirstUserInsert: true,
+    })
+    return c.json({ ...data, queued: false, started: true })
+  }
+
+  // Runner active: nudge sits pending; canUseTool will flush it.
+  return c.json({ ...data, queued: true })
+})
 
 // Status of all running conversations (for live "running" badges in UI later)
 app.get("/api/runners", (c) => {
@@ -629,9 +1648,18 @@ app.post("/api/chat", async (c) => {
     await runner.promise.catch(() => {})
   }
 
+  // Sweep any nudges the user posted between the previous turn ending and
+  // this /api/chat call. Their rows already exist in `messages`; we mark them
+  // delivered and prepend their text to this turn's prompt so Claude sees the
+  // user's full thread.
+  const pendingFlushed = await flushPendingNudges(conversationId)
+  const effectivePrompt = pendingFlushed
+    ? `${pendingFlushed}\n\n${prompt}`
+    : prompt
+
   runner = await startRunner({
     conversationId,
-    prompt,
+    prompt: effectivePrompt,
     attachments,
     resumeSessionId: sessionId,
   })
@@ -651,6 +1679,209 @@ app.post("/api/chat", async (c) => {
     })
   })
 })
+
+// ─── Worktree reaper ─────────────────────────────────────────────────────────
+// Conversations are soft-trashed via DELETE /api/conversations/:id (sets
+// deleted_at). After GRACE_MS has passed, this tears down the worktree +
+// branch and hard-deletes the row. Runs on boot and every REAPER_INTERVAL_MS.
+
+const REAPER_GRACE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+const REAPER_INTERVAL_MS = 60 * 60 * 1000 // hourly
+
+async function reapTrashedConversations(): Promise<void> {
+  if (!sb) return
+  const threshold = new Date(Date.now() - REAPER_GRACE_MS).toISOString()
+  const { data: rows, error } = await sb
+    .from("conversations")
+    .select("id, project_id, worktree_path, branch")
+    .not("deleted_at", "is", null)
+    .lt("deleted_at", threshold)
+    .limit(100)
+  if (error) {
+    console.warn("[reaper] query failed:", error.message)
+    return
+  }
+  if (!rows?.length) return
+  console.log(`[reaper] hard-deleting ${rows.length} expired conversation(s)`)
+
+  // Group by project so we only look up each project cwd once.
+  const projectIds = Array.from(new Set(rows.map((r) => r.project_id).filter(Boolean)))
+  const projectCwds = new Map<string, string>()
+  if (projectIds.length) {
+    const { data: projs } = await sb
+      .from("projects")
+      .select("id, cwd")
+      .in("id", projectIds)
+    for (const p of projs ?? []) projectCwds.set(p.id, resolveProjectCwd(p.cwd))
+  }
+
+  for (const row of rows) {
+    try {
+      if (row.worktree_path && row.project_id) {
+        const baseCwd = projectCwds.get(row.project_id)
+        if (baseCwd) {
+          await removeWorktree({
+            baseCwd,
+            worktreePath: row.worktree_path,
+            branch: row.branch,
+            force: true,
+          })
+        }
+      }
+      await sb.from("conversations").delete().eq("id", row.id)
+      logWorktreeEvent("reap.hard_delete", {
+        conv: row.id.slice(0, 8),
+        branch: row.branch ?? "",
+      })
+    } catch (err) {
+      console.warn("[reaper] failed for", row.id.slice(0, 8), err instanceof Error ? err.message : err)
+    }
+  }
+}
+
+// Kick the reaper after a small delay so server startup logs stay clean, and
+// again on an interval. Errors are swallowed — the next tick will retry.
+setTimeout(() => { void reapTrashedConversations() }, 30_000)
+setInterval(() => { void reapTrashedConversations() }, REAPER_INTERVAL_MS)
+
+// ─── Worktree reconciliation ─────────────────────────────────────────────────
+// Runs once at boot. Compares per-project `git worktree list` against the
+// rows we have in `conversations.worktree_path` and logs three kinds of drift:
+//   1. DB row points at a path that's no longer a worktree on disk
+//   2. Worktree exists on disk but no DB row references it (orphan)
+//   3. Symlinks (node_modules etc.) inside a tracked worktree are broken
+// Repairs symlinks automatically. Orphans + missing rows are logged only —
+// destruction is reserved for the soft-trash reaper. This is a safety net,
+// not an enforcer.
+
+async function reconcileWorktrees(): Promise<void> {
+  if (!sb) return
+  const { data: projects, error } = await sb
+    .from("projects")
+    .select("id, cwd")
+  if (error || !projects?.length) return
+
+  let scanned = 0
+  let symlinksRepaired = 0
+  let orphans = 0
+  let orphansRemoved = 0
+  let missingPaths = 0
+  let pruned = 0
+
+  for (const project of projects) {
+    const baseCwd = resolveProjectCwd(project.cwd)
+    if (!(await isGitRepo(baseCwd))) continue
+
+    const onDisk = await listWorktrees(baseCwd)
+    // The base cwd itself appears in `git worktree list` — drop it; we only
+    // care about ai-coder/* branched worktrees.
+    const aiCoderOnDisk = onDisk.filter(
+      (w) => w.branch?.startsWith("ai-coder/")
+    )
+
+    // Pull BOTH live and trashed rows so we don't auto-remove a worktree the
+    // user trashed but hasn't been reaped yet (7-day grace window).
+    const { data: rows } = await sb
+      .from("conversations")
+      .select("id, worktree_path, branch, deleted_at")
+      .eq("project_id", project.id)
+      .not("worktree_path", "is", null)
+    const dbByPath = new Map<string, { id: string; branch: string | null; deleted_at: string | null }>()
+    for (const r of rows ?? []) {
+      if (r.worktree_path) {
+        dbByPath.set(r.worktree_path, {
+          id: r.id,
+          branch: r.branch,
+          deleted_at: r.deleted_at,
+        })
+      }
+    }
+    const diskByPath = new Map(aiCoderOnDisk.map((w) => [w.path, w]))
+
+    // Orphans: on disk, no DB row (live or trashed) references them. Safe to
+    // auto-remove because the branch is within our `ai-coder/` namespace, the
+    // path is under our worktrees root, and nothing in the DB points at it.
+    // If the worktree has uncommitted changes, `git worktree remove` without
+    // --force fails and we leave it alone (log only) so nothing is lost.
+    for (const w of aiCoderOnDisk) {
+      if (dbByPath.has(w.path)) continue
+      orphans++
+      const inOurRoot = w.path.includes(".ai-coder-worktrees/")
+      const branchIsOurs = (w.branch ?? "").startsWith("ai-coder/")
+      if (!inOurRoot || !branchIsOurs) {
+        logWorktreeEvent("reconcile.orphan", {
+          path: w.path,
+          branch: w.branch ?? "",
+          action: "skipped-outside-scope",
+        })
+        continue
+      }
+      try {
+        await removeWorktree({
+          baseCwd,
+          worktreePath: w.path,
+          branch: w.branch,
+          force: false, // non-force so dirty worktrees survive
+        })
+        orphansRemoved++
+        logWorktreeEvent("reconcile.auto_removed", {
+          path: w.path,
+          branch: w.branch ?? "",
+        })
+      } catch {
+        logWorktreeEvent("reconcile.orphan", {
+          path: w.path,
+          branch: w.branch ?? "",
+          action: "skipped-dirty",
+        })
+      }
+    }
+
+    // Missing-on-disk + symlink repair.
+    for (const [path, row] of dbByPath) {
+      // Don't scan trashed rows — the reaper will clean them up on schedule.
+      if (row.deleted_at) continue
+      scanned++
+      if (!diskByPath.has(path)) {
+        missingPaths++
+        logWorktreeEvent("reconcile.missing", {
+          conv: row.id.slice(0, 8),
+          branch: row.branch ?? "",
+          path,
+        })
+        continue
+      }
+      try {
+        const repaired = await repairSymlinks(baseCwd, path)
+        if (repaired > 0) symlinksRepaired += repaired
+      } catch (err) {
+        console.warn(`[reconcile] symlink repair failed for ${path}:`, err instanceof Error ? err.message : err)
+      }
+    }
+
+    // After orphan/missing logging, prune git's internal bookkeeping so
+    // `git worktree list` matches disk. Safe: metadata only.
+    const prunedOutput = await pruneWorktreeMetadata(baseCwd)
+    if (prunedOutput) {
+      pruned += prunedOutput.split("\n").filter(Boolean).length
+      logWorktreeEvent("prune", {
+        project: project.id.slice(0, 8),
+        entries: prunedOutput.split("\n").filter(Boolean).length,
+      })
+    }
+  }
+
+  if (scanned + orphans + missingPaths + symlinksRepaired + pruned > 0) {
+    console.log(
+      `[reconcile] scanned ${scanned} live worktrees; ${orphans} orphan(s) (${orphansRemoved} auto-removed), ` +
+      `${missingPaths} missing on disk, ${symlinksRepaired} symlink(s) repaired, ${pruned} metadata entries pruned`
+    )
+  }
+}
+
+// Run once after startup logs settle. Idle thereafter — boot is the only
+// trigger we need today.
+setTimeout(() => { void reconcileWorktrees() }, 5_000)
 
 if (process.env.NODE_ENV === "production") {
   app.use("/*", serveStatic({ root: "./dist" }))

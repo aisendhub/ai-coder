@@ -21,10 +21,15 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // BACKEND_PORT lets `npm run start` point Vite at a non-default backend port
+  // (3082) so it can run side-by-side with `npm run dev` (3001) without
+  // colliding. Falls back to 3001 for the default `npm run dev` flow.
+  // VITE_PORT overrides the dev-server port for either flow.
   server: {
+    port: process.env.VITE_PORT ? Number(process.env.VITE_PORT) : undefined,
     proxy: {
       "/api": {
-        target: "http://localhost:3001",
+        target: `http://localhost:${process.env.BACKEND_PORT ?? "3001"}`,
         changeOrigin: true,
         ws: true,
       },

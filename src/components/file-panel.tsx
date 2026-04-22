@@ -263,6 +263,11 @@ function FileBody({
 }) {
   const codeRef = useRef<HTMLDivElement>(null)
   const [lineMetrics, setLineMetrics] = useState<{ height: number; top: number } | null>(null)
+  // Per-line heights after soft-wrap so the gutter strip stays aligned when
+  // a long line breaks over multiple visual rows. Populated for the Shiki
+  // path (where each source line is its own `.line` span); the plain-<pre>
+  // fallback keeps the uniform `lineMetrics.height` below.
+  const [lineHeights, setLineHeights] = useState<number[] | null>(null)
 
   // Measure where the rendered code's first line sits and how tall a line is,
   // so the gutter strip aligns 1:1 with the code lines whether we use Shiki HTML
@@ -278,6 +283,18 @@ function FileBody({
       const padTop = parseFloat(codeStyles.paddingTop)
       if (Number.isFinite(lh) && Number.isFinite(padTop)) {
         setLineMetrics({ height: lh, top: padTop })
+      }
+      // Shiki emits one `.line` span per source line. Capture each one's
+      // actual rendered height — lines that wrap report > lh automatically.
+      const lineEls = el.querySelectorAll<HTMLElement>("pre .line")
+      if (lineEls.length > 0) {
+        const heights: number[] = []
+        for (const lineEl of lineEls) {
+          heights.push(lineEl.getBoundingClientRect().height)
+        }
+        setLineHeights(heights)
+      } else {
+        setLineHeights(null)
       }
     }
     measure()
@@ -312,11 +329,14 @@ function FileBody({
                 : status === "modified"
                   ? "bg-amber-500/70"
                   : ""
+            // Use the measured height for wrapped lines; fall back to the
+            // uniform line-height when per-line data isn't available yet.
+            const h = lineHeights?.[i] ?? lineMetrics.height
             return (
               <div
                 key={i}
                 className={cn("relative w-1.5", cls)}
-                style={{ height: lineMetrics.height }}
+                style={{ height: h }}
               >
                 {removedAfter.has(lineNo) && (
                   <div className="absolute -bottom-px left-0 h-0.5 w-2.5 bg-red-500/80" />
@@ -327,12 +347,17 @@ function FileBody({
         </div>
       )}
 
-      {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the gutter */}
-      <div ref={codeRef} className="pl-3 [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:overflow-x-auto">
+      {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the gutter.
+          Lines soft-wrap so long edits are readable without horizontal
+          scrolling; the gutter's per-line heights adapt via `lineHeights`. */}
+      <div
+        ref={codeRef}
+        className="pl-3 [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:whitespace-pre-wrap [&_pre]:wrap-break-word [&_pre]:overflow-x-hidden [&_.line]:block"
+      >
         {html ? (
           <div dangerouslySetInnerHTML={{ __html: html }} />
         ) : (
-          <pre className="whitespace-pre">{content}</pre>
+          <pre className="whitespace-pre-wrap wrap-break-word">{content}</pre>
         )}
       </div>
     </div>

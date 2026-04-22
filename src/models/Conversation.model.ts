@@ -18,6 +18,18 @@ export class Conversation extends BaseModel {
   @observable sessionId: string | null = null
   @observable sandboxId: string | null = null
   @observable repoUrl: string | null = null
+  @observable worktreePath: string | null = null
+  @observable branch: string | null = null
+  @observable baseRef: string | null = null
+  @observable deletedAt: string | null = null
+  @observable shippedAt: string | null = null
+  @observable kind: "chat" | "task" = "chat"
+  @observable autoLoopEnabled = false
+  @observable autoLoopGoal: string | null = null
+  @observable loopIteration = 0
+  @observable loopCostUsd = 0
+  @observable maxIterations = 5
+  @observable maxCostUsd = 1.0
   @observable createdAt = new Date().toISOString()
   @observable updatedAt = new Date().toISOString()
 
@@ -54,6 +66,18 @@ export class Conversation extends BaseModel {
     session_id: string | null
     sandbox_id: string | null
     repo_url: string | null
+    worktree_path?: string | null
+    branch?: string | null
+    base_ref?: string | null
+    deleted_at?: string | null
+    shipped_at?: string | null
+    kind?: "chat" | "task" | null
+    auto_loop_enabled?: boolean | null
+    auto_loop_goal?: string | null
+    loop_iteration?: number | null
+    loop_cost_usd?: number | string | null
+    max_iterations?: number | null
+    max_cost_usd?: number | string | null
     created_at: string
     updated_at: string
   }) {
@@ -64,6 +88,19 @@ export class Conversation extends BaseModel {
     this.sessionId = row.session_id
     this.sandboxId = row.sandbox_id
     this.repoUrl = row.repo_url
+    this.worktreePath = row.worktree_path ?? null
+    this.branch = row.branch ?? null
+    this.baseRef = row.base_ref ?? null
+    this.deletedAt = row.deleted_at ?? null
+    this.shippedAt = row.shipped_at ?? null
+    this.kind = (row.kind ?? "chat") as "chat" | "task"
+    this.autoLoopEnabled = row.auto_loop_enabled ?? false
+    this.autoLoopGoal = row.auto_loop_goal ?? null
+    this.loopIteration = row.loop_iteration ?? 0
+    // Numeric columns arrive as strings from Supabase; coerce defensively.
+    this.loopCostUsd = Number(row.loop_cost_usd ?? 0)
+    this.maxIterations = row.max_iterations ?? 5
+    this.maxCostUsd = Number(row.max_cost_usd ?? 1)
     this.createdAt = row.created_at
     this.updatedAt = row.updated_at
   }
@@ -88,6 +125,7 @@ export class Conversation extends BaseModel {
           events: Array.isArray(r.events) ? (r.events as StreamEvent[]) : [],
           attachments: Array.isArray(r.attachments) ? (r.attachments as AttachmentMeta[]) : [],
           createdAt: r.created_at,
+          deliveredAt: r.delivered_at ?? null,
         })
       )
       // Preserve any optimistic local messages already added by an in-flight
@@ -148,7 +186,13 @@ export class Conversation extends BaseModel {
         (row.role === "assistant" || m.text === row.text)
     )
     if (optimistic) {
-      optimistic.setProps({ id: row.id, events, attachments, isOptimistic: false })
+      optimistic.setProps({
+        id: row.id,
+        events,
+        attachments,
+        deliveredAt: row.delivered_at ?? null,
+        isOptimistic: false,
+      })
       return
     }
     this.messages.addItem(
@@ -160,6 +204,7 @@ export class Conversation extends BaseModel {
         events,
         attachments,
         createdAt: row.created_at,
+        deliveredAt: row.delivered_at ?? null,
       })
     )
   }
@@ -170,16 +215,58 @@ export class Conversation extends BaseModel {
     m.setProps({
       text: row.text,
       events: Array.isArray(row.events) ? (row.events as StreamEvent[]) : [],
+      deliveredAt: row.delivered_at ?? m.deliveredAt,
     })
   }
 
   // ─── Sending ──────────────────────────────────────────────────────────────
 
-  /** Send a user prompt. If a turn is in flight for this conversation,
-   *  queue it; otherwise start a new runner. */
+  /** Send a user prompt. While a turn is in flight, the message becomes a
+   *  *nudge*: persisted server-side with `delivered_at = null` and flushed
+   *  into the agent at the next tool boundary via canUseTool. Otherwise it
+   *  starts a fresh turn. No client-side queue. */
   send = async (prompt: string, attachments?: Attachment[]) => {
     if (this.streaming) {
-      runInAction(() => this.queue.push({ prompt, attachments }))
+      // Optimistic local row so the UI renders immediately. Realtime will
+      // replace it with the canonical server row (including its real id and
+      // delivered_at, which starts null until canUseTool flushes it).
+      runInAction(() => {
+        this.messages.addItem(
+          Message.fromProps({
+            conversationId: this.id,
+            role: "user",
+            text: prompt,
+            events: [],
+            attachments: (attachments ?? []).map((a) => ({
+              filename: a.filename,
+              mimeType: a.mimeType,
+              sizeBytes: a.sizeBytes,
+            })),
+            deliveredAt: null,
+            isOptimistic: true,
+          })
+        )
+      })
+      try {
+        const res = await fetch("/api/messages/nudge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversationId: this.id,
+            text: prompt,
+            attachments: attachments?.length ? attachments : undefined,
+          }),
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body.error || `HTTP ${res.status}`)
+        }
+      } catch (err) {
+        console.error("nudge send failed", err)
+        runInAction(() => {
+          this.lastError = err instanceof Error ? err.message : String(err)
+        })
+      }
       return
     }
     void this.runTurn(prompt, attachments)
@@ -322,6 +409,31 @@ export class Conversation extends BaseModel {
                 output: payload.output,
               })
             })
+          } else if (event === "auto_loop_evaluating") {
+            updateAssistant((m) => {
+              m.events.push({ kind: "loop_evaluating", iteration: payload.iteration })
+            })
+          } else if (event === "auto_loop_iteration") {
+            updateAssistant((m) => {
+              m.events.push({
+                kind: "loop_iteration",
+                iteration: payload.iteration,
+                maxIterations: payload.maxIterations,
+                status: payload.status,
+                feedback: payload.feedback,
+                nextSteps: payload.nextSteps,
+                costUsd: payload.costUsd,
+              })
+            })
+          } else if (event === "auto_loop_stopped") {
+            updateAssistant((m) => {
+              m.events.push({
+                kind: "loop_stopped",
+                reason: payload.reason,
+                iteration: payload.iteration,
+                costUsd: payload.costUsd,
+              })
+            })
           } else if (event === "error") {
             runInAction(() => {
               this.lastError = payload.message
@@ -388,4 +500,5 @@ type MessageRow = {
   events: unknown
   attachments: unknown
   created_at: string
+  delivered_at: string | null
 }

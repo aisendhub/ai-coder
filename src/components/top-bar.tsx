@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
 import { toast } from "sonner"
-import { Sparkles, Bell, BellOff, BellRing } from "lucide-react"
+import { Sparkles, Bell, BellOff, BellRing, Gauge } from "lucide-react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import { Button } from "@/components/ui/button"
@@ -24,8 +24,27 @@ export const TopBar = observer(function TopBar({
   terminalOpen,
   onTerminalOpenChange,
 }: Props) {
-  const title = workspace.active?.title ?? "New chat"
+  const active = workspace.active
+  const title = active?.title ?? "New chat"
+  const branch = active?.branch ?? null
   const isMobile = useIsMobile()
+  // Spin-off only makes sense on a regular chat that already has user input
+  // worth carrying over. Tasks already are tasks.
+  const userMessageCount = active?.messages.items.filter((m) => m.role === "user").length ?? 0
+  const canSpinOff = active?.kind === "chat" && userMessageCount > 0
+
+  const handleSpinOff = async () => {
+    if (!active) return
+    const userMessages = active.messages.items.filter((m) => m.role === "user")
+    const recent = userMessages.slice(-5).map((m) => m.text.trim()).filter(Boolean)
+    const initialGoal = recent.join("\n\n")
+    try {
+      await workspace.createTaskDraft({ initialGoal, title: active.title })
+    } catch (err) {
+      console.error("spin off failed", err)
+    }
+  }
+
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
       {isMobile && (
@@ -40,12 +59,33 @@ export const TopBar = observer(function TopBar({
         </div>
         <div className="flex flex-col min-w-0">
           <div className="text-sm font-medium truncate">{title}</div>
-          <div className="text-xs text-muted-foreground truncate">
-            Claude Code · connected
+          <div className="text-xs text-muted-foreground truncate font-mono" title={branch ?? undefined}>
+            {branch ?? "Claude Code · connected"}
           </div>
         </div>
       </div>
       <div className="flex items-center gap-0.5">
+        {canSpinOff && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-1"
+                  onClick={handleSpinOff}
+                  aria-label="Spin off as task"
+                />
+              }
+            >
+              <Gauge className="size-4" />
+              <span className="text-xs">Spin off</span>
+            </TooltipTrigger>
+            <TooltipContent>
+              Create a task pre-filled with this chat's prompts
+            </TooltipContent>
+          </Tooltip>
+        )}
         <NotificationsTrigger />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
         <TerminalTrigger open={terminalOpen} onOpenChange={onTerminalOpenChange} />

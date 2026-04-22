@@ -1,0 +1,21 @@
+# Railway / Nixpacks build config
+providers = ["node"]
+
+[phases.setup]
+# `gh` gives the server a way to open pull requests from a worktree using the
+# host's ambient GitHub credentials (`gh auth login` or GH_TOKEN env var).
+nixPkgs = ["nodejs_22", "git", "gh"]
+
+[phases.install]
+cmds = ["npm install --no-audit --no-fund"]
+
+[phases.build]
+cmds = [
+  "npm i -g @anthropic-ai/claude-code",
+  "npm run build"
+]
+
+[start]
+# `serve` is the production single-origin entry: Hono serves the prebuilt Vite
+# dist/. `start` is reserved for local dev-style two-process runs.
+cmd = "npm run serve"

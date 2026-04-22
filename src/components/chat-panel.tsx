@@ -6,7 +6,8 @@ import {
   type KeyboardEvent,
 } from "react"
 import { observer } from "mobx-react-lite"
-import { Paperclip, Send, Square, Wrench, Brain, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon } from "lucide-react"
+import { Paperclip, Send, Square, Wrench, Brain, Check, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon, Gauge, Flag, Loader2, Pause, Play, Clock } from "lucide-react"
+import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Markdown } from "@/components/markdown"
@@ -23,6 +24,7 @@ import {
   isImageAttachment,
   MAX_TOTAL_SIZE,
 } from "@/lib/attachment"
+import { EmptyState } from "@/components/empty-state"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -77,13 +79,10 @@ export const ChatPanel = observer(function ChatPanel() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      {conversation?.kind === "task" && <TaskHeader conversation={conversation} />}
       <ScrollArea className="flex-1 min-h-0">
         <div className="mx-auto w-full max-w-243 px-10 py-6 flex flex-col gap-4">
-          {!conversation && (
-            <div className="text-center text-sm text-muted-foreground py-16">
-              Start a conversation with Claude.
-            </div>
-          )}
+          <EmptyState />
           {conversation?.messages.items.map((m, i, all) => {
             const isLast = i === all.length - 1
             const isStreamingThis =
@@ -141,27 +140,43 @@ const MessageBubble = observer(function MessageBubble({
   isStreaming: boolean
 }) {
   if (message.role === "user") {
+    const pending = message.deliveredAt == null && !message.isOptimistic
     return (
-      <div className="self-end max-w-[85%] rounded-2xl bg-primary text-primary-foreground px-4 py-2">
-        {message.attachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-1.5">
-            {message.attachments.map((a, i) => (
-              <span
-                key={i}
-                className="inline-flex items-center gap-1 text-xs bg-primary-foreground/20 rounded px-1.5 py-0.5"
-              >
-                {isImageAttachment(a) ? (
-                  <ImageIcon className="size-3" />
-                ) : (
-                  <FileText className="size-3" />
-                )}
-                {a.filename}
-              </span>
-            ))}
+      <div className="self-end max-w-[85%] flex flex-col items-end gap-0.5">
+        <div className="rounded-2xl bg-primary text-primary-foreground px-4 py-2">
+          {message.attachments.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-1.5">
+              {message.attachments.map((a, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1 text-xs bg-primary-foreground/20 rounded px-1.5 py-0.5"
+                >
+                  {isImageAttachment(a) ? (
+                    <ImageIcon className="size-3" />
+                  ) : (
+                    <FileText className="size-3" />
+                  )}
+                  {a.filename}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="text-sm leading-relaxed whitespace-pre-wrap">
+            {message.text}
           </div>
-        )}
-        <div className="text-sm leading-relaxed whitespace-pre-wrap">
-          {message.text}
+        </div>
+        <div
+          className="text-[10px] text-muted-foreground pr-1 inline-flex items-center gap-1"
+          title={pending ? "Waiting for the agent's next tool call" : "Delivered"}
+        >
+          {pending ? (
+            <>
+              <Clock className="size-3" />
+              <span>queued</span>
+            </>
+          ) : (
+            <Check className="size-3" />
+          )}
         </div>
       </div>
     )
@@ -191,6 +206,90 @@ const MessageBubble = observer(function MessageBubble({
     </div>
   )
 })
+
+const TaskHeader = observer(function TaskHeader({ conversation }: { conversation: Conversation }) {
+  const iter = conversation.loopIteration
+  const max = conversation.maxIterations
+  const cost = conversation.loopCostUsd
+  const maxCost = conversation.maxCostUsd
+  const pctIter = max > 0 ? Math.min(100, (iter / max) * 100) : 0
+  const pctCost = maxCost > 0 ? Math.min(100, (cost / maxCost) * 100) : 0
+  const enabled = conversation.autoLoopEnabled
+  const streaming = conversation.streaming ||
+    workspace.runningServerIds.has(conversation.id)
+
+  const handleToggle = async () => {
+    try {
+      if (enabled) {
+        await workspace.pauseTask(conversation.id)
+      } else {
+        await workspace.resumeTask(conversation.id)
+      }
+    } catch (err) {
+      toast.error(enabled ? "Pause failed" : "Resume failed", {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  const handleStop = async () => {
+    try {
+      await workspace.stopConversation(conversation.id)
+    } catch (err) {
+      toast.error("Stop failed", {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  return (
+    <div className="border-b bg-muted/30 px-4 py-2 flex items-center gap-4 text-xs">
+      <div className="flex items-center gap-1.5">
+        <Gauge className="size-3.5 text-muted-foreground" />
+        <span className="font-medium">Task</span>
+      </div>
+      <Meter label="iter" value={`${iter} / ${max}`} pct={pctIter} />
+      <Meter label="cost" value={`$${cost.toFixed(3)} / $${maxCost.toFixed(2)}`} pct={pctCost} />
+      <div className="ml-auto flex items-center gap-1">
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 gap-1"
+          onClick={handleToggle}
+          disabled={streaming && enabled}
+          title={enabled ? "Pause after current iteration" : "Resume the loop"}
+        >
+          {enabled ? <Pause className="size-3" /> : <Play className="size-3" />}
+          {enabled ? "Pause" : "Resume"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 gap-1"
+          onClick={handleStop}
+          disabled={!streaming}
+          title="Stop the current turn and pause the loop"
+        >
+          <Square className="size-3" />
+          Stop
+        </Button>
+      </div>
+    </div>
+  )
+})
+
+function Meter({ label, value, pct }: { label: string; value: string; pct: number }) {
+  const tone = pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-500" : "bg-sky-500"
+  return (
+    <div className="flex items-center gap-1.5 min-w-0">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-mono">{value}</span>
+      <div className="h-1 w-16 rounded-full bg-muted overflow-hidden">
+        <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
 
 function ActivityRow({ event }: { event: StreamEvent }) {
   if (event.kind === "thinking") {
@@ -230,6 +329,60 @@ function ActivityRow({ event }: { event: StreamEvent }) {
         <div className="font-mono whitespace-pre-wrap line-clamp-3 min-w-0">
           {event.output || (event.isError ? "error" : "ok")}
         </div>
+      </div>
+    )
+  }
+  if (event.kind === "loop_evaluating") {
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted-foreground rounded-md border border-dashed px-2 py-1.5">
+        <Loader2 className="size-3.5 animate-spin shrink-0" />
+        <span>Evaluating iteration {event.iteration}…</span>
+      </div>
+    )
+  }
+  if (event.kind === "loop_iteration") {
+    const statusTone =
+      event.status === "done"
+        ? "text-emerald-700 dark:text-emerald-400"
+        : event.status === "error"
+          ? "text-red-700 dark:text-red-400"
+          : "text-sky-700 dark:text-sky-400"
+    return (
+      <div className="rounded-md border bg-muted/40 px-3 py-2 space-y-1">
+        <div className="flex items-center gap-2 text-xs">
+          <Gauge className="size-3.5 shrink-0" />
+          <span className="font-medium">Iteration {event.iteration} / {event.maxIterations}</span>
+          <span className={statusTone}>· {event.status}</span>
+          <span className="text-muted-foreground ml-auto font-mono">${event.costUsd.toFixed(3)}</span>
+        </div>
+        {event.feedback && (
+          <div className="text-xs text-muted-foreground whitespace-pre-wrap">
+            <span className="font-medium not-italic">Feedback: </span>{event.feedback}
+          </div>
+        )}
+        {event.status === "continue" && event.nextSteps && (
+          <div className="text-xs text-muted-foreground whitespace-pre-wrap">
+            <span className="font-medium not-italic">Next: </span>{event.nextSteps}
+          </div>
+        )}
+      </div>
+    )
+  }
+  if (event.kind === "loop_stopped") {
+    const label =
+      event.reason === "done" ? "Done"
+      : event.reason === "max_iterations" ? "Stopped — iteration cap"
+      : event.reason === "max_cost" ? "Stopped — budget cap"
+      : event.reason === "no_progress" ? "Stopped — no progress"
+      : "Stopped by evaluator"
+    const tone = event.reason === "done"
+      ? "border-emerald-500/40 text-emerald-700 dark:text-emerald-400"
+      : "border-amber-500/40 text-amber-700 dark:text-amber-400"
+    return (
+      <div className={`flex items-center gap-2 text-xs rounded-md border px-3 py-1.5 ${tone}`}>
+        <Flag className="size-3.5 shrink-0" />
+        <span>{label}</span>
+        <span className="text-muted-foreground ml-auto font-mono">${event.costUsd.toFixed(3)}</span>
       </div>
     )
   }
@@ -363,7 +516,7 @@ function Composer({
               ) : (
                 <FileText className="size-3.5 shrink-0 text-muted-foreground" />
               )}
-              <span className="max-w-[120px] truncate">{att.filename}</span>
+              <span className="max-w-30 truncate">{att.filename}</span>
               <span className="text-muted-foreground">
                 {att.sizeBytes < 1024
                   ? `${att.sizeBytes} B`

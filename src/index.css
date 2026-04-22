@@ -139,6 +139,30 @@
     display: none; /* WebKit */
 }
 
+/* Thin styled scrollbar — matches the Radix ScrollArea look (rounded bg-border
+   thumb) for native overflow containers. ~half the default native width. */
+.scrollbar-thin {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: var(--border) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+    height: 5px;
+    width: 5px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: var(--muted-foreground);
+}
+.scrollbar-thin::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
 /* Shiki dual-theme: pick light vars by default, dark vars under .dark */
 .shiki,
 .shiki span {

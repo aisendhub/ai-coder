@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { ArrowLeft, Folder, Loader2 } from "lucide-react"
+import { ArrowLeft, Folder, GitBranch, Loader2 } from "lucide-react"
 import { workspace } from "@/models"
 
 type DirEntry = { name: string; path: string }
@@ -13,6 +13,7 @@ type BrowseResponse = {
   parent: string | null
   dirs: DirEntry[]
 }
+type GitInfo = { isGitRepo: boolean; defaultBaseRef: string | null }
 
 type Props = {
   open: boolean
@@ -22,6 +23,8 @@ type Props = {
 export function NewProjectDialog({ open, onClose }: Props) {
   const [name, setName] = useState("")
   const [listing, setListing] = useState<BrowseResponse | null>(null)
+  const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
+  const [perConversation, setPerConversation] = useState(true)
   const [loadingDir, setLoadingDir] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -30,8 +33,22 @@ export function NewProjectDialog({ open, onClose }: Props) {
     if (!open) return
     setName("")
     setError(null)
+    setPerConversation(true)
     void browse(undefined)
   }, [open])
+
+  useEffect(() => {
+    if (!listing) {
+      setGitInfo(null)
+      return
+    }
+    let cancelled = false
+    fetch(`/api/fs/git-info?path=${encodeURIComponent(listing.path)}`)
+      .then((r) => r.json())
+      .then((info: GitInfo) => { if (!cancelled) setGitInfo(info) })
+      .catch(() => { if (!cancelled) setGitInfo({ isGitRepo: false, defaultBaseRef: null }) })
+    return () => { cancelled = true }
+  }, [listing?.path])
 
   async function browse(path: string | undefined) {
     setLoadingDir(true)
@@ -54,8 +71,10 @@ export function NewProjectDialog({ open, onClose }: Props) {
     const finalName = name.trim() || listing.name
     setCreating(true)
     setError(null)
+    const mode =
+      gitInfo?.isGitRepo && perConversation ? "per_conversation" : "shared"
     try {
-      await workspace.createProject(finalName, listing.path)
+      await workspace.createProject(finalName, listing.path, mode)
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -129,6 +148,31 @@ export function NewProjectDialog({ open, onClose }: Props) {
                 ))}
               </div>
             </ScrollArea>
+          </div>
+
+          <div className="rounded-md border p-3 space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 size-3.5 cursor-pointer accent-primary"
+                checked={!!gitInfo?.isGitRepo && perConversation}
+                disabled={!gitInfo?.isGitRepo}
+                onChange={(e) => setPerConversation(e.target.checked)}
+              />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5 text-xs font-medium">
+                  <GitBranch className="size-3.5" />
+                  Per-task worktree
+                </div>
+                <div className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                  {gitInfo == null
+                    ? "Checking…"
+                    : gitInfo.isGitRepo
+                      ? `Tasks get their own branch off ${gitInfo.defaultBaseRef ?? "HEAD"} so they can ship via Merge/PR. Chats always share the project cwd.`
+                      : "Not a git repository — tasks will run on the shared cwd."}
+                </div>
+              </div>
+            </label>
           </div>
 
           {error && <div className="text-xs text-red-600">{error}</div>}

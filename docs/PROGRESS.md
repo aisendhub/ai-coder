@@ -50,6 +50,19 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · 🚫 blocked
 - ⬜ Optional: per-project git status cached (today re-runs on every request)
 - ✅ Surface file-tree + diff of in-flight changes in the right panel
 
+## Phase 3.5 — Worktrees + Task mode 🟡 in progress
+
+Design: [WORKTREES.md](WORKTREES.md) · Tracker: [WORKTREES-PROGRESS.md](WORKTREES-PROGRESS.md) · User guide: [CHAT-VS-TASK.md](CHAT-VS-TASK.md)
+
+- ✅ Phase 1 — schema (`0006_worktrees.sql`), git helpers, `cwdForConversation` prefers worktree
+- ✅ Phase 2 — per-conversation worktree on create, soft-trash + 7-day reaper, server-side project/conversation endpoints, UI worktree-mode toggle + branch chip
+- ✅ Phase 3 — ship endpoint (commit/merge/PR modes, agent-generated commit message, merge-conflict handoff via rebase prompt)
+- ✅ Phase 4a — task schema (`0007_tasks.sql`: `kind`, `auto_loop_*`, `loop_*`, `max_*`)
+- ✅ Phase 4b — evaluator-optimizer loop in `startRunner` (worker → fresh read-only evaluator → stop conditions → next turn)
+- ✅ Phase 4c — task header strip with pause/resume/stop, iteration banners, Chats/Tasks sidebar split, `+ Task` dialog, Merge/PR buttons, mid-turn nudges via `canUseTool`, "Spin off as task" from any chat
+- 🟡 Phase 5 — kanban board meta-view shipped (5 columns + live state derivation + card actions); drag-and-drop + diff summary on cards deferred
+- ✅ Phase 6 (reliability core) — boot reconcile + symlink repair + auto-orphan cleanup + `git worktree prune` + unified `[worktree]` lifecycle logs; disk-usage indicator + manual prune UI still pending
+
 ## Phase 3b — Container / microVM isolation ⏸️ POSTPONED
 
 Revisit when we actually need multi-tenant isolation. Schema keeps `sandbox_id` as a placeholder.
