@@ -82,6 +82,7 @@ function DesktopLayout() {
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
+  const [servicesCollapsed, setServicesCollapsed] = useState(false)
   const navRef = useRef<ImperativePanelHandle>(null)
   const toggleNav = () => {
     const panel = navRef.current
@@ -176,9 +177,14 @@ function DesktopLayout() {
                 defaultSize={28}
                 minSize={22}
                 maxSize={50}
+                collapsible
+                collapsedSize={4}
+                onResize={(size) =>
+                  setServicesCollapsed(typeof size === "number" ? size < 6 : false)
+                }
               >
                 <div className="h-full min-h-0 overflow-hidden border-l relative">
-                  <ServicesPanel onClose={() => setServicesOpen(false)} />
+                  <ServicesPanel collapsed={servicesCollapsed} onClose={() => setServicesOpen(false)} />
                 </div>
               </ResizablePanel>
             </>

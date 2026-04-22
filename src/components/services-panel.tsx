@@ -5,12 +5,10 @@ import {
   Play,
   Square,
   ExternalLink,
-  RefreshCw,
   Server,
   Loader2,
   CircleAlert,
   Trash2,
-  Settings,
   ChevronLeft,
   Cloud,
   CloudOff,
@@ -26,6 +24,13 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { X } from "lucide-react"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Button } from "@/components/ui/button"
@@ -33,6 +38,11 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { Separator } from "@/components/ui/separator"
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable"
 import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
 import { workspace } from "@/models"
@@ -147,8 +157,10 @@ export const ServicesTrigger = observer(function ServicesTrigger({
 
 export const ServicesPanel = observer(function ServicesPanel({
   onClose,
+  collapsed = false,
 }: {
   onClose?: () => void
+  collapsed?: boolean
 } = {}) {
   const userId = workspace.userId
   const active = workspace.active
@@ -157,6 +169,34 @@ export const ServicesPanel = observer(function ServicesPanel({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [runnerId, setRunnerId] = useState<RunnerId>("local-process")
+
+  if (collapsed) {
+    const liveCount = services.items.filter((s) => s.isLive).length
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center py-2 gap-1">
+        <Server className={cn("size-4", liveCount > 0 ? "text-emerald-500" : "text-muted-foreground")} />
+        <div className="text-[10px] tabular-nums text-muted-foreground">
+          {liveCount}
+        </div>
+        {services.items.length > 0 && <div className="my-1 h-px w-6 bg-border" />}
+        {services.items.slice(0, 12).map((svc) => (
+          <div
+            key={svc.id}
+            title={`${svc.status}: ${svc.label ?? svc.id}`}
+            className="size-7 rounded-md hover:bg-accent flex items-center justify-center"
+          >
+            <span className={cn(
+              "size-2 rounded-full",
+              svc.status === "running" ? "bg-emerald-500 animate-pulse"
+                : svc.status === "starting" ? "bg-amber-500 animate-pulse"
+                : svc.status === "crashed" ? "bg-red-500"
+                : "bg-muted-foreground/40"
+            )} />
+          </div>
+        ))}
+      </div>
+    )
+  }
 
   const targetProjectId = active?.projectId ?? activeProject?.id ?? null
   const targetLabel = active?.title ?? activeProject?.name ?? null
@@ -179,77 +219,86 @@ export const ServicesPanel = observer(function ServicesPanel({
     return () => window.clearInterval(t)
   }, [refresh, services, userId])
 
-  // First-run auto-prompt. If we have a project/task scope AND nothing is
-  // cached AND no services are running for this scope, open the editor
-  // pre-filled by the LLM (falls back to heuristic). Runs once per mount.
-  const llmBootstrappedRef = useRef(false)
-  useEffect(() => {
-    if (llmBootstrappedRef.current) return
-    if (!userId || !targetProjectId) return
-    if (editor) return
-    // If any services exist for this user, skip auto-prompt — the user is
-    // clearly past the "how do I run this" step for at least one project.
-    if (services.items.length > 0) return
-    llmBootstrappedRef.current = true
+  // On mount, probe the project's manifest. The panel's empty state renders
+  // from this snapshot — we show the heuristic hit (if any) with a one-click
+  // save + a separate "Ask agent to set up" CTA. No more silent LLM calls.
+  const [manifestProbe, setManifestProbe] = useState<{
+    loading: boolean
+    cached: RunManifestDto | null
+    detected: RunManifestDto | null
+    cwd: string
+  } | null>(null)
 
-    void (async () => {
-      try {
-        const view = await services.fetchProjectManifest(userId, targetProjectId)
-        if (view.cached) return // already configured — don't auto-open
-        // Open editor immediately in pending state so the user sees
-        // "detecting…" instead of a blank sheet while the LLM runs.
-        setEditor({
-          mode: "first-run",
-          projectId: targetProjectId,
-          conversationId: active?.id ?? null,
-          label: targetLabel,
-          initial: view.detected ?? { stack: "custom", start: "", env: {} },
-          detected: view.detected,
-          cwd: view.cwd,
-          llm: { status: "pending" },
-        })
-        const result = await services.detectLlmManifest(userId, targetProjectId)
-        const proposal = result.llm.proposal
-        setEditor((prev) => {
-          // User may have cancelled, saved, or switched projects while the
-          // LLM was thinking — only populate if we're still on the same
-          // first-run pending state.
-          if (!prev || prev.mode !== "first-run" || prev.projectId !== targetProjectId) {
-            return prev
-          }
-          if (prev.llm?.status !== "pending") return prev
-          if (!proposal || !proposal.start) {
-            return {
-              ...prev,
-              llm: result.llm.error
-                ? { status: "failed", error: result.llm.error }
-                : { status: "failed", error: "LLM didn't propose a start command" },
-            }
-          }
-          return {
-            ...prev,
-            initial: {
-              stack: proposal.stack,
-              start: proposal.start,
-              build: proposal.build,
-              env: proposal.env,
-            },
-            llm: {
-              status: "ready",
-              rationale: proposal.rationale,
-              confidence: proposal.confidence,
-            },
-          }
-        })
-      } catch (err) {
-        setEditor((prev) =>
-          prev && prev.mode === "first-run"
-            ? { ...prev, llm: { status: "failed", error: (err as Error).message } }
-            : prev
+  useEffect(() => {
+    if (!userId || !targetProjectId) {
+      setManifestProbe(null)
+      return
+    }
+    let cancelled = false
+    const probe = async (showLoading: boolean) => {
+      if (showLoading) {
+        setManifestProbe((prev) =>
+          prev ? { ...prev, loading: true } : { loading: true, cached: null, detected: null, cwd: "" }
         )
       }
-    })()
-  }, [userId, targetProjectId, services, editor, targetLabel, active])
+      try {
+        const view = await services.fetchProjectManifest(userId, targetProjectId, active?.id ?? null)
+        if (cancelled) return
+        setManifestProbe({
+          loading: false,
+          cached: view.cached,
+          detected: view.detected,
+          cwd: view.cwd,
+        })
+      } catch {
+        if (cancelled) return
+        setManifestProbe({ loading: false, cached: null, detected: null, cwd: "" })
+      }
+    }
+
+    void probe(true)
+
+    // Re-probe on every turn-done in case the agent wrote a <run-manifest>
+    // block — the server parses it and saves in a finally hook, and we pick
+    // up the change on the next refresh without polling.
+    const onTurnDone = () => { void probe(false) }
+    window.addEventListener("ai-coder:turn-done", onTurnDone)
+    return () => {
+      cancelled = true
+      window.removeEventListener("ai-coder:turn-done", onTurnDone)
+    }
+    // Re-probe when the active conversation changes — switching from a chat
+    // to a task worktree means the detect target cwd also changes.
+  }, [userId, targetProjectId, services, active?.id])
+
+  const [askingAgent, setAskingAgent] = useState(false)
+  const onAskAgent = async () => {
+    if (!userId || !active?.id) {
+      toast.error("Open a chat to ask the agent", {
+        description: "Service setup piggy-backs on the active conversation so the agent sees what you've been building.",
+      })
+      return
+    }
+    setAskingAgent(true)
+    try {
+      const res = await fetch(`/api/conversations/${active.id}/detect-services`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
+      toast.info("Asked the agent", {
+        description: "Watch the chat — it'll inspect the repo and propose a run config.",
+      })
+    } catch (err) {
+      toast.error("Couldn't ask agent", { description: (err as Error).message })
+    } finally {
+      setAskingAgent(false)
+    }
+  }
 
   const startCached = useCallback(async (projectId: string, conversationId: string | null, label: string | null) => {
     if (!userId) return
@@ -266,7 +315,7 @@ export const ServicesPanel = observer(function ServicesPanel({
   const onStart = async () => {
     if (!userId || !targetProjectId) return
     try {
-      const view = await services.fetchProjectManifest(userId, targetProjectId)
+      const view = await services.fetchProjectManifest(userId, targetProjectId, active?.id ?? null)
       if (!view.cached) {
         setEditor({
           mode: "first-run",
@@ -288,7 +337,7 @@ export const ServicesPanel = observer(function ServicesPanel({
   const onEditManifest = async () => {
     if (!userId || !targetProjectId) return
     try {
-      const view = await services.fetchProjectManifest(userId, targetProjectId)
+      const view = await services.fetchProjectManifest(userId, targetProjectId, active?.id ?? null)
       setEditor({
         mode: "edit-project",
         projectId: targetProjectId,
@@ -328,17 +377,50 @@ export const ServicesPanel = observer(function ServicesPanel({
     }
   }
 
-  const onRemove = async (svc: Service) => {
-    if (!userId) return
+  // Delete the project's configured manifest. Stops any running instance
+  // first (best-effort) so the user doesn't have to stop-then-delete.
+  const confirm = useConfirm()
+  const onDeleteManifest = async () => {
+    if (!userId || !targetProjectId) return
+    const ok = await confirm({
+      title: "Delete this configuration?",
+      description: "Clears the saved start command for this project. Any running instance will be stopped first. You can re-detect or ask the agent to set it up again.",
+      confirmText: "Delete",
+      variant: "destructive",
+    })
+    if (!ok) return
     try {
-      await services.remove(userId, svc.id)
-      if (selectedId === svc.id) setSelectedId(null)
+      // Stop + remove any live or stale instance for this project, best-effort.
+      const projectInstances = services.items.filter((s) => s.projectId === targetProjectId)
+      for (const inst of projectInstances) {
+        if (inst.isLive) {
+          await services.stop(userId, inst.id).catch(() => undefined)
+        }
+        await services.remove(userId, inst.id).catch(() => undefined)
+      }
+      await services.clearProjectManifest(userId, targetProjectId)
+      setManifestProbe((p) => (p ? { ...p, cached: null } : p))
+      setSelectedId(null)
+      toast.success("Service configuration removed")
     } catch (err) {
-      toast.error("Remove failed", { description: (err as Error).message })
+      toast.error("Couldn't delete", { description: (err as Error).message })
     }
   }
 
-  const selected = selectedId ? services.find(selectedId) : null
+  // One configured service per project in v1. Pick the most relevant running
+  // instance to drive the card's status; if none, show it as stopped/idle.
+  const projectInstances = targetProjectId
+    ? services.items.filter((s) => s.projectId === targetProjectId)
+    : []
+  const instance =
+    projectInstances.find((s) => s.isLive) ??
+    [...projectInstances].sort((a, b) => b.startedAt - a.startedAt)[0] ??
+    null
+
+  // Old ServiceRow pattern had a separate selection id — now the "card" is
+  // the service itself, so selection just toggles the log drawer.
+  const expanded = selectedId === "card" && !!instance
+  const selected = instance && expanded ? instance : null
 
   if (editor) {
     return (
@@ -350,37 +432,55 @@ export const ServicesPanel = observer(function ServicesPanel({
     )
   }
 
+  const listBody = manifestProbe?.cached ? (
+    <ConfiguredServiceCard
+      manifest={manifestProbe.cached}
+      instance={instance}
+      expanded={expanded}
+      onToggleExpand={() =>
+        setSelectedId((prev) => (prev === "card" ? null : "card"))
+      }
+      onRun={() => { void onStart() }}
+      onStop={() => {
+        if (instance) void onStop(instance)
+      }}
+      onConfigure={onEditManifest}
+      onDelete={() => { void onDeleteManifest() }}
+    />
+  ) : (
+    <EmptyState
+      probe={manifestProbe}
+      hasActiveConversation={!!active?.id}
+      askingAgent={askingAgent}
+      onUseDetected={async () => {
+        if (!userId || !targetProjectId || !manifestProbe?.detected) return
+        try {
+          await services.saveProjectManifest(userId, targetProjectId, {
+            ...manifestProbe.detected,
+            cwd: manifestProbe.cwd,
+          })
+          setManifestProbe((p) => p ? { ...p, cached: manifestProbe.detected } : p)
+          toast.success("Start command saved")
+        } catch (err) {
+          toast.error("Couldn't save", { description: (err as Error).message })
+        }
+      }}
+      onEditManual={onEditManifest}
+      onAskAgent={() => { void onAskAgent() }}
+    />
+  )
+
   return (
     <div className="flex flex-col h-full relative">
       <div className="flex items-center gap-2 px-4 py-3 border-b">
         <Server className="size-4" />
-        <div className="text-sm font-medium">Services</div>
+        <div className="text-sm font-medium">
+          Services
+          {services.loading && (
+            <Loader2 className="inline size-3 ml-1.5 animate-spin text-muted-foreground" />
+          )}
+        </div>
         <div className="flex-1" />
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => { void refresh() }}
-          disabled={!userId}
-          aria-label="Refresh"
-        >
-          <RefreshCw className={cn("size-3.5", services.loading && "animate-spin")} />
-        </Button>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => { void onEditManifest() }}
-                disabled={!canStart}
-                aria-label="Edit start command"
-              />
-            }
-          >
-            <Settings className="size-3.5" />
-          </TooltipTrigger>
-          <TooltipContent>Edit start command</TooltipContent>
-        </Tooltip>
         <RunnerSelect value={runnerId} onChange={setRunnerId} />
         <Button
           size="sm"
@@ -403,38 +503,28 @@ export const ServicesPanel = observer(function ServicesPanel({
         )}
       </div>
 
-      <ScrollArea className="flex-1">
-        {services.items.length === 0 ? (
-          <div className="px-4 py-8 text-sm text-muted-foreground text-center">
-            Nothing running. Click <span className="font-medium">Run</span> to start
-            the active project or worktree.
-          </div>
-        ) : (
-          <ul className="divide-y">
-            {services.items.map((svc) => (
-              <ServiceRow
-                key={svc.id}
-                svc={svc}
-                selected={selectedId === svc.id}
-                onSelect={() => setSelectedId(svc.id === selectedId ? null : svc.id)}
-                onStop={() => { void onStop(svc) }}
-                onRemove={() => { void onRemove(svc) }}
-              />
-            ))}
-          </ul>
-        )}
-      </ScrollArea>
-
-      {selected && (
-        <>
-          <Separator />
-          <div className="h-[40%] min-h-50 max-h-[50vh]">
+      {selected ? (
+        // List + logs share the remaining height; the user resizes the split
+        // via the handle and react-resizable-panels persists per-combination.
+        <ResizablePanelGroup
+          direction="vertical"
+          autoSaveId="ai-coder-services-logs"
+          className="flex-1 min-h-0"
+        >
+          <ResizablePanel id="services-list" order={1} defaultSize={55} minSize={20}>
+            <ScrollArea className="h-full">{listBody}</ScrollArea>
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel id="services-logs" order={2} defaultSize={45} minSize={15}>
             <LogViewer key={selected.id} svc={selected} />
-          </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        <>
+          <ScrollArea className="flex-1">{listBody}</ScrollArea>
+          <IntegrationsFooter />
         </>
       )}
-
-      {!selected && <IntegrationsFooter />}
     </div>
   )
 })
@@ -464,34 +554,41 @@ const RunnerSelect = observer(function RunnerSelect({
   const current = entries.find(([id]) => id === value)?.[1]
   const unavailableReason = current && !current.available ? current.reason : undefined
 
+  const tooltipText = unavailableReason
+    ? unavailableReason
+    : value === "local-docker"
+      ? "Run in a Docker container (prod parity)"
+      : "Run as a host process (fastest)"
+
   return (
     <Tooltip>
       <TooltipTrigger
         render={
-          <select
-            value={value}
-            onChange={(e) => onChange(e.target.value as RunnerId)}
-            className={cn(
-              "h-8 rounded-md border bg-background px-2 text-xs",
-              unavailableReason && "text-amber-500"
-            )}
-            aria-label="Runner"
-          />
+          <Select value={value} onValueChange={(v) => onChange(v as RunnerId)}>
+            <SelectTrigger
+              size="sm"
+              aria-label="Runner"
+              className={cn(
+                "text-xs px-2 min-w-0 w-auto gap-1",
+                unavailableReason && "text-amber-500"
+              )}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end">
+              {entries.map(([id, info]) => (
+                <SelectItem key={id} value={id} disabled={!info.available}>
+                  {RUNNER_LABELS[id]}
+                  {!info.available && (
+                    <span className="ml-1 text-muted-foreground">· unavailable</span>
+                  )}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         }
-      >
-        {entries.map(([id, info]) => (
-          <option key={id} value={id} disabled={!info.available}>
-            {RUNNER_LABELS[id]}{!info.available ? " (unavailable)" : ""}
-          </option>
-        ))}
-      </TooltipTrigger>
-      <TooltipContent>
-        {unavailableReason
-          ? unavailableReason
-          : value === "local-docker"
-            ? "Run in a Docker container (prod parity)"
-            : "Run as a host process (fastest)"}
-      </TooltipContent>
+      />
+      <TooltipContent>{tooltipText}</TooltipContent>
     </Tooltip>
   )
 })
@@ -705,82 +802,267 @@ function ManifestEditor({
   )
 }
 
-// ── Service row ──────────────────────────────────────────────────────────────
+// ── Empty state ─────────────────────────────────────────────────────────────
 
-function statusColor(status: Service["status"]): string {
+function EmptyState({
+  probe,
+  hasActiveConversation,
+  askingAgent,
+  onUseDetected,
+  onEditManual,
+  onAskAgent,
+}: {
+  probe: {
+    loading: boolean
+    cached: RunManifestDto | null
+    detected: RunManifestDto | null
+    cwd: string
+  } | null
+  hasActiveConversation: boolean
+  askingAgent: boolean
+  onUseDetected: () => Promise<void>
+  onEditManual: () => void
+  onAskAgent: () => void
+}) {
+  if (!probe || probe.loading) {
+    return (
+      <div className="px-4 py-8 flex items-center justify-center text-xs text-muted-foreground gap-2">
+        <Loader2 className="size-3.5 animate-spin" />
+        Inspecting project…
+      </div>
+    )
+  }
+
+  // Manifest already saved — nothing's just running. Point user at Run.
+  if (probe.cached) {
+    return (
+      <div className="px-4 py-8 text-sm text-muted-foreground text-center space-y-1">
+        <div>Nothing running yet.</div>
+        <div className="text-xs font-mono">{probe.cached.start}</div>
+        <div className="pt-2">Click <span className="font-medium">Run</span> above to start it.</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="px-4 py-5 space-y-4">
+      {probe.detected ? (
+        <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+          <div className="flex items-center gap-2 text-xs">
+            <Server className="size-3.5 text-emerald-500 shrink-0" />
+            <span className="font-medium">Detected automatically</span>
+            <span className="ml-auto rounded-full px-2 py-0.5 text-[10px] font-mono bg-muted-foreground/10 text-muted-foreground">
+              {probe.detected.stack}
+            </span>
+          </div>
+          <div className="font-mono text-xs text-muted-foreground break-all">
+            {probe.detected.start}
+          </div>
+          <div className="flex items-center gap-2 pt-1">
+            <Button size="sm" onClick={() => { void onUseDetected() }}>
+              Use this
+            </Button>
+            <Button variant="outline" size="sm" onClick={onEditManual}>
+              Edit
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed bg-muted/10 p-3 text-xs text-muted-foreground">
+          Couldn't auto-detect a run command for this project. It might be a
+          stack we don't template yet, or the entry point isn't obvious from
+          the file tree.
+        </div>
+      )}
+
+      <div className="rounded-md border bg-amber-500/5 p-3 space-y-2">
+        <div className="flex items-center gap-2 text-xs">
+          <Sparkles className="size-3.5 text-amber-500 shrink-0" />
+          <span className="font-medium">Ask the agent to set up your local dev services</span>
+        </div>
+        <div className="text-xs text-muted-foreground">
+          The agent inspects the repo with full chat context (it sees what
+          you've built in this conversation) and proposes a run config. The
+          steps appear in chat — same flow as merging a worktree.
+        </div>
+        <div className="flex items-center gap-2 pt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onAskAgent}
+            disabled={askingAgent || !hasActiveConversation}
+          >
+            {askingAgent ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="size-3.5" />
+            )}
+            Ask the agent
+          </Button>
+          {!hasActiveConversation && (
+            <span className="text-xs text-muted-foreground">Open a chat first.</span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Configured service card ─────────────────────────────────────────────────
+// One card per project in v1 — displays the saved manifest + whichever
+// instance (live or most recent) best represents "the service." Stopped
+// services don't vanish; the card stays, status dot reflects state.
+// Refactor to multi-service later replaces the single card with a list of
+// cards; everything else (controls, logs, etc.) stays.
+
+function ConfiguredServiceCard({
+  manifest,
+  instance,
+  expanded,
+  onToggleExpand,
+  onRun,
+  onStop,
+  onConfigure,
+  onDelete,
+}: {
+  manifest: RunManifestDto
+  instance: Service | null
+  expanded: boolean
+  onToggleExpand: () => void
+  onRun: () => void
+  onStop: () => void
+  onConfigure: () => void
+  onDelete: () => void
+}) {
+  const status: CardStatus = instance ? instance.status : "idle"
+  const live = status === "running" || status === "starting"
+  const hasLogs = instance !== null && (instance.isLive || instance.status === "crashed")
+
+  return (
+    <div className="p-3">
+      <div
+        className={cn(
+          "rounded-md border bg-background",
+          live && "border-emerald-500/30",
+          status === "crashed" && "border-red-500/30",
+        )}
+      >
+        <div className="px-3 py-2.5 flex items-center gap-3">
+          <span
+            className={cn(
+              "inline-block size-2 rounded-full shrink-0",
+              cardStatusColor(status),
+              (status === "starting" || status === "stopping") && "animate-pulse",
+            )}
+            aria-label={status}
+          />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium flex items-center gap-2">
+              <span>Default service</span>
+              <span className="text-[10px] font-mono uppercase text-muted-foreground rounded bg-muted px-1.5 py-0.5">
+                {manifest.stack}
+              </span>
+              <span className="text-[10px] font-mono text-muted-foreground">
+                {cardStatusLabel(status)}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground font-mono truncate" title={manifest.start}>
+              {manifest.start}
+            </div>
+            {instance?.error && (
+              <div className="text-xs text-red-500 flex items-center gap-1 mt-0.5">
+                <CircleAlert className="size-3 shrink-0" />
+                <span className="truncate">{instance.error}</span>
+              </div>
+            )}
+          </div>
+          {status === "running" && instance && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <a
+                    href={instance.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="inline-flex items-center gap-1 rounded-md px-2 h-7 text-xs font-mono text-muted-foreground hover:bg-accent"
+                    aria-label="Open in browser"
+                  />
+                }
+              >
+                <span>:{instance.port}</span>
+                <ExternalLink className="size-3" />
+              </TooltipTrigger>
+              <TooltipContent>Open http://localhost:{instance.port}</TooltipContent>
+            </Tooltip>
+          )}
+          <CardControls
+            status={status}
+            onRun={onRun}
+            onStop={onStop}
+            onConfigure={onConfigure}
+            onDelete={onDelete}
+          />
+        </div>
+        {hasLogs && (
+          <>
+            <Separator />
+            <button
+              type="button"
+              onClick={onToggleExpand}
+              className="w-full px-3 py-1.5 flex items-center gap-2 text-xs text-muted-foreground hover:bg-accent/40"
+            >
+              <ChevronLeft className={cn("size-3 transition-transform", expanded ? "-rotate-90" : "rotate-180")} />
+              <span>{expanded ? "Hide logs" : "Show logs"}</span>
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+type CardStatus = Service["status"] | "idle"
+
+function cardStatusColor(status: CardStatus): string {
   switch (status) {
     case "running": return "bg-emerald-500"
     case "starting": return "bg-amber-400"
     case "stopping": return "bg-amber-400"
     case "stopped": return "bg-muted-foreground/40"
     case "crashed": return "bg-red-500"
+    case "idle": return "bg-muted-foreground/30"
   }
 }
 
-function ServiceRow({
-  svc,
-  selected,
-  onSelect,
+function cardStatusLabel(status: CardStatus): string {
+  switch (status) {
+    case "running": return "running"
+    case "starting": return "starting…"
+    case "stopping": return "stopping…"
+    case "stopped": return "stopped"
+    case "crashed": return "crashed"
+    case "idle": return "not started"
+  }
+}
+
+function CardControls({
+  status,
+  onRun,
   onStop,
-  onRemove,
+  onConfigure,
+  onDelete,
 }: {
-  svc: Service
-  selected: boolean
-  onSelect: () => void
+  status: CardStatus
+  onRun: () => void
   onStop: () => void
-  onRemove: () => void
+  onConfigure: () => void
+  onDelete: () => void
 }) {
-  const label = svc.label ?? svc.cwd.split("/").slice(-2).join("/")
-  const live = svc.isLive
+  const live = status === "running" || status === "starting"
+  const stopping = status === "stopping"
   return (
-    <li
-      className={cn(
-        "px-4 py-2 flex items-center gap-3 cursor-pointer hover:bg-accent/40",
-        selected && "bg-accent/60"
-      )}
-      onClick={onSelect}
-    >
-      <span
-        className={cn(
-          "inline-block size-2 rounded-full shrink-0",
-          statusColor(svc.status)
-        )}
-        aria-label={svc.status}
-      />
-      <div className="min-w-0 flex-1">
-        <div className="text-sm truncate">{label}</div>
-        <div className="text-xs text-muted-foreground font-mono truncate">
-          {svc.stack} · {svc.start}
-        </div>
-        {svc.error && (
-          <div className="text-xs text-red-500 truncate flex items-center gap-1">
-            <CircleAlert className="size-3 shrink-0" />
-            {svc.error}
-          </div>
-        )}
-      </div>
-      <div className="text-xs font-mono text-muted-foreground shrink-0">
-        :{svc.port}
-      </div>
-      {live && svc.status === "running" && (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <a
-                href={svc.url}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="inline-flex items-center justify-center size-7 rounded-md hover:bg-accent"
-                aria-label="Open in browser"
-              />
-            }
-          >
-            <ExternalLink className="size-3.5" />
-          </TooltipTrigger>
-          <TooltipContent>Open http://localhost:{svc.port}</TooltipContent>
-        </Tooltip>
-      )}
+    <div className="flex items-center gap-0.5 shrink-0">
       {live ? (
         <Tooltip>
           <TooltipTrigger
@@ -790,16 +1072,12 @@ function ServiceRow({
                 size="icon"
                 className="size-7"
                 onClick={(e) => { e.stopPropagation(); onStop() }}
-                disabled={svc.status === "stopping"}
+                disabled={stopping}
                 aria-label="Stop"
               />
             }
           >
-            {svc.status === "stopping" ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Square className="size-3.5" />
-            )}
+            {stopping ? <Loader2 className="size-3.5 animate-spin" /> : <Square className="size-3.5" />}
           </TooltipTrigger>
           <TooltipContent>Stop</TooltipContent>
         </Tooltip>
@@ -811,19 +1089,52 @@ function ServiceRow({
                 variant="ghost"
                 size="icon"
                 className="size-7"
-                onClick={(e) => { e.stopPropagation(); onRemove() }}
-                aria-label="Remove"
+                onClick={(e) => { e.stopPropagation(); onRun() }}
+                aria-label="Run"
               />
             }
           >
-            <Trash2 className="size-3.5" />
+            <Play className="size-3.5" />
           </TooltipTrigger>
-          <TooltipContent>Remove</TooltipContent>
+          <TooltipContent>Run</TooltipContent>
         </Tooltip>
       )}
-    </li>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              onClick={(e) => { e.stopPropagation(); onConfigure() }}
+              aria-label="Configure"
+            />
+          }
+        >
+          <Sparkles className="size-3.5" />
+        </TooltipTrigger>
+        <TooltipContent>Configure</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-muted-foreground hover:text-red-500"
+              onClick={(e) => { e.stopPropagation(); onDelete() }}
+              aria-label="Delete"
+            />
+          }
+        >
+          <Trash2 className="size-3.5" />
+        </TooltipTrigger>
+        <TooltipContent>Delete configuration</TooltipContent>
+      </Tooltip>
+    </div>
   )
 }
+
 
 // ── Log viewer ───────────────────────────────────────────────────────────────
 
