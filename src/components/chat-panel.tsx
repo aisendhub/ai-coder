@@ -223,13 +223,16 @@ const ShippedCard = observer(function ShippedCard({
   const [reverting, setReverting] = useState(false)
   const baseRef = conversation.baseRef ?? "base"
   const shaShort = conversation.shippedCommitSha?.slice(0, 8) ?? null
-  const canRevert = !!conversation.shippedCommitSha
+  // Revert needs branch + base_ref metadata preserved on the shipped row.
+  // Legacy tasks shipped before we started recording the squash SHA still
+  // qualify: the server falls back to the current HEAD of base_ref.
+  const canRevert = !!(conversation.branch && conversation.baseRef)
 
   const handleNewChat = async () => {
     try {
       await workspace.createNew()
     } catch (err) {
-      toast.error("Couldn't create a new chat", {
+      toast.error("Couldn't start a new chat", {
         description: err instanceof Error ? err.message : String(err),
       })
     }
@@ -239,7 +242,7 @@ const ShippedCard = observer(function ShippedCard({
     try {
       await workspace.createTaskDraft({})
     } catch (err) {
-      toast.error("Couldn't create a new task", {
+      toast.error("Couldn't start a new task", {
         description: err instanceof Error ? err.message : String(err),
       })
     }
@@ -247,8 +250,11 @@ const ShippedCard = observer(function ShippedCard({
 
   const handleRevert = async () => {
     if (!canRevert) return
+    const legacyNote = shaShort
+      ? `This will hard-reset ${baseRef} back one commit (before ${shaShort}) and rebuild the worktree so you can keep working.`
+      : `The squash commit wasn't recorded — we'll use the current HEAD of ${baseRef} as our best guess. If anything else has landed since the merge, the agent will stop.`
     const ok = confirm(
-      `Revert the merge?\n\nThis will hard-reset ${baseRef} back before commit ${shaShort} and re-create the worktree so you can continue. If ${baseRef} has moved or the commit was pushed, the agent will stop.\n\nProceed?`
+      `Revert this merge?\n\n${legacyNote}\n\nIf ${baseRef} has been pushed to a remote, the agent will stop rather than rewrite shared history.\n\nProceed?`
     )
     if (!ok) return
     setReverting(true)
@@ -269,37 +275,43 @@ const ShippedCard = observer(function ShippedCard({
   }
 
   return (
-    <div className="rounded-lg border bg-card p-4 flex flex-col gap-3">
-      <div className="flex items-start gap-2.5">
-        <CheckCircle2 className="size-4 shrink-0 mt-0.5 text-green-600 dark:text-green-400" />
+    <div className="rounded-lg border bg-card p-4 flex flex-col gap-4">
+      <div className="flex items-start gap-3">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-green-500/10">
+          <CheckCircle2 className="size-4 text-green-600 dark:text-green-400" />
+        </div>
         <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium">Task shipped</div>
-          <div className="text-xs text-muted-foreground mt-0.5">
-            Merged into <span className="font-mono">{baseRef}</span>
+          <div className="text-sm font-medium">This task has shipped</div>
+          <div className="text-xs text-muted-foreground mt-1 leading-relaxed">
+            Merged into <span className="font-mono text-foreground/80">{baseRef}</span>
             {shaShort ? (
-              <> as commit <span className="font-mono">{shaShort}</span></>
-            ) : null}
-            . This conversation is closed — open a new one to keep going.
+              <> as commit <span className="font-mono text-foreground/80">{shaShort}</span></>
+            ) : null}.
+            {" "}The chat is closed — pick up in a new conversation below, or undo the merge to keep iterating.
           </div>
         </div>
       </div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="default" onClick={handleNewChat}>
-          New chat here
+          New chat from this point
         </Button>
         <Button size="sm" variant="outline" onClick={handleNewTask}>
-          New task here
+          New task from this point
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={handleRevert}
-          disabled={!canRevert || reverting}
-          title={canRevert ? "Hard-reset the base branch and put work back into a worktree" : "No commit SHA recorded — revert manually with git"}
-          className="text-amber-700 dark:text-amber-400 hover:text-amber-700 hover:bg-amber-500/10"
-        >
-          {reverting ? "Reverting…" : "Revert merge"}
-        </Button>
+        <div className="ml-auto flex items-center">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleRevert}
+            disabled={!canRevert || reverting}
+            title={canRevert
+              ? "Hard-reset the base branch and put the work back into a worktree"
+              : "This task is missing the branch/base metadata needed to revert"}
+            className="text-amber-700 dark:text-amber-400 hover:text-amber-700 hover:bg-amber-500/10"
+          >
+            {reverting ? "Reverting…" : "Revert this merge"}
+          </Button>
+        </div>
       </div>
     </div>
   )

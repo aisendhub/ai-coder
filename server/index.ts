@@ -1466,11 +1466,6 @@ app.post("/api/conversations/:id/revert", async (c) => {
   if (conv.kind !== "task") return c.json({ error: "only tasks can be reverted" }, 400)
   if (!conv.shipped_at) return c.json({ error: "task is not shipped" }, 400)
   if (conv.worktree_path) return c.json({ error: "task still has a worktree — not in a revertible state" }, 400)
-  if (!conv.shipped_commit_sha) {
-    return c.json({
-      error: "no shipped commit SHA recorded (task shipped before the Revert feature). Revert manually with git.",
-    }, 400)
-  }
   if (!conv.branch || !conv.base_ref) {
     return c.json({ error: "task is missing branch or base_ref metadata" }, 400)
   }
@@ -1484,12 +1479,40 @@ app.post("/api/conversations/:id/revert", async (c) => {
 
   const baseCwd = resolveProjectCwd(project.cwd)
   const worktreePath = worktreePathFor(conv.project_id, conv.id)
+
+  // Legacy tasks that shipped before migration 0013 don't have a recorded
+  // SHA. Fall back to the current HEAD of the base branch: for a fresh merge
+  // that's the squash commit, which is what we want to revert. If the user
+  // has committed anything else since the ship, the agent's safety checks
+  // (step 2 in buildRevertPrompt) will catch the mismatch and STOP.
+  let shippedSha = conv.shipped_commit_sha
+  let legacy = false
+  if (!shippedSha) {
+    try {
+      const { stdout } = await execFileP(
+        "git",
+        ["rev-parse", `refs/heads/${conv.base_ref}`],
+        { cwd: baseCwd }
+      )
+      shippedSha = stdout.trim() || null
+      legacy = true
+    } catch (err) {
+      return c.json({
+        error: `no shipped commit SHA recorded and could not read ${conv.base_ref} HEAD: ${err instanceof Error ? err.message : String(err)}`,
+      }, 400)
+    }
+    if (!shippedSha) {
+      return c.json({ error: `could not resolve ${conv.base_ref} HEAD` }, 400)
+    }
+  }
+
   const prompt = buildRevertPrompt({
     baseCwd,
     worktreePath,
     branch: conv.branch,
     baseRef: conv.base_ref,
-    shippedSha: conv.shipped_commit_sha,
+    shippedSha,
+    legacy,
   })
 
   // Optimistically flip the row out of shipped state so the UI re-enables the
@@ -1528,12 +1551,13 @@ app.post("/api/conversations/:id/revert", async (c) => {
       worktreePath,
       branch: conv.branch,
       baseRef: conv.base_ref,
-      shippedSha: conv.shipped_commit_sha,
+      shippedSha,
     }),
     displayText: buildRevertNoticeText({
       branch: conv.branch,
       baseRef: conv.base_ref,
-      shippedSha: conv.shipped_commit_sha,
+      shippedSha,
+      legacy,
     }),
     displayRole: "notice",
   })
@@ -1547,10 +1571,22 @@ function buildRevertPrompt(input: {
   branch: string
   baseRef: string
   shippedSha: string
+  /** True when we derived the SHA from the current base HEAD because the task
+   *  shipped before we started recording shipped_commit_sha. Adds a legacy
+   *  warning line so the agent can surface it to the user. */
+  legacy: boolean
 }): string {
+  const legacyNote = input.legacy
+    ? [
+        "⚠️ This task shipped before the merge tracker started recording the squash SHA, so we're using the current HEAD of `" + input.baseRef + "` as our best guess.",
+        "If another commit landed after the squash, Step 2 will catch the mismatch and you should STOP.",
+        "",
+      ]
+    : []
   return [
     "[Host task — revert merge]",
     "",
+    ...legacyNote,
     `Undo the squash commit \`${input.shippedSha.slice(0, 12)}\` on \`${input.baseRef}\` and put the task work back into a fresh worktree.`,
     "",
     `- Base checkout: \`${input.baseCwd}\``,
@@ -1603,8 +1639,9 @@ function buildRevertNoticeText(input: {
   branch: string
   baseRef: string
   shippedSha: string
+  legacy: boolean
 }): string {
-  return [
+  const lines = [
     `Reverting merge of **\`${input.branch}\`** from **\`${input.baseRef}\`**.`,
     "",
     "The agent will:",
@@ -1613,7 +1650,14 @@ function buildRevertNoticeText(input: {
     "- Recreate the worktree so you can continue",
     "",
     "If the base branch has moved or the commit was pushed, the agent will stop and ask you how to proceed.",
-  ].join("\n")
+  ]
+  if (input.legacy) {
+    lines.push(
+      "",
+      `ℹ️ Using the current HEAD of \`${input.baseRef}\` as the commit to revert (this task shipped before we started recording the SHA).`,
+    )
+  }
+  return lines.join("\n")
 }
 
 /** Shell-quote helper for embedding paths in agent-facing command strings. */
