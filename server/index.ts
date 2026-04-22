@@ -40,6 +40,10 @@ import {
   runEvaluator,
   summarizeTools,
   detectManifestWithLLM,
+  buildDetectServicesPrompt,
+  buildDetectServicesSystemPrompt,
+  buildDetectServicesNoticeText,
+  extractDetectedManifest,
   type EvaluatorResult,
 } from "./agent-loop"
 import {
@@ -764,6 +768,13 @@ async function startRunner(args: {
       await reconcileMergeIfCompleted(conversationId).catch((err) => {
         console.error("merge reconcile failed", err)
       })
+      // Services reconcile: if the assistant dropped a <run-manifest> block in
+      // its reply (because a detect-services turn ran, or because the user
+      // asked the agent to tweak the config), parse it and save. Idempotent —
+      // runs on every turn; does nothing if no block is present.
+      await reconcileDetectedServicesIfAny(conversationId, assistantText, emit).catch((err) => {
+        console.error("services reconcile failed", err)
+      })
       runner.done = true
       // Only clear the map slot if it still points at US — otherwise a newer
       // runner (e.g. merge aborting this one) has taken our place.
@@ -776,6 +787,56 @@ async function startRunner(args: {
   })()
 
   return runner
+}
+
+// Runs after every turn. If the assistant's reply contains a
+// <run-manifest>…</run-manifest> block (emitted by the detect-services
+// scripted turn, or by any future "agent edits the config" flow), parse it
+// and save to projects.run_manifest. Emits a bus event so the SSE stream
+// notifies the chat client — the services panel reloads on receipt.
+async function reconcileDetectedServicesIfAny(
+  conversationId: string,
+  assistantText: string,
+  emit: (event: string, data: unknown) => void
+): Promise<void> {
+  if (!sb) return
+  const proposal = extractDetectedManifest(assistantText)
+  if (!proposal) return
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("project_id, user_id")
+    .eq("id", conversationId)
+    .single()
+  if (!conv?.project_id) return
+
+  const manifest: Record<string, unknown> = {
+    stack: proposal.stack,
+    start: proposal.start,
+    env: proposal.env ?? {},
+  }
+  if (proposal.build) manifest.build = proposal.build
+
+  const { error } = await sb
+    .from("projects")
+    .update({ run_manifest: manifest })
+    .eq("id", conv.project_id)
+  if (error) {
+    console.error("[services.reconcile] save failed", error.message)
+    emit("services.configure_failed", { error: error.message })
+    return
+  }
+
+  console.log(
+    `[services.reconcile] saved manifest for project ${conv.project_id.slice(0, 8)}`,
+    { stack: proposal.stack, start: proposal.start }
+  )
+  emit("services.configured", {
+    projectId: conv.project_id,
+    manifest,
+    rationale: proposal.rationale,
+    confidence: proposal.confidence,
+  })
 }
 
 async function reconcileMergeIfCompleted(conversationId: string): Promise<void> {
@@ -1413,6 +1474,72 @@ app.post("/api/conversations/:id/merge", async (c) => {
       branch: conv.branch,
       baseRef: conv.base_ref,
     }),
+    displayRole: "notice",
+  })
+
+  return c.json({ started: true })
+})
+
+// Ask the conversation's agent to configure the project's run command. Same
+// shape as /merge: inject a scripted one-shot turn with systemPromptOverride,
+// chat sees a concise `role: 'notice'` row (displayText), agent reply ends
+// with a <run-manifest>{…}</run-manifest> block that the post-turn reconcile
+// parses and saves to projects.run_manifest. See docs/RUNTIME-PROGRESS.md.
+app.post("/api/conversations/:id/detect-services", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
+  const userId = body.userId
+  if (!userId) return c.json({ error: "userId required" }, 400)
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, user_id, project_id, session_id, worktree_path")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("cwd, run_manifest")
+    .eq("id", conv.project_id)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+
+  const cwd = conv.worktree_path
+    ? resolve(conv.worktree_path)
+    : resolveProjectCwd(project.cwd)
+
+  const existingManifest = project.run_manifest as
+    | { stack: string; start: string; build?: string; env?: Record<string, string> }
+    | null
+    | undefined
+
+  const prompt = buildDetectServicesPrompt({
+    cwd,
+    existingManifest: existingManifest ?? null,
+  })
+  const displayText = buildDetectServicesNoticeText({
+    cwd,
+    refining: !!existingManifest,
+  })
+
+  // If a runner is mid-turn, let it finish — unlike merge, detect is
+  // non-destructive, so interrupting active chat work is the wrong trade.
+  // Await then kick.
+  const existing = runners.get(conversationId)
+  if (existing && !existing.done) {
+    await existing.promise.catch(() => {})
+  }
+
+  void startRunner({
+    conversationId,
+    prompt,
+    resumeSessionId: conv.session_id ?? undefined,
+    oneShot: true,
+    systemPromptOverride: buildDetectServicesSystemPrompt(),
+    displayText,
     displayRole: "notice",
   })
 
@@ -2232,12 +2359,17 @@ app.post("/api/services/start", async (c) => {
 // Read the project's manifest state: what's cached (stored default), what
 // detection currently proposes, and what would actually run. The UI calls
 // this on Run-click when there's no cached row, to drive the confirm dialog.
+// Optional `conversationId` query: when set, the heuristic detect runs in
+// the conversation's worktree (`conversations.worktree_path`) instead of the
+// project base cwd. Without it, a task-conversation's detect would miss
+// anything the agent built inside the worktree.
 app.get("/api/projects/:id/manifest", async (c) => {
   const projectId = c.req.param("id")
   const userId = c.req.query("userId")
+  const conversationId = c.req.query("conversationId") || undefined
   if (!userId) return c.json({ error: "userId required" }, 400)
 
-  const ctx = await loadManifestContext(userId, projectId, undefined)
+  const ctx = await loadManifestContext(userId, projectId, conversationId)
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
 
   let detected: RunManifest | null = null
@@ -2344,6 +2476,10 @@ app.post("/api/projects/:id/manifest/detect-llm", async (c) => {
       confidence: llm.proposal?.confidence ?? null,
       costUsd: llm.costUsd,
       error: llm.error ?? null,
+      // Surface truncated raw output when parsing failed so the UI can show
+      // something more actionable than "it failed". Capped at 400 chars so we
+      // don't pipe huge model dumps through the wire.
+      rawPreview: llm.error && llm.raw ? llm.raw.slice(0, 400) : null,
     },
   })
 })

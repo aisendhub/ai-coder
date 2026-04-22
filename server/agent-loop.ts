@@ -315,6 +315,15 @@ export async function detectManifestWithLLM({
     "Return JSON per the schema in your system prompt.",
   ].join("\n")
 
+  const log = (event: string, details: Record<string, unknown> = {}) => {
+    const tail = Object.entries(details)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" ")
+    console.log(`[runtime] llm.detect.${event}${tail ? " " + tail : ""}`)
+  }
+
+  log("start", { cwd })
+
   let finalText = ""
   let costUsd = 0
   try {
@@ -322,7 +331,10 @@ export async function detectManifestWithLLM({
       prompt: userMessage,
       options: {
         cwd,
-        permissionMode: "default",
+        // Server-side flow with no interactive prompt surface — use
+        // bypassPermissions so Bash/Read/etc. don't hang on an approval
+        // prompt nobody can answer. Tool surface is already restricted.
+        permissionMode: "bypassPermissions",
         systemPrompt: RUN_DETECT_SYSTEM_PROMPT,
         allowedTools: ["Read", "Glob", "Grep", "Bash"],
         settingSources: [],
@@ -337,34 +349,67 @@ export async function detectManifestWithLLM({
         }
       } else if (msg.type === "result") {
         costUsd = Number(msg.total_cost_usd ?? 0)
+        // SDK signals agent-side failures via `is_error`. Surface them
+        // instead of silently returning empty finalText.
+        const maybeErr = msg as unknown as { is_error?: boolean; subtype?: string }
+        if (maybeErr.is_error) {
+          const subtype = maybeErr.subtype ?? "unknown"
+          log("agent_error", { subtype, costUsd })
+          return {
+            proposal: null,
+            costUsd,
+            raw: finalText,
+            error: `agent-sdk returned is_error (${subtype})`,
+          }
+        }
         break
       }
     }
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log("exception", { message })
+    return { proposal: null, costUsd, raw: finalText, error: message }
+  }
+
+  const proposal = parseRunDetectJson(finalText)
+  if (!proposal) {
+    log("parse_failed", {
+      finalTextLen: finalText.length,
+      head: finalText.slice(0, 120),
+    })
     return {
       proposal: null,
       costUsd,
       raw: finalText,
-      error: err instanceof Error ? err.message : String(err),
+      error: finalText.trim()
+        ? `couldn't parse JSON from model output (${finalText.length} chars)`
+        : "model returned no text",
     }
   }
-
-  const proposal = parseRunDetectJson(finalText)
+  log("ok", { stack: proposal.stack, start: proposal.start, costUsd })
   return { proposal, costUsd, raw: finalText }
 }
 
 function parseRunDetectJson(raw: string): LlmManifestProposal | null {
-  const cleaned = raw
+  // First pass: strip markdown fences. Handles ```json { ... } ``` and bare
+  // JSON responses. Common "I'll inspect the repo… here's the config:" prose
+  // preambles are handled by the second pass.
+  const fenceStripped = raw
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/```\s*$/i, "")
     .trim()
-  if (!cleaned) return null
-  let obj: unknown
-  try {
-    obj = JSON.parse(cleaned)
-  } catch {
-    return null
+  if (!fenceStripped) return null
+
+  let obj: unknown = tryParse(fenceStripped)
+  if (!obj) {
+    // Second pass: locate the outermost balanced `{…}` substring. Works when
+    // the model adds commentary before/after the JSON block.
+    const start = fenceStripped.indexOf("{")
+    const end = fenceStripped.lastIndexOf("}")
+    if (start !== -1 && end > start) {
+      obj = tryParse(fenceStripped.slice(start, end + 1))
+    }
   }
   if (!obj || typeof obj !== "object") return null
   const r = obj as Record<string, unknown>
@@ -396,5 +441,142 @@ function parseRunDetectJson(raw: string): LlmManifestProposal | null {
       : "low"
   const rationale = typeof r.rationale === "string" ? r.rationale : ""
 
+  return { stack, start, env, build, rationale, confidence }
+}
+
+function tryParse(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+// ─── Chat-driven service detection ───────────────────────────────────────────
+// The standalone `detectManifestWithLLM` above runs a fresh session with no
+// context. That's wrong for anything the user just built in chat — the agent
+// can't see "I just scaffolded an Express app 3 turns ago." This helper is
+// used by the merge-flow-style scripted-turn approach: injected into the
+// conversation's own runner, so the agent sees the full session history.
+
+const DETECT_SERVICES_SYSTEM_PROMPT = `You are configuring how to start this project locally.
+You have the full conversation history + read/write tools. Use that context —
+if the user just built something, you already know what.
+
+Inspect the project (package.json, Procfile, README, entry files, etc.) and
+propose ONE start command suitable for local development. Keep it short.
+
+End your reply with exactly this block (and nothing after it):
+
+<run-manifest>
+{
+  "stack": "node" | "bun" | "python" | "go" | "ruby" | "static" | "docker" | "custom",
+  "start": "exact shell command",
+  "build": "optional build command — omit when none",
+  "env": { "KEY": "value" },
+  "rationale": "one short sentence",
+  "confidence": "high" | "medium" | "low"
+}
+</run-manifest>
+
+Rules:
+- The block is MANDATORY — the host parses it to save the config.
+- "start" must be non-empty. If you genuinely can't figure it out, explain
+  why in your reply and still emit the block with "start": "".
+- The host will inject $PORT at runtime — use $PORT in the command when
+  the app needs an explicit port.
+- Do NOT start the service yourself. This turn is configuration only.`
+
+export function buildDetectServicesSystemPrompt(): string {
+  return DETECT_SERVICES_SYSTEM_PROMPT
+}
+
+export function buildDetectServicesPrompt(input: {
+  cwd: string
+  existingManifest?: { stack: string; start: string; build?: string; env?: Record<string, string> } | null
+}): string {
+  const lines = [
+    "[Host task — configure services]",
+    "",
+    "The user wants to configure how to run this project locally. Inspect the",
+    "codebase and, drawing on the full conversation history, propose the best",
+    "start command.",
+    "",
+    `Working directory: \`${input.cwd}\``,
+  ]
+  if (input.existingManifest) {
+    lines.push(
+      "",
+      "A configuration already exists — treat this as a refinement pass.",
+      "Propose an updated manifest that reflects any changes the user has made",
+      "in this conversation since it was saved:",
+      "```json",
+      JSON.stringify(input.existingManifest, null, 2),
+      "```"
+    )
+  } else {
+    lines.push(
+      "",
+      "No configuration exists yet — this is the first-run setup.",
+    )
+  }
+  lines.push(
+    "",
+    "When you're done, emit the `<run-manifest>` block exactly as described in",
+    "your system prompt. The host parses it to save the configuration. Do not",
+    "start the service."
+  )
+  return lines.join("\n")
+}
+
+export function buildDetectServicesNoticeText(input: {
+  cwd: string
+  refining?: boolean
+}): string {
+  const title = input.refining
+    ? "Refining the run configuration for this project."
+    : "Configuring services for this project."
+  return [
+    title,
+    "",
+    "The agent will inspect the codebase and propose a start command.",
+    `cwd: \`${input.cwd}\``,
+  ].join("\n")
+}
+
+const DETECT_MANIFEST_BLOCK_RE = /<run-manifest>\s*([\s\S]*?)\s*<\/run-manifest>/i
+
+// Extract and validate a manifest from an assistant message. Used by the
+// post-turn reconcile hook in startRunner's `finally` block. Returns null
+// if no block is present or the JSON is malformed — idempotent and safe
+// to run on every turn.
+export function extractDetectedManifest(assistantText: string): LlmManifestProposal | null {
+  const match = DETECT_MANIFEST_BLOCK_RE.exec(assistantText)
+  if (!match) return null
+  const payload = match[1].trim()
+  const obj = tryParse(payload)
+  if (!obj || typeof obj !== "object") return null
+  const r = obj as Record<string, unknown>
+
+  const allowedStacks: LlmManifestStack[] = [
+    "node", "bun", "python", "go", "ruby", "static", "docker", "custom",
+  ]
+  const stack = allowedStacks.includes(r.stack as LlmManifestStack)
+    ? (r.stack as LlmManifestStack)
+    : "custom"
+  const start = typeof r.start === "string" ? r.start.trim() : ""
+  if (!start) return null // empty-start block counts as "model gave up"
+  const build = typeof r.build === "string" && r.build.trim() ? r.build.trim() : undefined
+  const env: Record<string, string> = {}
+  if (r.env && typeof r.env === "object") {
+    for (const [k, v] of Object.entries(r.env as Record<string, unknown>)) {
+      if (typeof v === "string") env[k] = v
+    }
+  }
+  const confidence =
+    r.confidence === "high" || r.confidence === "medium" || r.confidence === "low"
+      ? r.confidence
+      : "low"
+  const rationale = typeof r.rationale === "string" ? r.rationale : ""
   return { stack, start, env, build, rationale, confidence }
 }

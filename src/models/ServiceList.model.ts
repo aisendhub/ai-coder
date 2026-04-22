@@ -323,10 +323,16 @@ export class ServiceList extends BaseList<typeof Service> {
 
   async fetchProjectManifest(
     userId: string,
-    projectId: string
+    projectId: string,
+    conversationId?: string | null
   ): Promise<ProjectManifestView> {
+    // Pass conversationId so the server's heuristic detect runs in the
+    // worktree (not the base project cwd) — otherwise anything the agent
+    // built inside the worktree is invisible to the detector.
+    const params = new URLSearchParams({ userId })
+    if (conversationId) params.set("conversationId", conversationId)
     const res = await fetch(
-      `/api/projects/${projectId}/manifest?userId=${encodeURIComponent(userId)}`
+      `/api/projects/${projectId}/manifest?${params.toString()}`
     )
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
