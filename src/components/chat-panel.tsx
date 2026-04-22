@@ -121,11 +121,15 @@ export const ChatPanel = observer(function ChatPanel() {
       </ScrollArea>
       <div className="border-t p-3">
         <div className="mx-auto w-full max-w-243 px-10">
-          <Composer
-            onSend={handleSend}
-            streaming={conversation?.streaming ?? false}
-            onStop={() => conversation?.cancel()}
-          />
+          {conversation?.shippedAt ? (
+            <ShippedCard conversation={conversation} />
+          ) : (
+            <Composer
+              onSend={handleSend}
+              streaming={conversation?.streaming ?? false}
+              onStop={() => conversation?.cancel()}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -206,6 +210,97 @@ const MessageBubble = observer(function MessageBubble({
         </div>
       )}
       {isStreaming && hasContent && !message.text && <ThinkingDots />}
+    </div>
+  )
+})
+
+/** Replaces the composer on shipped tasks. Explains the end-state and offers
+ *  three ways forward: continue in a fresh conversation (chat or task), or
+ *  revert the merge and put the work back into a worktree. */
+const ShippedCard = observer(function ShippedCard({
+  conversation,
+}: { conversation: Conversation }) {
+  const [reverting, setReverting] = useState(false)
+  const baseRef = conversation.baseRef ?? "base"
+  const shaShort = conversation.shippedCommitSha?.slice(0, 8) ?? null
+  const canRevert = !!conversation.shippedCommitSha
+
+  const handleNewChat = async () => {
+    try {
+      await workspace.createNew()
+    } catch (err) {
+      toast.error("Couldn't create a new chat", {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  const handleNewTask = async () => {
+    try {
+      await workspace.createTaskDraft({})
+    } catch (err) {
+      toast.error("Couldn't create a new task", {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  const handleRevert = async () => {
+    if (!canRevert) return
+    const ok = confirm(
+      `Revert the merge?\n\nThis will hard-reset ${baseRef} back before commit ${shaShort} and re-create the worktree so you can continue. If ${baseRef} has moved or the commit was pushed, the agent will stop.\n\nProceed?`
+    )
+    if (!ok) return
+    setReverting(true)
+    try {
+      await workspace.revertConversation(conversation.id)
+      toast.info("Reverting…", {
+        description: "Watch the chat — the agent is undoing the merge.",
+        duration: 6000,
+      })
+    } catch (err) {
+      toast.error("Couldn't start revert", {
+        description: err instanceof Error ? err.message : String(err),
+        duration: 8000,
+      })
+    } finally {
+      setReverting(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border bg-card p-4 flex flex-col gap-3">
+      <div className="flex items-start gap-2.5">
+        <CheckCircle2 className="size-4 shrink-0 mt-0.5 text-green-600 dark:text-green-400" />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium">Task shipped</div>
+          <div className="text-xs text-muted-foreground mt-0.5">
+            Merged into <span className="font-mono">{baseRef}</span>
+            {shaShort ? (
+              <> as commit <span className="font-mono">{shaShort}</span></>
+            ) : null}
+            . This conversation is closed — open a new one to keep going.
+          </div>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="default" onClick={handleNewChat}>
+          New chat here
+        </Button>
+        <Button size="sm" variant="outline" onClick={handleNewTask}>
+          New task here
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleRevert}
+          disabled={!canRevert || reverting}
+          title={canRevert ? "Hard-reset the base branch and put work back into a worktree" : "No commit SHA recorded — revert manually with git"}
+          className="text-amber-700 dark:text-amber-400 hover:text-amber-700 hover:bg-amber-500/10"
+        >
+          {reverting ? "Reverting…" : "Revert merge"}
+        </Button>
+      </div>
     </div>
   )
 })

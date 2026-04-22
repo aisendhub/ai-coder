@@ -107,6 +107,40 @@ comment on column public.conversations.merge_requested_at is
 | Resumed session with different cwd behaves oddly | `/merge` does NOT resume (`resumeSessionId: undefined`) — fresh session, fully primed by the scripted prompt + override system prompt |
 | Old runner's `runners.delete(id)` racing the merge runner's `runners.set(id)` | `finally` only deletes if the map still points at *this* runner |
 
+## Shipped state UX
+
+Once the end-of-turn reconcile fires:
+- `shipped_at` is set, `worktree_path` cleared, `shipped_commit_sha` recorded.
+- `branch` and `base_ref` are intentionally preserved so the Revert action can rebuild the worktree.
+- In the chat, the composer is replaced with a `ShippedCard` that offers three actions.
+
+| Action | Effect |
+|---|---|
+| **New chat here** | `workspace.createNew()` — fresh chat in the same project, no context carried. |
+| **New task here** | `workspace.createTaskDraft({})` — draft task; user types a goal + arms it. |
+| **Revert merge** | `POST /api/conversations/:id/revert` — AI-driven, see below. |
+
+## Revert flow
+
+Triggered by the Revert button on a shipped task's ShippedCard. Destructive (uses `git reset --hard`) but safeguarded by agent-side precondition checks.
+
+1. Server pre-flight: conv must be `kind='task'`, shipped, without a worktree, with `shipped_commit_sha` recorded. If any check fails, 400 with actionable text.
+2. Server flips DB: clears `shipped_at`, `shipped_commit_sha`, `merge_requested_at`; restores `worktree_path` to its canonical path (but NOT created on disk yet); sets `auto_loop_enabled=false`. This immediately re-enables the chat composer in the UI.
+3. Server fires a one-shot runner with `cwdOverride = baseCwd`, scripted revert prompt. The notice row says "Reverting…" with the SHA being undone.
+4. Agent runs the steps:
+   - Verify base checkout clean.
+   - Verify base HEAD still equals the shipped SHA (else STOP — base moved).
+   - Verify commit is not on any remote (else STOP — would require force-push).
+   - Get parent SHA.
+   - Hard-reset base to parent (or `update-ref` if base cwd is on another branch).
+   - Recreate branch pointing at shipped SHA (so work isn't lost).
+   - `git worktree add <path> <branch>` — work is back, user can continue.
+5. If the agent STOPs at any check, the row stays in the "worktree restored, not actually reset" state. User sees the refusal in chat and decides what to do; they can manually clean up and try again.
+
+Non-goals for v1:
+- No safe-revert (`git revert <sha>` creating a new commit) path. If the user pushed, they can resolve it themselves.
+- No branch-name collision handling beyond STOP. A second revert of the same conversation after a partial failure needs manual cleanup.
+
 ## Manual test checklist
 
 - [ ] Clean base cwd, clean merge → success, worktree gone, shipped pill shown
@@ -118,6 +152,7 @@ comment on column public.conversations.merge_requested_at is
 
 ## Implementation checklist
 
+Phase 1 — merge flow
 - [x] Write this doc
 - [x] `0010_merge_flow.sql` migration
 - [x] Delete `/ship` endpoint and PR code paths
@@ -128,6 +163,20 @@ comment on column public.conversations.merge_requested_at is
 - [x] Frontend `mergeConversation` + `mergeRequestedAt` model field
 - [x] `code-panel.tsx`: drop PR, rewire Merge, show pending state
 - [x] Typecheck clean
-- [x] Apply `0010_merge_flow.sql` to Supabase (column verified)
-- [x] Smoke test: `/api/conversations/:id/merge` routes and validates input
-- [ ] End-to-end test from UI: create task → agent change → click Merge → verify shipped state
+- [x] Apply `0010_merge_flow.sql` to Supabase
+
+Phase 2 — notice role
+- [x] `0011_message_notice.sql` migration (role constraint allows 'notice')
+- [x] `startRunner` accepts `displayText` + `displayRole`
+- [x] `/merge` inserts a short notice row; agent sees full scripted prompt
+- [x] `NoticeCard` component renders 'notice' rows as a centered badge
+
+Phase 3 — shipped state + revert
+- [x] `0013_shipped_commit_sha.sql` migration
+- [x] Reconcile captures base HEAD SHA at ship time
+- [x] `POST /api/conversations/:id/revert` endpoint + prompts
+- [x] `workspace.revertConversation(id)`
+- [x] `ShippedCard` replaces composer when `shipped_at` is set
+- [x] Typecheck clean
+- [x] Apply `0013_shipped_commit_sha.sql` to Supabase
+- [ ] End-to-end UI test: merge → shipped card → revert → worktree back

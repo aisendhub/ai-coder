@@ -355,6 +355,18 @@ export class Workspace extends BaseModel {
     }
   }
 
+  /** Undo a shipped task: instruct the agent to hard-reset the base branch
+   *  back before the squash commit and re-provision the worktree so the user
+   *  can continue. Destructive — the agent refuses if the base branch moved
+   *  past the shipped commit or if the commit was pushed. See docs/MERGE-FLOW.md. */
+  async revertConversation(id: string): Promise<void> {
+    const res = await fetch(`/api/conversations/${id}/revert`, { method: "POST" })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
   /** Pause a task: flips `auto_loop_enabled = false`. Current worker turn
    *  finishes, then the loop breaks cleanly at the next iteration boundary. */
   async pauseTask(id: string): Promise<void> {

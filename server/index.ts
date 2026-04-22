@@ -56,6 +56,8 @@ import {
   type ManifestOverride,
   type RunnerId,
 } from "./runtime/index.ts"
+import { encryptToken, decryptToken } from "./integrations/crypto.ts"
+import { fetchMe as railwayFetchMe, RailwayApiError } from "./integrations/railway.ts"
 
 const execFileP = promisify(execFile)
 
@@ -779,7 +781,7 @@ async function reconcileMergeIfCompleted(conversationId: string): Promise<void> 
   if (!sb) return
   const { data: conv } = await sb
     .from("conversations")
-    .select("merge_requested_at, worktree_path, shipped_at, branch, base_ref")
+    .select("merge_requested_at, worktree_path, shipped_at, branch, base_ref, project_id")
     .eq("id", conversationId)
     .single()
   if (!conv?.merge_requested_at) return
@@ -792,19 +794,45 @@ async function reconcileMergeIfCompleted(conversationId: string): Promise<void> 
     worktreeExists = false
   }
   if (worktreeExists) return
+
+  // Capture the base-branch HEAD SHA so a later Revert knows where the merge
+  // landed. Best-effort: if the base checkout is unreadable, ship anyway
+  // with sha = null (Revert will then refuse with an actionable message).
+  let shippedSha: string | null = null
+  try {
+    const { data: project } = await sb
+      .from("projects")
+      .select("cwd")
+      .eq("id", conv.project_id)
+      .single()
+    if (project?.cwd && conv.base_ref) {
+      const baseCwd = resolveProjectCwd(project.cwd)
+      const { stdout } = await execFileP(
+        "git",
+        ["rev-parse", `refs/heads/${conv.base_ref}`],
+        { cwd: baseCwd }
+      )
+      shippedSha = stdout.trim() || null
+    }
+  } catch (err) {
+    console.warn("[merge.reconciled] could not read shipped sha:", err)
+  }
+
   await sb
     .from("conversations")
     .update({
       shipped_at: new Date().toISOString(),
+      shipped_commit_sha: shippedSha,
       worktree_path: null,
-      branch: null,
-      base_ref: null,
+      // Keep branch + base_ref around for the Revert prompt; null them on
+      // actual revert or when the task is trashed.
     })
     .eq("id", conversationId)
   logWorktreeEvent("merge.reconciled", {
     conv: conversationId.slice(0, 8),
     branch: conv.branch,
     baseRef: conv.base_ref,
+    sha: shippedSha?.slice(0, 8) ?? "unknown",
   })
 }
 
@@ -1419,6 +1447,179 @@ function buildMergeSystemPrompt(input: {
     "",
     "Use `git -C <path>` to direct commands at a specific repo path. Follow the numbered steps in the user message exactly. If any step reveals a problem (dirty base repo, branch mismatch, merge conflict), STOP immediately and describe the situation — do not attempt to fix it on your own unless the user asks.",
   ].join("\n")
+}
+
+// Revert a shipped task: undo the squash commit on the base branch and put
+// the work back into a new worktree on the same branch name, so the user can
+// continue where they left off. Destructive (git reset --hard), but safeguarded:
+// the agent refuses if the base HEAD has moved past the shipped commit or if
+// the shipped commit has been pushed. See docs/MERGE-FLOW.md § Revert.
+app.post("/api/conversations/:id/revert", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, title, kind, project_id, branch, base_ref, shipped_at, shipped_commit_sha, worktree_path")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.kind !== "task") return c.json({ error: "only tasks can be reverted" }, 400)
+  if (!conv.shipped_at) return c.json({ error: "task is not shipped" }, 400)
+  if (conv.worktree_path) return c.json({ error: "task still has a worktree — not in a revertible state" }, 400)
+  if (!conv.shipped_commit_sha) {
+    return c.json({
+      error: "no shipped commit SHA recorded (task shipped before the Revert feature). Revert manually with git.",
+    }, 400)
+  }
+  if (!conv.branch || !conv.base_ref) {
+    return c.json({ error: "task is missing branch or base_ref metadata" }, 400)
+  }
+
+  const { data: project } = await sb
+    .from("projects")
+    .select("cwd")
+    .eq("id", conv.project_id)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+
+  const baseCwd = resolveProjectCwd(project.cwd)
+  const worktreePath = worktreePathFor(conv.project_id, conv.id)
+  const prompt = buildRevertPrompt({
+    baseCwd,
+    worktreePath,
+    branch: conv.branch,
+    baseRef: conv.base_ref,
+    shippedSha: conv.shipped_commit_sha,
+  })
+
+  // Optimistically flip the row out of shipped state so the UI re-enables the
+  // chat composer immediately. If the agent refuses (unsafe state) the row
+  // stays in this "worktree back, not shipped" shape — user can see the
+  // agent's refusal and decide what to do. If we flipped only on success we'd
+  // have to poll; flipping up front + trusting the agent's STOP is simpler.
+  await sb
+    .from("conversations")
+    .update({
+      shipped_at: null,
+      shipped_commit_sha: null,
+      merge_requested_at: null,
+      worktree_path: worktreePath,
+      auto_loop_enabled: false,
+    })
+    .eq("id", conversationId)
+  logWorktreeEvent("merge.request", {
+    conv: conversationId.slice(0, 8),
+    revert: true,
+    branch: conv.branch,
+    baseRef: conv.base_ref,
+  })
+
+  const existing = runners.get(conversationId)
+  if (existing && !existing.done) existing.abort.abort()
+  console.log("[revert]", conversationId.slice(0, 8), "→ starting runner at cwd", baseCwd)
+  void startRunner({
+    conversationId,
+    prompt,
+    resumeSessionId: undefined,
+    cwdOverride: baseCwd,
+    oneShot: true,
+    systemPromptOverride: buildRevertSystemPrompt({
+      baseCwd,
+      worktreePath,
+      branch: conv.branch,
+      baseRef: conv.base_ref,
+      shippedSha: conv.shipped_commit_sha,
+    }),
+    displayText: buildRevertNoticeText({
+      branch: conv.branch,
+      baseRef: conv.base_ref,
+      shippedSha: conv.shipped_commit_sha,
+    }),
+    displayRole: "notice",
+  })
+
+  return c.json({ started: true })
+})
+
+function buildRevertPrompt(input: {
+  baseCwd: string
+  worktreePath: string
+  branch: string
+  baseRef: string
+  shippedSha: string
+}): string {
+  return [
+    "[Host task — revert merge]",
+    "",
+    `Undo the squash commit \`${input.shippedSha.slice(0, 12)}\` on \`${input.baseRef}\` and put the task work back into a fresh worktree.`,
+    "",
+    `- Base checkout: \`${input.baseCwd}\``,
+    `- Base branch: \`${input.baseRef}\``,
+    `- Shipped commit SHA: \`${input.shippedSha}\``,
+    `- Restored branch name: \`${input.branch}\``,
+    `- New worktree path: \`${input.worktreePath}\``,
+    "",
+    "This is destructive (uses `git reset --hard`). Run the checks first and STOP if any fail.",
+    "",
+    `1. Verify base checkout is clean: \`git -C ${shq(input.baseCwd)} status --porcelain\`. If non-empty, STOP — ask the user to commit or stash.`,
+    "",
+    `2. Verify the shipped commit is still the current HEAD of \`${input.baseRef}\`: \`git -C ${shq(input.baseCwd)} rev-parse ${input.baseRef}\` must equal \`${input.shippedSha}\`. If different, \`${input.baseRef}\` has moved — STOP and report what's on top. Do NOT rewrite history in that case.`,
+    "",
+    `3. Check if the commit has been pushed: \`git -C ${shq(input.baseCwd)} branch -r --contains ${input.shippedSha}\`. If that prints any remote refs, STOP — reverting locally would require a force-push. Report to the user and let them decide.`,
+    "",
+    `4. Get the parent SHA: \`git -C ${shq(input.baseCwd)} rev-parse ${input.shippedSha}^\`. Save as PARENT.`,
+    "",
+    `5. If the base checkout is currently on \`${input.baseRef}\`, hard-reset it: \`git -C ${shq(input.baseCwd)} reset --hard <PARENT>\`. If it's on a different branch, update the ref only: \`git -C ${shq(input.baseCwd)} update-ref refs/heads/${input.baseRef} <PARENT> ${input.shippedSha}\`.`,
+    "",
+    `6. Recreate the branch at the shipped SHA (so the work isn't lost): \`git -C ${shq(input.baseCwd)} branch ${input.branch} ${input.shippedSha}\`. If the branch already exists, STOP.`,
+    "",
+    `7. Create the worktree: \`git -C ${shq(input.baseCwd)} worktree add ${shq(input.worktreePath)} ${input.branch}\`.`,
+    "",
+    `8. Report: base is back at PARENT, branch \`${input.branch}\` points at \`${input.shippedSha.slice(0, 12)}\`, worktree is at \`${input.worktreePath}\`. Stop.`,
+  ].join("\n")
+}
+
+function buildRevertSystemPrompt(input: {
+  baseCwd: string
+  worktreePath: string
+  branch: string
+  baseRef: string
+  shippedSha: string
+}): string {
+  return [
+    "You are performing a REVERT operation for the host. This undoes a prior merge.",
+    "",
+    `- Working directory (cwd): ${input.baseCwd}`,
+    `- Restoring worktree at: ${input.worktreePath}`,
+    `- Restoring branch: ${input.branch}`,
+    `- Base branch: ${input.baseRef}`,
+    `- Shipped commit (to undo): ${input.shippedSha}`,
+    "",
+    "This uses `git reset --hard`, which is destructive. Follow the numbered steps exactly. STOP immediately at any safety check failure (dirty base, base moved past the SHA, commit has been pushed). Do NOT force-push. Do NOT attempt clever recovery.",
+  ].join("\n")
+}
+
+function buildRevertNoticeText(input: {
+  branch: string
+  baseRef: string
+  shippedSha: string
+}): string {
+  return [
+    `Reverting merge of **\`${input.branch}\`** from **\`${input.baseRef}\`**.`,
+    "",
+    "The agent will:",
+    `- Hard-reset \`${input.baseRef}\` to the commit before the squash (\`${input.shippedSha.slice(0, 8)}\`)`,
+    `- Recreate branch \`${input.branch}\` pointing at the task's work`,
+    "- Recreate the worktree so you can continue",
+    "",
+    "If the base branch has moved or the commit was pushed, the agent will stop and ask you how to proceed.",
+  ].join("\n")
+}
+
+/** Shell-quote helper for embedding paths in agent-facing command strings. */
+function shq(value: string): string {
+  if (/^[\w./@=:+-]+$/.test(value)) return value
+  return `'${value.replace(/'/g, "'\\''")}'`
 }
 
 // Quick probe used by the sidebar's delete confirm to warn before discarding
@@ -2238,6 +2439,121 @@ app.get("/api/services/:id/logs", (c) => {
       stream.onAbort(finish)
     })
   })
+})
+
+// ─── Integrations: per-user provider tokens ─────────────────────────────────
+// Phase 5 Slice 1. One row per (user, provider) in user_integrations; tokens
+// are AES-GCM encrypted at rest. Each provider gets its own connect/status/
+// disconnect endpoint under /api/integrations/:provider/* — keeps provider-
+// specific validation (e.g. Railway's `me` GraphQL probe) out of the schema
+// layer.
+
+type IntegrationProvider = "railway"
+
+type PublicIntegrationRow = {
+  provider: IntegrationProvider
+  account: Record<string, unknown> | null
+  connected_at: string
+  updated_at: string
+}
+
+async function loadIntegrationToken(
+  userId: string,
+  provider: IntegrationProvider
+): Promise<string | null> {
+  if (!sb) return null
+  const { data } = await sb
+    .from("user_integrations")
+    .select("token_ciphertext")
+    .eq("user_id", userId)
+    .eq("provider", provider)
+    .maybeSingle()
+  if (!data?.token_ciphertext) return null
+  try {
+    return decryptToken(data.token_ciphertext as string)
+  } catch (err) {
+    console.error("[integrations] decrypt failed", provider, (err as Error).message)
+    return null
+  }
+}
+
+app.post("/api/integrations/railway/connect", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const body = await c.req.json<{ userId?: string; token?: string }>().catch(() => ({}))
+  const userId = body.userId
+  const token = body.token?.trim()
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!token) return c.json({ error: "token required" }, 400)
+
+  let me
+  try {
+    me = await railwayFetchMe(token)
+  } catch (err) {
+    if (err instanceof RailwayApiError) {
+      return c.json({ error: err.message }, err.status === 401 || err.status === 403 ? 401 : 502)
+    }
+    return c.json({ error: `Railway unreachable: ${(err as Error).message}` }, 502)
+  }
+
+  let ciphertext: string
+  try {
+    ciphertext = encryptToken(token)
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
+
+  const account = {
+    id: me.id,
+    username: me.username,
+    email: me.email,
+    name: me.name,
+  }
+  const { error } = await sb
+    .from("user_integrations")
+    .upsert(
+      {
+        user_id: userId,
+        provider: "railway",
+        token_ciphertext: ciphertext,
+        account,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,provider" }
+    )
+  if (error) return c.json({ error: error.message }, 500)
+
+  return c.json({
+    provider: "railway",
+    account,
+    connected_at: new Date().toISOString(),
+  })
+})
+
+app.get("/api/integrations/railway", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const { data } = await sb
+    .from("user_integrations")
+    .select("provider, account, connected_at, updated_at")
+    .eq("user_id", userId)
+    .eq("provider", "railway")
+    .maybeSingle<PublicIntegrationRow>()
+  if (!data) return c.json({ connected: false })
+  return c.json({ connected: true, ...data })
+})
+
+app.delete("/api/integrations/railway", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const { error } = await sb
+    .from("user_integrations")
+    .delete()
+    .eq("user_id", userId)
+    .eq("provider", "railway")
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true })
 })
 
 // ─── Worktree reconciliation ─────────────────────────────────────────────────
