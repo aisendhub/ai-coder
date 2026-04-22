@@ -223,10 +223,11 @@ const ShippedCard = observer(function ShippedCard({
   const [reverting, setReverting] = useState(false)
   const baseRef = conversation.baseRef ?? "base"
   const shaShort = conversation.shippedCommitSha?.slice(0, 8) ?? null
-  // Revert needs branch + base_ref metadata preserved on the shipped row.
-  // Legacy tasks shipped before we started recording the squash SHA still
-  // qualify: the server falls back to the current HEAD of base_ref.
-  const canRevert = !!(conversation.branch && conversation.baseRef)
+  // Revert is always enabled for shipped tasks. The server fills in missing
+  // metadata (branch from `branchNameFor(title, id)`, base_ref from the
+  // project default or repo HEAD, SHA from the current base HEAD) and lets
+  // the agent's step-2 mismatch check catch anything unsafe.
+  const canRevert = true
 
   const handleNewChat = async () => {
     try {

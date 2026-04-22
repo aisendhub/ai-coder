@@ -1466,19 +1466,27 @@ app.post("/api/conversations/:id/revert", async (c) => {
   if (conv.kind !== "task") return c.json({ error: "only tasks can be reverted" }, 400)
   if (!conv.shipped_at) return c.json({ error: "task is not shipped" }, 400)
   if (conv.worktree_path) return c.json({ error: "task still has a worktree — not in a revertible state" }, 400)
-  if (!conv.branch || !conv.base_ref) {
-    return c.json({ error: "task is missing branch or base_ref metadata" }, 400)
-  }
 
   const { data: project } = await sb
     .from("projects")
-    .select("cwd")
+    .select("cwd, default_base_ref")
     .eq("id", conv.project_id)
     .single()
   if (!project) return c.json({ error: "project not found" }, 404)
 
   const baseCwd = resolveProjectCwd(project.cwd)
   const worktreePath = worktreePathFor(conv.project_id, conv.id)
+
+  // Legacy rows: before reconcile preserved branch/base_ref, shipping nulled
+  // them. branchNameFor is deterministic over (title, id), and base_ref falls
+  // back to the project's default or the current repo HEAD. The agent's
+  // step-2 check will catch mismatches.
+  const branch = conv.branch ?? branchNameFor(conv.title, conv.id)
+  const baseRef =
+    conv.base_ref ??
+    project.default_base_ref ??
+    (await detectDefaultBaseRef(baseCwd)) ??
+    "main"
 
   // Legacy tasks that shipped before migration 0013 don't have a recorded
   // SHA. Fall back to the current HEAD of the base branch: for a fresh merge
@@ -1491,35 +1499,36 @@ app.post("/api/conversations/:id/revert", async (c) => {
     try {
       const { stdout } = await execFileP(
         "git",
-        ["rev-parse", `refs/heads/${conv.base_ref}`],
+        ["rev-parse", `refs/heads/${baseRef}`],
         { cwd: baseCwd }
       )
       shippedSha = stdout.trim() || null
       legacy = true
     } catch (err) {
       return c.json({
-        error: `no shipped commit SHA recorded and could not read ${conv.base_ref} HEAD: ${err instanceof Error ? err.message : String(err)}`,
+        error: `no shipped commit SHA recorded and could not read ${baseRef} HEAD: ${err instanceof Error ? err.message : String(err)}`,
       }, 400)
     }
     if (!shippedSha) {
-      return c.json({ error: `could not resolve ${conv.base_ref} HEAD` }, 400)
+      return c.json({ error: `could not resolve ${baseRef} HEAD` }, 400)
     }
   }
 
   const prompt = buildRevertPrompt({
     baseCwd,
     worktreePath,
-    branch: conv.branch,
-    baseRef: conv.base_ref,
+    branch,
+    baseRef,
     shippedSha,
     legacy,
   })
 
   // Optimistically flip the row out of shipped state so the UI re-enables the
-  // chat composer immediately. If the agent refuses (unsafe state) the row
-  // stays in this "worktree back, not shipped" shape — user can see the
-  // agent's refusal and decide what to do. If we flipped only on success we'd
-  // have to poll; flipping up front + trusting the agent's STOP is simpler.
+  // chat composer immediately. Also (re)populate branch + base_ref in case
+  // they were nulled by a pre-0013 reconcile — the revert will create the
+  // worktree at these values. If the agent refuses (unsafe state), the row
+  // stays in this "worktree back, not shipped" shape and the user can see
+  // the refusal in chat.
   await sb
     .from("conversations")
     .update({
@@ -1527,14 +1536,16 @@ app.post("/api/conversations/:id/revert", async (c) => {
       shipped_commit_sha: null,
       merge_requested_at: null,
       worktree_path: worktreePath,
+      branch,
+      base_ref: baseRef,
       auto_loop_enabled: false,
     })
     .eq("id", conversationId)
   logWorktreeEvent("merge.request", {
     conv: conversationId.slice(0, 8),
     revert: true,
-    branch: conv.branch,
-    baseRef: conv.base_ref,
+    branch,
+    baseRef,
   })
 
   const existing = runners.get(conversationId)
@@ -1549,13 +1560,13 @@ app.post("/api/conversations/:id/revert", async (c) => {
     systemPromptOverride: buildRevertSystemPrompt({
       baseCwd,
       worktreePath,
-      branch: conv.branch,
-      baseRef: conv.base_ref,
+      branch,
+      baseRef,
       shippedSha,
     }),
     displayText: buildRevertNoticeText({
-      branch: conv.branch,
-      baseRef: conv.base_ref,
+      branch,
+      baseRef,
       shippedSha,
       legacy,
     }),
