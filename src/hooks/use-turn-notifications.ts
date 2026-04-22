@@ -32,7 +32,12 @@ function isAppFocused(): boolean {
   return typeof document !== "undefined" && !document.hidden && document.hasFocus()
 }
 
-export function showOsNotification(id: string, title: string, snippet: string) {
+export function showOsNotification(
+  id: string,
+  title: string,
+  snippet: string,
+  opts: { requireInteraction?: boolean } = {}
+) {
   if (typeof window === "undefined" || !("Notification" in window)) {
     console.warn("[notif] Notification API unavailable")
     return false
@@ -47,7 +52,8 @@ export function showOsNotification(id: string, title: string, snippet: string) {
       // tag dedupes per-conversation: a fresh turn replaces the previous notification
       tag: `ai-coder:conv:${id}`,
       renotify: true,
-      icon: "/favicon.ico",
+      icon: "/favicon.svg",
+      requireInteraction: opts.requireInteraction ?? false,
     } as NotificationOptions)
     n.onclick = () => {
       window.focus()

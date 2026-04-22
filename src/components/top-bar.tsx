@@ -125,16 +125,22 @@ function NotificationsTrigger() {
     console.debug("[notif] bell clicked, permission=", before)
 
     if (before === "granted") {
+      // `requireInteraction` keeps the notification in the OS tray until
+      // dismissed — so even if macOS hides the banner (Focus mode, "None"
+      // alert style, or tab-focus suppression), the user can still find it
+      // in Notification Center to verify it fired.
       const fired = showOsNotification(
         "test",
         "ai-coder notifications work",
-        "If no system banner appears, your OS / browser is suppressing it. Check macOS Notification Center settings for this browser."
+        "If you see this, OS notifications are working. Dismiss to continue.",
+        { requireInteraction: true }
       )
       if (fired) {
         toast.success("Test notification fired", {
           description:
-            "If no system banner appeared, OS-level notifications for the browser are off (macOS: System Settings → Notifications → [Browser]).",
-          duration: 6000,
+            "Don't see a banner? Check Notification Center (menu-bar clock on macOS). " +
+            "If it's missing there too: macOS System Settings → Notifications → Google Chrome → Allow Notifications ON, alert style Banners or Alerts (not None).",
+          duration: 10000,
         })
       } else {
         toast.error("Test notification failed to construct — check the console.", {
