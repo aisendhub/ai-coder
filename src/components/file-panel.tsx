@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { X, FileText, RefreshCw, Code, Eye } from "lucide-react"
+import { X, FileText, RefreshCw, Code, Eye, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable"
@@ -188,6 +188,34 @@ export const FilePanel = observer(function FilePanel() {
                 </TooltipContent>
               </Tooltip>
             )}
+            <Tooltip>
+              <TooltipTrigger>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={content === null}
+                  onClick={() => {
+                    if (!content || !path) return
+                    // Browser-side blob download. No server round-trip —
+                    // we already have the file bytes in state.
+                    const filename = path.split("/").pop() || "download"
+                    const blob = new Blob([content], { type: "application/octet-stream" })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement("a")
+                    a.href = url
+                    a.download = filename
+                    document.body.appendChild(a)
+                    a.click()
+                    a.remove()
+                    URL.revokeObjectURL(url)
+                  }}
+                  aria-label="Download file"
+                >
+                  <Download className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Download</TooltipContent>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger>
                 <Button size="sm" variant="ghost" onClick={fetchFile} disabled={loading}>
