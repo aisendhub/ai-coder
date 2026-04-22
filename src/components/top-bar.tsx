@@ -118,34 +118,18 @@ function NotificationsTrigger() {
   if (permission === "unsupported") return null
 
   const onClick = async () => {
-    // Always re-read permission at click time — state may be stale if the
-    // user changed it via browser settings.
-    const live = Notification.permission
-    setPermission(live)
-    console.debug("[notif] bell clicked, permission=", live)
+    // Re-read from the browser every click — state may be stale if the user
+    // changed it in site settings while the app was open.
+    const before = Notification.permission
+    setPermission(before)
+    console.debug("[notif] bell clicked, permission=", before)
 
-    if (live === "default") {
-      const result = await Notification.requestPermission().catch((err) => {
-        console.error("[notif] requestPermission threw", err)
-        return "denied" as const
-      })
-      console.debug("[notif] requestPermission result=", result)
-      setPermission(result)
-      if (result === "granted") {
-        toast.success("Notifications enabled — click the bell again to fire a test.")
-      } else if (result === "denied") {
-        toast.error("Notifications blocked. Enable them in browser settings, then reload.")
-      }
-      return
-    }
-
-    if (live === "granted") {
+    if (before === "granted") {
       const fired = showOsNotification(
         "test",
         "ai-coder notifications work",
         "If no system banner appears, your OS / browser is suppressing it. Check macOS Notification Center settings for this browser."
       )
-      // Always show an in-app confirmation so the click never feels dead.
       if (fired) {
         toast.success("Test notification fired", {
           description:
@@ -160,10 +144,39 @@ function NotificationsTrigger() {
       return
     }
 
-    // denied — can't re-prompt programmatically
-    toast.error("Notifications are blocked.", {
-      description: "Re-enable them in your browser's site settings, then reload.",
-      duration: 6000,
+    // Not granted (or we can't tell). Ask again — the browser will either
+    // show a native prompt (when `default`) or return the stored decision
+    // immediately (when `denied`). Either way we toast the outcome so the
+    // click never feels dead.
+    const result = await Notification.requestPermission().catch((err) => {
+      console.error("[notif] requestPermission threw", err)
+      return "denied" as const
+    })
+    console.debug("[notif] requestPermission result=", result)
+    setPermission(result)
+
+    if (result === "granted") {
+      toast.success("Notifications enabled", {
+        description: "Click the bell again to fire a test.",
+      })
+      return
+    }
+
+    if (result === "denied") {
+      toast.error("Notifications are blocked", {
+        description:
+          before === "denied"
+            ? "The browser won't re-prompt once blocked. Re-enable via the site settings (address-bar padlock → Notifications → Allow), then reload."
+            : "You chose Block. Re-enable via the site settings (address-bar padlock → Notifications → Allow), then reload.",
+        duration: 8000,
+      })
+      return
+    }
+
+    // Still `default` — user dismissed the native prompt without choosing.
+    toast.info("No choice made", {
+      description: "The prompt was dismissed. Click the bell again to try once more.",
+      duration: 5000,
     })
   }
 
