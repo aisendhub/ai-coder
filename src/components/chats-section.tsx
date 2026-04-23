@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ArrowUpRight, ChevronDown, ChevronRight, MessageSquare, Plus, Search } from "lucide-react"
+import { ArrowUpRight, ChevronDown, ChevronRight, MessageSquare, Plus, Search, X } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -149,6 +149,25 @@ export const ChatsSection = observer(function ChatsSection({
             onEnterFullscreen={onEnterFullscreen}
             onExitFullscreen={onExitFullscreen}
           />
+        )}
+        {fullscreen && onExitFullscreen && (
+          <Tooltip>
+            <TooltipTrigger>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="size-5"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onExitFullscreen()
+                }}
+                aria-label="Close"
+              >
+                <X className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Close (Esc)</TooltipContent>
+          </Tooltip>
         )}
       </span>
     </div>

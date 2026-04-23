@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ArrowUpRight, ChevronDown, ChevronRight, GitCommit, RefreshCw, Copy } from "lucide-react"
+import { ArrowUpRight, ChevronDown, ChevronRight, GitCommit, RefreshCw, Copy, X } from "lucide-react"
 import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -178,6 +178,24 @@ export const GitLogSection = observer(function GitLogSection({
                 onEnterFullscreen={onEnterFullscreen}
                 onExitFullscreen={onExitFullscreen}
               />
+            )}
+            {fullscreen && onExitFullscreen && (
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onExitFullscreen()
+                    }}
+                    aria-label="Close"
+                  >
+                    <X className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Close (Esc)</TooltipContent>
+              </Tooltip>
             )}
           </span>
         </div>
