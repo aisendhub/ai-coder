@@ -13,6 +13,7 @@ import { CodePanel } from "@/components/code-panel"
 import { FilePanelSlot } from "@/components/file-panel"
 import { ServicesPanel } from "@/components/services-panel"
 import { TerminalPanel } from "@/components/terminal-panel"
+import { FileTreePanel } from "@/components/file-tree-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { TopBar } from "@/components/top-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -80,6 +81,7 @@ function DesktopLayout() {
   const [rightOpen, setRightOpen] = usePersistentState("ai-coder:panels:rightOpen", true)
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
+  const [fileTreeOpen, setFileTreeOpen] = usePersistentState("ai-coder:panels:fileTreeOpen", false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
   const [servicesCollapsed, setServicesCollapsed] = useState(false)
@@ -95,7 +97,7 @@ function DesktopLayout() {
       <div className="h-svh w-screen overflow-hidden">
         <ResizablePanelGroup
           direction="horizontal"
-          autoSaveId="ai-coder-main-3pane"
+          autoSaveId="ai-coder-main-4pane"
           className="h-full w-full"
         >
           <ResizablePanel
@@ -125,18 +127,36 @@ function DesktopLayout() {
                 onTerminalOpenChange={setTerminalOpen}
                 servicesOpen={servicesOpen}
                 onServicesOpenChange={setServicesOpen}
+                fileTreeOpen={fileTreeOpen}
+                onFileTreeOpenChange={setFileTreeOpen}
               />
               <div className="flex-1 min-h-0 overflow-hidden">
                 <ChatPanel />
               </div>
             </div>
           </ResizablePanel>
+          {fileTreeOpen && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel
+                id="fileTree"
+                order={3}
+                defaultSize={22}
+                minSize={15}
+                maxSize={45}
+              >
+                <div className="h-full min-h-0 overflow-hidden border-l">
+                  <FileTreePanel onClose={() => setFileTreeOpen(false)} />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
           {rightOpen && (
             <>
               <ResizableHandle />
               <ResizablePanel
                 id="code"
-                order={3}
+                order={4}
                 defaultSize={32}
                 minSize={20}
                 maxSize={70}
@@ -157,7 +177,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="terminal"
-                order={4}
+                order={5}
                 defaultSize={28}
                 minSize={18}
                 maxSize={60}
@@ -173,7 +193,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="services"
-                order={5}
+                order={6}
                 defaultSize={28}
                 minSize={22}
                 maxSize={50}
@@ -200,6 +220,9 @@ function MobileLayout() {
   const [rightOpen, setRightOpen] = usePersistentState("ai-coder:panels:mobile:rightOpen", false)
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:mobile:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:mobile:servicesOpen", false)
+  // Mobile hides the file-tree trigger (handled inside FileTreeTrigger);
+  // we keep a no-op state here just to satisfy TopBar's prop shape.
+  const [fileTreeOpen, setFileTreeOpen] = useState(false)
   return (
     <ChatStateProvider>
       <SidebarProvider style={{ height: "100svh" } as React.CSSProperties}>
@@ -212,6 +235,8 @@ function MobileLayout() {
             onTerminalOpenChange={setTerminalOpen}
             servicesOpen={servicesOpen}
             onServicesOpenChange={setServicesOpen}
+            fileTreeOpen={fileTreeOpen}
+            onFileTreeOpenChange={setFileTreeOpen}
           />
           <div className="flex-1 min-h-0 overflow-hidden">
             <ChatPanel />

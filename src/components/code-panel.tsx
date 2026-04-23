@@ -9,6 +9,74 @@ import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
 import { highlightCode, languageForPath } from "@/lib/highlight"
 import { workspace } from "@/models"
+import { GitLogSection } from "@/components/git-log-panel"
+import { usePersistentState } from "@/hooks/use-persistent-state"
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable"
+
+// CodePanel is the right-side panel wrapper. It hosts two sections stacked
+// vertically — Changes on top, Git log on bottom — with a drag-resizable
+// split between them (same pattern as the services panel's list/logs).
+// Each section's header is also accordion-collapsible; when one section is
+// collapsed the other takes the remaining space and the resize handle goes
+// away (there's nothing to size against). Open-states persist across reloads.
+export const CodePanel = observer(function CodePanel({
+  collapsed = false,
+  onClose,
+}: { collapsed?: boolean; onClose?: () => void } = {}) {
+  const [changesOpen, setChangesOpen] = usePersistentState(
+    "ai-coder:panels:changesOpen",
+    true
+  )
+  const [gitLogOpen, setGitLogOpen] = usePersistentState(
+    "ai-coder:panels:gitLogOpen",
+    false
+  )
+  const toggleChanges = () => setChangesOpen((v) => !v)
+  const toggleGitLog = () => setGitLogOpen((v) => !v)
+
+  if (collapsed) {
+    // Narrow rail — accordions don't make sense. Show just the Changes rail.
+    return <ChangesSection collapsed onClose={onClose} />
+  }
+
+  if (changesOpen && gitLogOpen) {
+    return (
+      <ResizablePanelGroup direction="vertical" autoSaveId="ai-coder-code-split">
+        <ResizablePanel id="changes" order={1} defaultSize={65} minSize={15}>
+          <div className="h-full min-h-0 flex flex-col">
+            <ChangesSection
+              expanded
+              onToggleExpanded={toggleChanges}
+              onClose={onClose}
+            />
+          </div>
+        </ResizablePanel>
+        <ResizableHandle />
+        <ResizablePanel id="gitlog" order={2} defaultSize={35} minSize={15}>
+          <div className="h-full min-h-0 flex flex-col">
+            <GitLogSection expanded onToggleExpanded={toggleGitLog} />
+          </div>
+        </ResizablePanel>
+      </ResizablePanelGroup>
+    )
+  }
+
+  // One or zero sections expanded: simple flex column, no handle needed.
+  return (
+    <div className="flex h-full flex-col min-h-0">
+      <ChangesSection
+        expanded={changesOpen}
+        onToggleExpanded={toggleChanges}
+        onClose={onClose}
+      />
+      <GitLogSection expanded={gitLogOpen} onToggleExpanded={toggleGitLog} />
+    </div>
+  )
+})
 
 type ChangedFile = {
   path: string
@@ -37,10 +105,17 @@ async function dispatchPrompt(prompt: string) {
   void target.send(prompt)
 }
 
-export const CodePanel = observer(function CodePanel({
+const ChangesSection = observer(function ChangesSection({
   collapsed = false,
   onClose,
-}: { collapsed?: boolean; onClose?: () => void } = {}) {
+  expanded = true,
+  onToggleExpanded,
+}: {
+  collapsed?: boolean
+  onClose?: () => void
+  expanded?: boolean
+  onToggleExpanded?: () => void
+} = {}) {
   const active = workspace.active
   const conversationId = active?.id ?? null
   // Merge action only makes sense on tasks with their own worktree branch.
@@ -210,16 +285,34 @@ export const CodePanel = observer(function CodePanel({
     )
   }
 
+  const accordion = !!onToggleExpanded
   return (
-    <div className="@container flex h-full flex-col min-h-0">
+    <div className={cn("@container flex flex-col min-h-0", expanded ? "flex-1" : "shrink-0")}>
       <div className="shrink-0 border-b">
-        <div className="flex h-14 items-center justify-between px-3 gap-2">
+        <div
+          className={cn(
+            "flex h-14 items-center justify-between px-3 gap-2",
+            accordion && "cursor-pointer hover:bg-accent/40"
+          )}
+          onClick={accordion ? onToggleExpanded : undefined}
+          role={accordion ? "button" : undefined}
+          aria-expanded={accordion ? expanded : undefined}
+        >
           <div className="flex items-center gap-2 min-w-0">
+            {accordion &&
+              (expanded ? (
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              ))}
             <FileCode className="size-4 shrink-0" />
             <h2 className="text-sm font-medium @max-[280px]:hidden">Changes</h2>
             <span className="text-xs text-muted-foreground">{files.length}</span>
           </div>
-          <div className="flex items-center gap-1 shrink-0">
+          <div
+            className="flex items-center gap-1 shrink-0"
+            onClick={accordion ? (e) => e.stopPropagation() : undefined}
+          >
             {showMergeAction ? (
               // Task with a worktree → Merge button. The server injects a
               // scripted prompt; the agent runs the merge in the chat. Commit
@@ -310,35 +403,38 @@ export const CodePanel = observer(function CodePanel({
             )}
           </div>
         </div>
-        <div className="flex items-center gap-1 px-3 pb-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="text"
-              placeholder="Filter files…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="h-7 w-full rounded-md border bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-            />
+        {expanded && (
+          <div className="flex items-center gap-1 px-3 pb-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Filter files…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="h-7 w-full rounded-md border bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            </div>
+            <Tooltip>
+              <TooltipTrigger>
+                <Button size="sm" variant="ghost" onClick={expandAll} disabled={filteredFiles.length === 0}>
+                  <ChevronsUpDown className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Expand all</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger>
+                <Button size="sm" variant="ghost" onClick={collapseAll} disabled={filteredFiles.length === 0}>
+                  <ChevronsDownUp className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Collapse all</TooltipContent>
+            </Tooltip>
           </div>
-          <Tooltip>
-            <TooltipTrigger>
-              <Button size="sm" variant="ghost" onClick={expandAll} disabled={filteredFiles.length === 0}>
-                <ChevronsUpDown className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Expand all</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger>
-              <Button size="sm" variant="ghost" onClick={collapseAll} disabled={filteredFiles.length === 0}>
-                <ChevronsDownUp className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Collapse all</TooltipContent>
-          </Tooltip>
-        </div>
+        )}
       </div>
+      {expanded && (
       <ScrollArea className="flex-1 min-h-0">
         {error && (
           <div className="p-3 text-xs text-red-600 bg-red-500/10 m-3 rounded-md flex items-center justify-between gap-2">
@@ -369,6 +465,7 @@ export const CodePanel = observer(function CodePanel({
           ))}
         </div>
       </ScrollArea>
+      )}
     </div>
   )
 })

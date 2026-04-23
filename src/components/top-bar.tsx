@@ -6,7 +6,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
-import { ChangesTrigger, TerminalTrigger } from "@/components/right-panel"
+import { ChangesTrigger, TerminalTrigger, FileTreeTrigger } from "@/components/right-panel"
 import { ServicesTrigger } from "@/components/services-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { showOsNotification } from "@/hooks/use-turn-notifications"
@@ -19,6 +19,8 @@ type Props = {
   onTerminalOpenChange: (open: boolean) => void
   servicesOpen: boolean
   onServicesOpenChange: (open: boolean) => void
+  fileTreeOpen: boolean
+  onFileTreeOpenChange: (open: boolean) => void
 }
 
 export const TopBar = observer(function TopBar({
@@ -28,6 +30,8 @@ export const TopBar = observer(function TopBar({
   onTerminalOpenChange,
   servicesOpen,
   onServicesOpenChange,
+  fileTreeOpen,
+  onFileTreeOpenChange,
 }: Props) {
   const active = workspace.active
   const title = active?.title ?? "New chat"
@@ -93,6 +97,7 @@ export const TopBar = observer(function TopBar({
         )}
         <NotificationsTrigger />
         <ServicesTrigger open={servicesOpen} onOpenChange={onServicesOpenChange} />
+        <FileTreeTrigger open={fileTreeOpen} onOpenChange={onFileTreeOpenChange} />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
         <TerminalTrigger open={terminalOpen} onOpenChange={onTerminalOpenChange} />
       </div>

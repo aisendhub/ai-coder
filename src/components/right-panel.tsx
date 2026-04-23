@@ -1,4 +1,4 @@
-import { GitBranch, Terminal as TerminalIcon, PanelRightOpen } from "lucide-react"
+import { GitBranch, Terminal as TerminalIcon, PanelRightOpen, FolderTree } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -108,6 +108,37 @@ export function TerminalTrigger({
         <TerminalIcon className="size-5" />
       </TooltipTrigger>
       <TooltipContent>{open ? "Close terminal" : "Open terminal"}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+export function FileTreeTrigger({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const isMobile = useIsMobile()
+  if (isMobile) return null
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenChange(!open)}
+            aria-label={open ? "Close files" : "Open files"}
+            aria-pressed={open}
+            className={cn(open && "bg-accent text-accent-foreground")}
+          />
+        }
+      >
+        <FolderTree className="size-5" />
+      </TooltipTrigger>
+      <TooltipContent>{open ? "Close files" : "Open files"}</TooltipContent>
     </Tooltip>
   )
 }
