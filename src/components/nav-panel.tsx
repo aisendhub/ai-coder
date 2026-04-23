@@ -310,21 +310,37 @@ export const NavPanel = observer(function NavPanel({
               onClick={(e) => e.stopPropagation()}
             >
               <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="size-5"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setBoardOpen(true)
-                      }}
-                      aria-label="Open task board"
-                    />
-                  }
-                >
-                  <LayoutGrid className="size-3" />
+                <TooltipTrigger>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void handleNewTask()
+                    }}
+                    disabled={!activeProject}
+                    aria-label="New task"
+                  >
+                    <Plus className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  {activeProject ? "New task" : "Select a project first"}
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setBoardOpen(true)
+                    }}
+                    aria-label="Open task board"
+                  >
+                    <LayoutGrid className="size-3.5" />
+                  </Button>
                 </TooltipTrigger>
                 <TooltipContent side="right">Task board</TooltipContent>
               </Tooltip>

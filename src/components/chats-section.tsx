@@ -125,7 +125,6 @@ export const ChatsSection = observer(function ChatsSection({
             <Button
               size="sm"
               variant="ghost"
-              className="size-5"
               onClick={(e) => {
                 e.stopPropagation()
                 void handleNewChat()
@@ -133,7 +132,7 @@ export const ChatsSection = observer(function ChatsSection({
               disabled={!activeProject}
               aria-label="New chat"
             >
-              <Plus className="size-3" />
+              <Plus className="size-3.5" />
             </Button>
           </TooltipTrigger>
           <TooltipContent side="right">
