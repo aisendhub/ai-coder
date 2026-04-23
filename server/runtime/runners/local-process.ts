@@ -53,12 +53,20 @@ export const localProcessRunner: Runner = {
     const handleId = pid != null ? String(pid) : "0"
     if (pid != null) children.set(handleId, child)
 
+    // Log which manifest-provided env keys made it into the child's env.
+    // Values intentionally omitted — secrets should never hit logs — but the
+    // key list tells us whether manifest.env survived the round-trip through
+    // UI → DB → runner, which is a common "why isn't FOO set" confusion.
+    const manifestEnvKeys = Object.keys(manifest.env ?? {})
     logRuntimeEvent("spawn", {
       runner: "local-process",
       pid: pid ?? "null",
       port,
       cwd: manifest.cwd,
       start: manifest.start,
+      manifestEnvKeys: manifestEnvKeys.length
+        ? manifestEnvKeys.join(",")
+        : "(none)",
     })
 
     const outFramer = createLineFramer((text) =>

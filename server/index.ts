@@ -44,6 +44,10 @@ import {
   buildDetectServicesSystemPrompt,
   buildDetectServicesNoticeText,
   extractDetectedManifest,
+  buildVerifyRunPrompt,
+  buildVerifyRunSystemPrompt,
+  buildVerifyRunNoticeText,
+  type VerifyRunSnapshot,
   type EvaluatorResult,
 } from "./agent-loop"
 import {
@@ -51,7 +55,9 @@ import {
   mergeManifest,
   startService,
   stopService,
+  stopServiceAndWait,
   getService,
+  getLogHistory,
   listServices,
   subscribeLogs,
   removeService,
@@ -401,6 +407,10 @@ async function startRunner(args: {
     // iterations always need their own row (auto-loop nextSteps; nudge
     // re-entry handles its skip via the same flag flipped per iteration).
     let skipUserInsertThisIteration = skipFirstUserInsert
+    // Hoisted so the outer finally's reconcile hooks (merge / detect-services)
+    // can read the LAST iteration's assistant output after the while exits.
+    // Gets reset at the top of each iteration.
+    let assistantText = ""
 
     try {
       while (true) {
@@ -410,7 +420,7 @@ async function startRunner(args: {
 
         // Per-iteration state. The flushPersist closure captures these by
         // reference so it always writes the current iteration's transcript.
-        let assistantText = ""
+        assistantText = ""
         const assistantEvents: StreamEvent[] = []
         let assistantDbId: string | null = null
         let pendingFlush = false
@@ -800,8 +810,25 @@ async function reconcileDetectedServicesIfAny(
   emit: (event: string, data: unknown) => void
 ): Promise<void> {
   if (!sb) return
+  const textLen = assistantText?.length ?? 0
+  const hasTag = typeof assistantText === "string" && assistantText.includes("<run-manifest")
+  if (!hasTag) {
+    if (textLen > 0) {
+      console.log(
+        `[services.reconcile] no <run-manifest> block in assistant text ` +
+        `(len=${textLen}, tail="${assistantText.slice(-120).replace(/\n/g, " ")}")`
+      )
+    }
+    return
+  }
   const proposal = extractDetectedManifest(assistantText)
-  if (!proposal) return
+  if (!proposal) {
+    console.warn(
+      `[services.reconcile] <run-manifest> block present but parse failed ` +
+      `(len=${textLen}, tail="${assistantText.slice(-200).replace(/\n/g, " ")}")`
+    )
+    return
+  }
 
   const { data: conv } = await sb
     .from("conversations")
@@ -816,6 +843,7 @@ async function reconcileDetectedServicesIfAny(
     env: proposal.env ?? {},
   }
   if (proposal.build) manifest.build = proposal.build
+  if (proposal.port != null) manifest.port = proposal.port
 
   const { error } = await sb
     .from("projects")
@@ -1029,6 +1057,85 @@ app.get("/api/changes", async (c) => {
     }
     return c.json({ workspace: cwd, files: withDiffs, unpushedCount, branch, baseRef })
   } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+// Recent commits for the conversation's cwd. Uses ASCII unit/record separators
+// so we don't fight subject lines that contain arbitrary punctuation.
+app.get("/api/git/log", async (c) => {
+  try {
+    const conversationId = c.req.query("conversationId")
+    if (!conversationId) return c.json({ commits: [], branch: "" })
+    const cwd = await cwdForConversation(conversationId)
+    const limit = Math.min(parseInt(c.req.query("limit") ?? "50", 10) || 50, 500)
+    const FS = "\x1f"
+    const RS = "\x1e"
+    const { stdout } = await execFileP(
+      "git",
+      ["log", `--pretty=format:%H${FS}%h${FS}%an${FS}%ae${FS}%ct${FS}%s${RS}`, "-n", String(limit)],
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
+    )
+    const commits = stdout
+      .split(RS)
+      .map((s) => s.replace(/^\n/, ""))
+      .filter(Boolean)
+      .map((line) => {
+        const [sha, shortSha, authorName, authorEmail, committerTime, subject] = line.split(FS)
+        return {
+          sha,
+          shortSha,
+          authorName,
+          authorEmail,
+          committerTime: (parseInt(committerTime, 10) || 0) * 1000,
+          subject: subject ?? "",
+        }
+      })
+    let branch = ""
+    try {
+      const { stdout: b } = await execFileP("git", ["branch", "--show-current"], { cwd })
+      branch = b.trim()
+    } catch {
+      // detached HEAD or not a git repo
+    }
+    return c.json({ commits, branch })
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+// Directory listing scoped to the conversation's cwd. Used by the file-tree
+// panel. Hides the usual heavyweights (.git, node_modules) and skips dotfiles
+// behind a flag so the default view isn't noisy.
+app.get("/api/tree", async (c) => {
+  try {
+    const conversationId = c.req.query("conversationId")
+    if (!conversationId) return c.json({ path: "", entries: [] })
+    const cwd = await cwdForConversation(conversationId)
+    const rel = c.req.query("path") ?? ""
+    const showHidden = c.req.query("hidden") === "1"
+    const abs = resolve(cwd, rel)
+    if (!abs.startsWith(cwd + "/") && abs !== cwd) {
+      return c.json({ error: "path escapes project root" }, 400)
+    }
+    const dirents = await fsp.readdir(abs, { withFileTypes: true })
+    const SKIP = new Set([".git", "node_modules"])
+    const entries = dirents
+      .filter((d) => !SKIP.has(d.name))
+      .filter((d) => showHidden || !d.name.startsWith("."))
+      .map((d) => ({
+        name: d.name,
+        type: d.isDirectory() ? "dir" : d.isFile() ? "file" : "other",
+      }))
+      .sort((a, b) => {
+        if (a.type === b.type) return a.name.localeCompare(b.name)
+        return a.type === "dir" ? -1 : 1
+      })
+    return c.json({ path: rel, entries })
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "ENOENT") return c.json({ error: "not found" }, 404)
+    if (code === "ENOTDIR") return c.json({ error: "not a directory" }, 400)
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
@@ -1544,6 +1651,96 @@ app.post("/api/conversations/:id/detect-services", async (c) => {
   })
 
   return c.json({ started: true })
+})
+
+// Feed a service's captured output back to the conversation agent. Used on
+// first run after configuration (closes the loop: agent configures → host
+// runs → agent verifies/troubleshoots). HTTP returns immediately; a
+// background watcher waits up to `watchMs` for the service to settle (or
+// exit early on crash), snapshots logs + status, and injects a scripted
+// oneShot `role: "notice"` turn. Same pattern as /merge and /detect-services.
+app.post("/api/conversations/:id/verify-run", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const conversationId = c.req.param("id")
+  const body = await c.req.json<{
+    userId?: string
+    serviceId?: string
+    watchMs?: number
+  }>().catch(() => ({}))
+  const userId = body.userId
+  const serviceId = body.serviceId
+  const watchMs = Math.min(Math.max(body.watchMs ?? 8000, 2000), 30_000)
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  if (!serviceId) return c.json({ error: "serviceId required" }, 400)
+
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, user_id, session_id")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
+  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
+
+  const initial = getService(serviceId, userId)
+  if (!initial) return c.json({ error: "service not found" }, 404)
+
+  // Fire-and-forget. HTTP returns right away; the chat fills in once the
+  // watcher settles and the agent turn actually runs.
+  void (async () => {
+    try {
+      // Wait for the service to settle. Early-exit on terminal state so we
+      // don't sit on a 30s deadline for a service that crashed 2s in.
+      const deadline = Date.now() + watchMs
+      while (Date.now() < deadline) {
+        const now = getService(serviceId, userId)
+        if (!now) break
+        if (now.status === "stopped" || now.status === "crashed") break
+        await new Promise((r) => setTimeout(r, 500))
+      }
+
+      const final = getService(serviceId, userId) ?? initial
+      const history = getLogHistory(serviceId, userId)
+      const snapshot: VerifyRunSnapshot = {
+        stack: final.stack,
+        start: final.start,
+        status: final.status,
+        pid: final.pid,
+        port: final.port,
+        url: final.url,
+        exitCode: final.exitCode,
+        error: final.error,
+        startedAt: final.startedAt,
+        stoppedAt: final.stoppedAt,
+      }
+
+      // Let any active runner finish first so we don't race an in-flight turn.
+      const existing = runners.get(conversationId)
+      if (existing && !existing.done) {
+        await existing.promise.catch(() => {})
+      }
+
+      const prompt = buildVerifyRunPrompt({
+        snapshot,
+        logs: history,
+        watchMs,
+      })
+      const displayText = buildVerifyRunNoticeText({ snapshot })
+
+      void startRunner({
+        conversationId,
+        prompt,
+        resumeSessionId: conv.session_id ?? undefined,
+        oneShot: true,
+        systemPromptOverride: buildVerifyRunSystemPrompt(),
+        displayText,
+        displayRole: "notice",
+      })
+    } catch (err) {
+      console.error("[verify-run] background task failed:", err)
+    }
+  })()
+
+  return c.json({ started: true, watchMs })
 })
 
 function buildMergeNoticeText(input: { branch: string; baseRef: string }): string {
@@ -2327,7 +2524,52 @@ app.post("/api/services/start", async (c) => {
     )
   }
 
+  // Restart semantics: if a service for this exact scope (user + project +
+  // conversation) is still live in the registry, stop it first and wait for
+  // the process group to exit so its port releases. Common after a page
+  // reload — the in-memory registry survives the client disconnect, so the
+  // next Run would otherwise spawn a duplicate and the old process would
+  // keep its port. Also silently drops any previously-stopped entries for
+  // the same scope so the registry doesn't accumulate stale rows.
+  const scopedExisting = listServices({
+    ownerId: userId,
+    projectId,
+    worktreeId: conversationId ?? null,
+  })
+  for (const prev of scopedExisting) {
+    const isLive =
+      prev.status === "running" ||
+      prev.status === "starting" ||
+      prev.status === "stopping"
+    if (isLive) {
+      try {
+        await stopServiceAndWait(prev.id, userId)
+        console.log(
+          `[services.start] stopped previous ${prev.id.slice(0, 8)} (was ${prev.status}) before restart`
+        )
+      } catch (err) {
+        console.warn(
+          `[services.start] failed to stop previous ${prev.id.slice(0, 8)}:`,
+          (err as Error).message
+        )
+      }
+    }
+    // Always clean the entry out of the registry — dead or alive after the
+    // stop attempt — so only the new instance represents this scope.
+    try {
+      removeService(prev.id, userId)
+    } catch {
+      /* entry may have been GC'd already; ignore */
+    }
+  }
+
   try {
+    // Preferred port priority: per-worktree assigned_port first (keeps
+    // localhost URL stable across restarts for this conversation), then the
+    // manifest's port (what the agent inferred or what the user typed into
+    // the editor). Registry falls through to auto-allocate in 4100-4999 if
+    // both are taken.
+    const preferredPort = ctx.assignedPort ?? effective.port ?? null
     const snap = await startService(
       effective,
       {
@@ -2336,7 +2578,7 @@ app.post("/api/services/start", async (c) => {
         worktreeId: conversationId ?? null,
         label: body.label ?? null,
       },
-      { preferredPort: ctx.assignedPort, runnerId: body.runnerId }
+      { preferredPort, runnerId: body.runnerId }
     )
     // Persist assigned_port on the conversation so localhost:<port> stays
     // stable across restarts. Write what we actually bound to; if the

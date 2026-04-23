@@ -15,6 +15,7 @@ import {
   Link2,
   Unlink,
   Sparkles,
+  Settings2,
 } from "lucide-react"
 
 import {
@@ -32,6 +33,11 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { X } from "lucide-react"
+import { Terminal as XTerm } from "@xterm/xterm"
+import { FitAddon } from "@xterm/addon-fit"
+import { WebLinksAddon } from "@xterm/addon-web-links"
+import { SearchAddon } from "@xterm/addon-search"
+import "@xterm/xterm/css/xterm.css"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -271,7 +277,78 @@ export const ServicesPanel = observer(function ServicesPanel({
     // to a task worktree means the detect target cwd also changes.
   }, [userId, targetProjectId, services, active?.id])
 
-  const [askingAgent, setAskingAgent] = useState(false)
+  // Ask-the-agent lifecycle has two phases:
+  //   'posting'    → HTTP request in flight (button shows spinner)
+  //   'waiting'    → agent is working; card shows "Configuring…" state
+  //   null         → idle (regular empty state or card)
+  //
+  // `ai-coder:turn-done` only fires for client-initiated turns (runTurn).
+  // Server-initiated scripted turns (detect-services, merge, verify-run) go
+  // straight through startRunner and never dispatch that event — so we can't
+  // rely on it here. Instead we poll the manifest endpoint while waiting and
+  // clear the phase the moment `cached` flips to non-null (reconcile saved).
+  const [configurePhase, setConfigurePhase] = useState<"posting" | "waiting" | null>(null)
+
+  useEffect(() => {
+    if (configurePhase !== "waiting") return
+    if (!userId || !targetProjectId) return
+
+    let cancelled = false
+    const maxMs = 90_000
+    const startedAt = Date.now()
+
+    const probeOnce = async () => {
+      if (cancelled) return
+      try {
+        const view = await services.fetchProjectManifest(
+          userId,
+          targetProjectId,
+          active?.id ?? null
+        )
+        if (cancelled) return
+        setManifestProbe({
+          loading: false,
+          cached: view.cached,
+          detected: view.detected,
+          cwd: view.cwd,
+        })
+        if (view.cached) {
+          setConfigurePhase(null)
+          return true
+        }
+      } catch {
+        /* keep polling */
+      }
+      return false
+    }
+
+    // First probe immediately (the agent might have finished between the
+    // POST response and this effect running), then every 1.5s until saved
+    // or we hit the safety deadline.
+    void probeOnce()
+    const interval = window.setInterval(async () => {
+      const elapsed = Date.now() - startedAt
+      if (elapsed > maxMs) {
+        if (!cancelled) setConfigurePhase(null)
+        window.clearInterval(interval)
+        return
+      }
+      const hit = await probeOnce()
+      if (hit) window.clearInterval(interval)
+    }, 1500)
+
+    // Also clear on client-initiated turn-done, in case the user sends a
+    // chat that the agent replies to during the configuring window.
+    const onTurnDone = () => setConfigurePhase(null)
+    window.addEventListener("ai-coder:turn-done", onTurnDone)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      window.removeEventListener("ai-coder:turn-done", onTurnDone)
+    }
+  }, [configurePhase, userId, targetProjectId, active?.id, services])
+
   const onAskAgent = async () => {
     if (!userId || !active?.id) {
       toast.error("Open a chat to ask the agent", {
@@ -279,7 +356,7 @@ export const ServicesPanel = observer(function ServicesPanel({
       })
       return
     }
-    setAskingAgent(true)
+    setConfigurePhase("posting")
     try {
       const res = await fetch(`/api/conversations/${active.id}/detect-services`, {
         method: "POST",
@@ -290,13 +367,13 @@ export const ServicesPanel = observer(function ServicesPanel({
         const body = (await res.json().catch(() => ({}))) as { error?: string }
         throw new Error(body.error || `HTTP ${res.status}`)
       }
-      toast.info("Asked the agent", {
-        description: "Watch the chat — it'll inspect the repo and propose a run config.",
+      setConfigurePhase("waiting")
+      toast.info("Configuring services…", {
+        description: "The agent is inspecting the repo — follow along in chat.",
       })
     } catch (err) {
+      setConfigurePhase(null)
       toast.error("Couldn't ask agent", { description: (err as Error).message })
-    } finally {
-      setAskingAgent(false)
     }
   }
 
@@ -446,12 +523,23 @@ export const ServicesPanel = observer(function ServicesPanel({
       }}
       onConfigure={onEditManifest}
       onDelete={() => { void onDeleteManifest() }}
+      onCheckWithAgent={instance && active?.id ? async () => {
+        if (!userId) return
+        try {
+          await services.verifyRun(userId, active.id, instance.id)
+          toast.info("Asked the agent to check", {
+            description: "Watch the chat — it'll read the service's output and confirm or diagnose.",
+          })
+        } catch (err) {
+          toast.error("Couldn't ask agent", { description: (err as Error).message })
+        }
+      } : undefined}
     />
   ) : (
     <EmptyState
       probe={manifestProbe}
       hasActiveConversation={!!active?.id}
-      askingAgent={askingAgent}
+      configurePhase={configurePhase}
       onUseDetected={async () => {
         if (!userId || !targetProjectId || !manifestProbe?.detected) return
         try {
@@ -460,9 +548,31 @@ export const ServicesPanel = observer(function ServicesPanel({
             cwd: manifestProbe.cwd,
           })
           setManifestProbe((p) => p ? { ...p, cached: manifestProbe.detected } : p)
-          toast.success("Start command saved")
+          // Start the service immediately and — if we have a conversation —
+          // ask the agent to verify the first run. This is the "Use & run"
+          // shortcut: one click instead of save → Run → Check.
+          const snap = await services.start({
+            userId,
+            projectId: targetProjectId,
+            conversationId: active?.id ?? null,
+            label: targetLabel,
+            runnerId,
+          })
+          toast.success("Service started", {
+            description: active?.id
+              ? "Asking the agent to watch the output…"
+              : undefined,
+          })
+          if (active?.id) {
+            try {
+              await services.verifyRun(userId, active.id, snap.id)
+            } catch (err) {
+              // Non-fatal — service is already running.
+              console.warn("[verify-run] queue failed:", (err as Error).message)
+            }
+          }
         } catch (err) {
-          toast.error("Couldn't save", { description: (err as Error).message })
+          toast.error("Couldn't save & run", { description: (err as Error).message })
         }
       }}
       onEditManual={onEditManifest}
@@ -595,6 +705,9 @@ const RunnerSelect = observer(function RunnerSelect({
 
 // ── Manifest editor ──────────────────────────────────────────────────────────
 
+// Parse dotenv-style "KEY=value" lines. Trims both sides, drops blank lines
+// and comments, strips matching surrounding single/double quotes so values
+// like `FOO="bar baz"` don't end up with literal quotes in the env.
 function parseEnv(text: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const raw of text.split("\n")) {
@@ -602,7 +715,16 @@ function parseEnv(text: string): Record<string, string> {
     if (!line || line.startsWith("#")) continue
     const idx = line.indexOf("=")
     if (idx === -1) continue
-    out[line.slice(0, idx).trim()] = line.slice(idx + 1)
+    const key = line.slice(0, idx).trim()
+    if (!key) continue
+    let value = line.slice(idx + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    out[key] = value
   }
   return out
 }
@@ -625,6 +747,7 @@ function ManifestEditor({
   const [stack, setStack] = useState<string>(init.stack ?? "custom")
   const [start, setStart] = useState<string>(init.start ?? "")
   const [build, setBuild] = useState<string>(init.build ?? "")
+  const [portText, setPortText] = useState<string>(init.port != null ? String(init.port) : "")
   const [envText, setEnvText] = useState<string>(formatEnv(init.env))
   // Track user edits so LLM arrival doesn't clobber manual typing. Keyed by
   // mode-projectId so "regenerating" for a different scope resets the guard.
@@ -639,8 +762,9 @@ function ManifestEditor({
     setStack(init.stack ?? "custom")
     setStart(init.start ?? "")
     setBuild(init.build ?? "")
+    setPortText(init.port != null ? String(init.port) : "")
     setEnvText(formatEnv(init.env))
-  }, [init.stack, init.start, init.build, init.env])
+  }, [init.stack, init.start, init.build, init.port, init.env])
 
   const markEdited = () => { editedRef.current = true }
 
@@ -657,6 +781,10 @@ function ManifestEditor({
       env: parseEnv(envText),
     }
     if (build.trim()) manifest.build = build.trim()
+    const portNum = parseInt(portText.trim(), 10)
+    if (Number.isFinite(portNum) && portNum >= 1024 && portNum <= 65535) {
+      manifest.port = portNum
+    }
     onSave(manifest, run)
   }
 
@@ -748,7 +876,26 @@ function ManifestEditor({
             autoFocus
           />
           <div className="text-xs text-muted-foreground">
-            Port is auto-assigned. Use <code className="font-mono">$PORT</code> in the command if your app needs it injected.
+            The host injects <code className="font-mono">PORT</code> as an env var. Use <code className="font-mono">$PORT</code> inline if your command needs the port as an argument.
+          </div>
+        </label>
+
+        <label className="block space-y-1">
+          <div className="text-xs font-medium">
+            Bind port <span className="text-muted-foreground">(optional)</span>
+          </div>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={1024}
+            max={65535}
+            value={portText}
+            onChange={(e) => { setPortText(e.target.value); markEdited() }}
+            placeholder="e.g. 3000"
+            className="font-mono text-sm w-32"
+          />
+          <div className="text-xs text-muted-foreground">
+            The port your app listens on by default (e.g. <code>3000</code>, <code>5173</code>, <code>8000</code>). We'll try to bind here first so URLs stay stable — if taken, we fall through to <code className="font-mono">4100–4999</code>.
           </div>
         </label>
 
@@ -807,7 +954,7 @@ function ManifestEditor({
 function EmptyState({
   probe,
   hasActiveConversation,
-  askingAgent,
+  configurePhase,
   onUseDetected,
   onEditManual,
   onAskAgent,
@@ -819,11 +966,31 @@ function EmptyState({
     cwd: string
   } | null
   hasActiveConversation: boolean
-  askingAgent: boolean
+  configurePhase: "posting" | "waiting" | null
   onUseDetected: () => Promise<void>
   onEditManual: () => void
   onAskAgent: () => void
 }) {
+  // Agent is actively configuring in chat. Card replaces the empty state so
+  // the user sees progress here too, not just in the conversation.
+  if (configurePhase === "waiting") {
+    return (
+      <div className="px-4 py-5">
+        <div className="rounded-md border bg-amber-500/10 border-amber-500/40 p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <Sparkles className="size-4 text-amber-500 shrink-0 animate-pulse" />
+            <div className="text-sm font-medium">Configuring services…</div>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            The agent is inspecting the repo and proposing a run config.
+            Watch the chat for the step-by-step — this card will flip to the
+            service once it's saved.
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (!probe || probe.loading) {
     return (
       <div className="px-4 py-8 flex items-center justify-center text-xs text-muted-foreground gap-2">
@@ -844,6 +1011,8 @@ function EmptyState({
     )
   }
 
+  const posting = configurePhase === "posting"
+
   return (
     <div className="px-4 py-5 space-y-4">
       {probe.detected ? (
@@ -860,7 +1029,8 @@ function EmptyState({
           </div>
           <div className="flex items-center gap-2 pt-1">
             <Button size="sm" onClick={() => { void onUseDetected() }}>
-              Use this
+              <Play className="size-3.5" />
+              Use & run
             </Button>
             <Button variant="outline" size="sm" onClick={onEditManual}>
               Edit
@@ -890,9 +1060,9 @@ function EmptyState({
             variant="outline"
             size="sm"
             onClick={onAskAgent}
-            disabled={askingAgent || !hasActiveConversation}
+            disabled={posting || !hasActiveConversation}
           >
-            {askingAgent ? (
+            {posting ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (
               <Sparkles className="size-3.5" />
@@ -924,6 +1094,7 @@ function ConfiguredServiceCard({
   onStop,
   onConfigure,
   onDelete,
+  onCheckWithAgent,
 }: {
   manifest: RunManifestDto
   instance: Service | null
@@ -933,6 +1104,9 @@ function ConfiguredServiceCard({
   onStop: () => void
   onConfigure: () => void
   onDelete: () => void
+  /** Supplied only when there's a live-or-recent instance AND an active
+   *  conversation to send the notice into. Hidden otherwise. */
+  onCheckWithAgent?: () => void
 }) {
   const status: CardStatus = instance ? instance.status : "idle"
   const live = status === "running" || status === "starting"
@@ -965,6 +1139,26 @@ function ConfiguredServiceCard({
               <span className="text-[10px] font-mono text-muted-foreground">
                 {cardStatusLabel(status)}
               </span>
+              {instance?.pid != null && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <span
+                        className="text-[10px] font-mono text-muted-foreground rounded bg-muted/60 px-1.5 py-0.5 cursor-help"
+                        aria-label={`process id ${instance.pid}`}
+                      />
+                    }
+                  >
+                    pid {instance.pid}
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Host PID — Stop signals the whole process group so child
+                    processes die too. Useful if you need to kill it manually:
+                    {" "}
+                    <code className="font-mono">kill -TERM -{instance.pid}</code>
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
             <div className="text-xs text-muted-foreground font-mono truncate" title={manifest.start}>
               {manifest.start}
@@ -1002,6 +1196,7 @@ function ConfiguredServiceCard({
             onStop={onStop}
             onConfigure={onConfigure}
             onDelete={onDelete}
+            onCheckWithAgent={onCheckWithAgent}
           />
         </div>
         {hasLogs && (
@@ -1052,12 +1247,14 @@ function CardControls({
   onStop,
   onConfigure,
   onDelete,
+  onCheckWithAgent,
 }: {
   status: CardStatus
   onRun: () => void
   onStop: () => void
   onConfigure: () => void
   onDelete: () => void
+  onCheckWithAgent?: () => void
 }) {
   const live = status === "running" || status === "starting"
   const stopping = status === "stopping"
@@ -1099,6 +1296,24 @@ function CardControls({
           <TooltipContent>Run</TooltipContent>
         </Tooltip>
       )}
+      {onCheckWithAgent && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-amber-500"
+                onClick={(e) => { e.stopPropagation(); onCheckWithAgent() }}
+                aria-label="Check with agent"
+              />
+            }
+          >
+            <Sparkles className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipContent>Check with agent</TooltipContent>
+        </Tooltip>
+      )}
       <Tooltip>
         <TooltipTrigger
           render={
@@ -1111,7 +1326,7 @@ function CardControls({
             />
           }
         >
-          <Sparkles className="size-3.5" />
+          <Settings2 className="size-3.5" />
         </TooltipTrigger>
         <TooltipContent>Configure</TooltipContent>
       </Tooltip>
@@ -1138,76 +1353,178 @@ function CardControls({
 
 // ── Log viewer ───────────────────────────────────────────────────────────────
 
+// Log viewer uses xterm.js so ANSI colors / cursor moves / progress bars from
+// Vite, Next, chalk, etc. render natively. `@xterm/addon-web-links` turns
+// http(s) URLs in the output into clickable links that open in a new tab.
 const LogViewer = observer(function LogViewer({ svc }: { svc: Service }) {
   const userId = workspace.userId
-  const [lines, setLines] = useState<LogLine[]>([])
-  const [autoscroll, setAutoscroll] = useState(true)
-  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const termRef = useRef<XTerm | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
+  const searchRef = useRef<SearchAddon | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchTerm, setSearchTerm] = useState("")
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-    setLines([])
-    if (!userId) return
-    const unsub = workspace.services.subscribeLogs(userId, svc.id, (line) => {
-      setLines((prev) => {
-        // Cap in-browser history too so super-long sessions stay snappy.
-        const next = prev.length > 2000 ? prev.slice(-1500) : prev
-        return [...next, line]
-      })
+    if (!containerRef.current || !userId) return
+
+    const term = new XTerm({
+      fontFamily:
+        '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      fontSize: 12,
+      cursorBlink: false,
+      disableStdin: true,
+      convertEol: true,
+      theme: themeFromDocument(),
+      scrollback: 5000,
     })
-    return () => unsub()
+    const fit = new FitAddon()
+    // Click opens in a new tab — the server URL from the running service is
+    // the most common case and users expect http://localhost:… to launch a
+    // browser, not navigate the current app window.
+    const links = new WebLinksAddon((_e, uri) => {
+      window.open(uri, "_blank", "noopener,noreferrer")
+    })
+    const search = new SearchAddon()
+    term.loadAddon(fit)
+    term.loadAddon(links)
+    term.loadAddon(search)
+
+    // Keyboard shortcuts. xterm has no dedicated "shortcuts addon" — the
+    // canonical hook is `attachCustomKeyEventHandler`. Returning false stops
+    // xterm from processing the event further (i.e. we own it).
+    //   Cmd/Ctrl+K    — clear the buffer (macOS Terminal convention)
+    //   Cmd/Ctrl+F    — open find bar
+    //   Cmd/Ctrl+L    — clear (Unix shell convention, same behavior)
+    //   Esc (while finding) — close find bar
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && (e.key === "k" || e.key === "K" || e.key === "l" || e.key === "L")) {
+        term.clear()
+        return false
+      }
+      if (mod && (e.key === "f" || e.key === "F")) {
+        setSearchOpen(true)
+        queueMicrotask(() => searchInputRef.current?.focus())
+        return false
+      }
+      return true
+    })
+
+    term.open(containerRef.current)
+    requestAnimationFrame(() => {
+      try { fit.fit() } catch { /* container not sized yet */ }
+    })
+    termRef.current = term
+    fitRef.current = fit
+    searchRef.current = search
+
+    const writeLine = (line: LogLine) => {
+      // Tint stderr red only when the app hasn't already styled the line —
+      // avoid fighting the program's own color output.
+      if (line.stream === "stderr" && !/\x1b\[/.test(line.text)) {
+        term.write(`\x1b[31m${line.text}\x1b[0m\r\n`)
+      } else {
+        term.write(line.text + "\r\n")
+      }
+    }
+
+    const unsub = workspace.services.subscribeLogs(userId, svc.id, writeLine)
+
+    const ro = new ResizeObserver(() => {
+      try { fit.fit() } catch { /* ignore */ }
+    })
+    ro.observe(containerRef.current)
+
+    return () => {
+      unsub()
+      ro.disconnect()
+      term.dispose()
+      termRef.current = null
+      fitRef.current = null
+      searchRef.current = null
+    }
   }, [userId, svc.id])
 
-  useEffect(() => {
-    if (!autoscroll) return
-    const el = scrollRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [lines, autoscroll])
-
-  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const el = e.currentTarget
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setAutoscroll(atBottom)
+  const findNext = () => {
+    if (searchTerm) searchRef.current?.findNext(searchTerm)
+  }
+  const findPrev = () => {
+    if (searchTerm) searchRef.current?.findPrevious(searchTerm)
+  }
+  const closeSearch = () => {
+    setSearchOpen(false)
+    setSearchTerm("")
+    searchRef.current?.clearDecorations()
+    termRef.current?.focus()
   }
 
   return (
-    <div className="h-full flex flex-col bg-muted/30">
+    <div className="h-full flex flex-col bg-muted/30 relative">
       <div className="px-4 py-2 border-b flex items-center gap-2 text-xs text-muted-foreground">
         <span>Logs</span>
-        <span className="font-mono">{svc.cwd}</span>
+        <span className="font-mono truncate" title={svc.cwd}>{svc.cwd}</span>
         <span className="flex-1" />
-        {!autoscroll && (
+        <span className="text-[10px] font-mono text-muted-foreground/70 hidden sm:inline">
+          ⌘K clear · ⌘F find
+        </span>
+        <button
+          type="button"
+          className="underline hover:text-foreground"
+          onClick={() => termRef.current?.scrollToBottom()}
+          aria-label="Scroll to latest"
+        >
+          Jump to latest
+        </button>
+      </div>
+      {searchOpen && (
+        <div className="absolute top-9 right-2 z-10 flex items-center gap-1 rounded-md border bg-background shadow-sm p-1">
+          <input
+            ref={searchInputRef}
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); e.shiftKey ? findPrev() : findNext() }
+              else if (e.key === "Escape") { e.preventDefault(); closeSearch() }
+            }}
+            placeholder="Find"
+            className="h-6 w-40 rounded bg-muted/60 px-2 text-xs outline-none focus:bg-muted"
+            autoFocus
+          />
           <button
             type="button"
-            className="underline hover:text-foreground"
-            onClick={() => {
-              setAutoscroll(true)
-              const el = scrollRef.current
-              if (el) el.scrollTop = el.scrollHeight
-            }}
+            onClick={findPrev}
+            disabled={!searchTerm}
+            className="size-6 rounded hover:bg-accent text-xs disabled:opacity-40"
+            aria-label="Previous match"
+            title="Previous (Shift+Enter)"
           >
-            Jump to latest
+            ↑
           </button>
-        )}
-      </div>
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="flex-1 overflow-auto px-4 py-2 font-mono text-xs whitespace-pre-wrap break-all"
-      >
-        {lines.length === 0 ? (
-          <div className="text-muted-foreground">Waiting for output…</div>
-        ) : (
-          lines.map((line, i) => (
-            <div
-              key={i}
-              className={cn(line.stream === "stderr" && "text-red-400")}
-            >
-              {line.text}
-            </div>
-          ))
-        )}
-      </div>
+          <button
+            type="button"
+            onClick={findNext}
+            disabled={!searchTerm}
+            className="size-6 rounded hover:bg-accent text-xs disabled:opacity-40"
+            aria-label="Next match"
+            title="Next (Enter)"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            onClick={closeSearch}
+            className="size-6 rounded hover:bg-accent text-xs"
+            aria-label="Close find"
+            title="Close (Esc)"
+          >
+            ×
+          </button>
+        </div>
+      )}
+      <div ref={containerRef} className="flex-1 min-h-0 px-2 py-1" />
     </div>
   )
 })
@@ -1376,4 +1693,18 @@ function RailwayConnectDialog({ onClose }: { onClose: () => void }) {
       </div>
     </div>
   )
+}
+
+// xterm theme tied to the app's CSS variables so light/dark modes carry into
+// the log viewer. Mirrors the helper in terminal-panel.tsx.
+function themeFromDocument() {
+  const styles = getComputedStyle(document.documentElement)
+  const get = (name: string, fallback: string) =>
+    styles.getPropertyValue(name).trim() || fallback
+  return {
+    background: get("--background", "#0a0a0a"),
+    foreground: get("--foreground", "#e5e5e5"),
+    cursor: get("--foreground", "#e5e5e5"),
+    selectionBackground: "rgba(120,120,120,0.35)",
+  }
 }

@@ -236,6 +236,27 @@ export class ServiceList extends BaseList<typeof Service> {
     runInAction(() => this.upsertDto(dto))
   }
 
+  // Feed a service's captured output back to the conversation agent so it
+  // can confirm the service started cleanly, or diagnose a crash and
+  // propose a fix. Server handles the watch-and-inject asynchronously; this
+  // resolves as soon as the background task is queued.
+  async verifyRun(
+    userId: string,
+    conversationId: string,
+    serviceId: string,
+    opts: { watchMs?: number } = {}
+  ): Promise<void> {
+    const res = await fetch(`/api/conversations/${conversationId}/verify-run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, serviceId, watchMs: opts.watchMs }),
+    })
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
   async remove(userId: string, id: string): Promise<void> {
     this.closeLogs(id)
     const res = await fetch(

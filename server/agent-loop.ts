@@ -254,6 +254,8 @@ export type LlmManifestProposal = {
   start: string
   build?: string
   env: Record<string, string>
+  /** Port the app will bind to. Used as a preferred port at run time. */
+  port?: number
   rationale: string
   confidence: "high" | "medium" | "low"
 }
@@ -440,8 +442,21 @@ function parseRunDetectJson(raw: string): LlmManifestProposal | null {
       ? r.confidence
       : "low"
   const rationale = typeof r.rationale === "string" ? r.rationale : ""
+  const port = coercePort(r.port)
 
-  return { stack, start, env, build, rationale, confidence }
+  return { stack, start, env, build, port, rationale, confidence }
+}
+
+// Accept port as a number OR a numeric string (models sometimes quote it).
+// Returns undefined for anything outside the non-privileged / user range.
+function coercePort(value: unknown): number | undefined {
+  const n =
+    typeof value === "number" ? value
+      : typeof value === "string" && /^\d+$/.test(value.trim()) ? parseInt(value, 10)
+      : NaN
+  if (!Number.isFinite(n)) return undefined
+  if (n < 1024 || n > 65535) return undefined
+  return n
 }
 
 function tryParse(text: string): unknown {
@@ -466,6 +481,42 @@ if the user just built something, you already know what.
 Inspect the project (package.json, Procfile, README, entry files, etc.) and
 propose ONE start command suitable for local development. Keep it short.
 
+**Infer the bind port AND make the command actually respect it.** This
+matters because many frameworks don't read \`PORT\` env by default. Just
+setting \`PORT=N\` is NOT enough for Vite, Django, uvicorn, rails, etc. —
+the command itself needs the right flag.
+
+First look in the source for \`app.listen(…)\`, \`server.listen(…)\`,
+\`createServer\`, \`uvicorn --port\`, \`runserver 0.0.0.0:N\`, Vite's
+\`server.port\`, Next's \`-p\`, environment-fallback patterns like
+\`process.env.PORT || 3000\`, \`os.environ.get("PORT", "8000")\`, etc. to
+figure out what port the app wants.
+
+Then construct the start command so the host's allocated \`$PORT\` actually
+takes effect. Stack-specific patterns:
+
+- **Node / Express / Fastify / Hono / Koa**: typically reads \`process.env.PORT\`.
+  Plain \`npm start\` works; no need to append \`$PORT\` to the command.
+- **Next.js**: reads \`PORT\` env OR accepts \`-p\`. \`npm run dev -- -p $PORT\`
+  is the bulletproof form.
+- **Vite**: **IGNORES the \`PORT\` env by default.** Must pass the flag:
+  \`npm run dev -- --port $PORT\` (or \`vite --port $PORT\`). Without this,
+  Vite binds its config default (5173) and the host's port is ignored.
+- **Create React App**: reads \`PORT\` env natively.
+- **Django**: \`python manage.py runserver 0.0.0.0:$PORT\` — port is
+  positional, not env-read.
+- **Flask**: \`flask run --port $PORT\` (or \`FLASK_RUN_PORT=$PORT\` in env).
+- **FastAPI / uvicorn**: \`uvicorn main:app --port $PORT --reload\`.
+- **Rails**: \`rails server -p $PORT\` or \`bin/dev -p $PORT\`.
+- **Go (net/http)**: usually reads \`PORT\` env; if the binary takes a flag,
+  include it (\`./server -port $PORT\`).
+- **Anything else**: default to \`$PORT\` as an explicit arg — safer than
+  assuming the app reads the env.
+
+The host injects \`PORT\` as an env var AND expands \`$PORT\` in the start
+command via its shell. In the "port" field of the manifest, report the
+number the app will bind to (usually the fallback in the code).
+
 End your reply with exactly this block (and nothing after it):
 
 <run-manifest>
@@ -474,7 +525,8 @@ End your reply with exactly this block (and nothing after it):
   "start": "exact shell command",
   "build": "optional build command — omit when none",
   "env": { "KEY": "value" },
-  "rationale": "one short sentence",
+  "port": 3000,
+  "rationale": "one short sentence — include which file/line told you the port",
   "confidence": "high" | "medium" | "low"
 }
 </run-manifest>
@@ -483,8 +535,10 @@ Rules:
 - The block is MANDATORY — the host parses it to save the config.
 - "start" must be non-empty. If you genuinely can't figure it out, explain
   why in your reply and still emit the block with "start": "".
-- The host will inject $PORT at runtime — use $PORT in the command when
-  the app needs an explicit port.
+- "port" is a JSON number (e.g. 3000, not "3000"). Omit the field only if
+  you truly can't find any port reference in the code.
+- The host injects \`PORT\` as an env var AND expands \`$PORT\` in the start
+  string via its shell. When in doubt, pass \`$PORT\` as an explicit flag.
 - Do NOT start the service yourself. This turn is configuration only.`
 
 export function buildDetectServicesSystemPrompt(): string {
@@ -578,5 +632,136 @@ export function extractDetectedManifest(assistantText: string): LlmManifestPropo
       ? r.confidence
       : "low"
   const rationale = typeof r.rationale === "string" ? r.rationale : ""
-  return { stack, start, env, build, rationale, confidence }
+  const port = coercePort(r.port)
+  return { stack, start, env, build, port, rationale, confidence }
+}
+
+// ─── Verify-run: post-Run closed-loop check ─────────────────────────────────
+// After starting a service (typically first run after configuration), we feed
+// the captured output + final status back to the agent. The agent confirms it
+// started cleanly, or diagnoses the crash and proposes a fix. If the fix is a
+// config change, the agent emits a new <run-manifest> block and the existing
+// post-turn reconcile saves it automatically.
+
+export type VerifyRunSnapshot = {
+  stack: string
+  start: string
+  status: string
+  pid: number | null
+  port: number
+  url: string
+  exitCode: number | null
+  error: string | null
+  startedAt: number
+  stoppedAt: number | null
+}
+
+export type VerifyRunLogLine = {
+  ts: number
+  stream: "stdout" | "stderr"
+  text: string
+}
+
+const VERIFY_RUN_SYSTEM_PROMPT = `You are checking a recently-started local service.
+You have the full conversation history and your normal tools.
+
+Your job: read the captured output, then either:
+- Confirm the service started cleanly (one short sentence, with the URL).
+- Diagnose a failure. If the fix is a small config change (command, env, build
+  step, stack mismatch), emit an updated block and the host will save it:
+
+  <run-manifest>
+  { "stack": "...", "start": "...", "build": "...", "env": {...},
+    "port": 3000,
+    "rationale": "one short sentence", "confidence": "high|medium|low" }
+  </run-manifest>
+
+  If the fix needs the user (install a missing package, set a secret env var,
+  pick a free port), explain what and why — don't guess silently.
+
+Rules:
+- Do NOT start or stop the service yourself. It already ran; the host owns
+  lifecycle.
+- Don't declare success unless you see actual evidence (listening-on-port
+  log, readiness marker, no errors in the tail).
+- **Port mismatch is a common failure mode.** If the "port" field says N
+  but the output shows the service listening on a different port, the
+  start command is probably ignoring \`$PORT\`. Vite needs \`--port $PORT\`,
+  Django needs \`runserver 0.0.0.0:$PORT\`, uvicorn needs \`--port $PORT\`,
+  Rails needs \`-p $PORT\`, Next needs \`-p $PORT\` or PORT env. Emit an
+  updated run-manifest with a corrected start command.
+- Keep replies tight. One or two sentences is usually right.`
+
+export function buildVerifyRunSystemPrompt(): string {
+  return VERIFY_RUN_SYSTEM_PROMPT
+}
+
+const LOG_TAIL_LINES = 200
+
+export function buildVerifyRunPrompt(input: {
+  snapshot: VerifyRunSnapshot
+  logs: VerifyRunLogLine[]
+  watchMs: number
+}): string {
+  const snap = input.snapshot
+  const uptimeSec = Math.max(0, Math.round((Date.now() - snap.startedAt) / 1000))
+
+  const header = [
+    "[Host task — verify run]",
+    "",
+    `I just started the service per the saved configuration and watched it for ${Math.round(input.watchMs / 1000)}s.`,
+    "",
+    `- Stack: ${snap.stack}`,
+    `- Command: \`${snap.start}\``,
+    `- Status: ${snap.status}${snap.pid != null ? ` (pid ${snap.pid})` : ""}`,
+    snap.status === "running" ? `- URL: ${snap.url}` : null,
+    snap.status === "crashed" && snap.exitCode != null ? `- Exit code: ${snap.exitCode}` : null,
+    snap.error ? `- Error: ${snap.error}` : null,
+    `- Uptime at snapshot: ${uptimeSec}s`,
+  ].filter(Boolean).join("\n")
+
+  const tail = input.logs.slice(-LOG_TAIL_LINES)
+  const logBlock = tail.length
+    ? [
+        "",
+        "Captured output (stderr lines prefixed with `!`):",
+        "```",
+        ...tail.map((l) => `${l.stream === "stderr" ? "! " : "  "}${l.text}`),
+        "```",
+      ].join("\n")
+    : "\n(No output was captured in the watch window — could be a service that logs nothing on startup, or never started.)"
+
+  const ask =
+    snap.status === "crashed"
+      ? "\nThe service crashed. Walk me through what the output says and, if you can fix it with a config change, emit the updated <run-manifest> block."
+      : snap.status === "running"
+        ? "\nConfirm it looks healthy, or flag anything off (port conflicts, unhandled rejections, warnings that matter)."
+        : "\nStatus isn't terminal yet — say what you see and whether it looks on track."
+
+  return header + logBlock + ask
+}
+
+export function buildVerifyRunNoticeText(input: {
+  snapshot: VerifyRunSnapshot
+}): string {
+  const s = input.snapshot
+  if (s.status === "running") {
+    return [
+      `Verifying **\`${s.start}\`** at \`${s.url}\`.`,
+      "",
+      "The agent will read the service's output and confirm it started cleanly — or diagnose if not.",
+    ].join("\n")
+  }
+  if (s.status === "crashed") {
+    return [
+      "**Service crashed during startup.** Asking the agent to diagnose.",
+      "",
+      s.error ? `Reason: \`${s.error}\`` : "See the captured output in chat.",
+    ].join("\n")
+  }
+  return [
+    `Checking service (\`${s.status}\`).`,
+    "",
+    "The agent will review the captured output.",
+  ].join("\n")
 }

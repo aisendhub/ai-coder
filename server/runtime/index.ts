@@ -30,6 +30,7 @@ export type {
 export {
   startService,
   stopService,
+  stopServiceAndWait,
   getService,
   listServices,
   getLogHistory,

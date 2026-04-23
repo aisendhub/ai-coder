@@ -119,11 +119,19 @@ function isPortFree(port: number): Promise<boolean> {
   })
 }
 
+// Allocate a port to bind. `preferred` wins when free — commonly set from
+// the conversation's persisted `assigned_port` (so URLs stay stable across
+// restarts) or from `manifest.port` (so an app that hardcodes e.g. 3000 or
+// reads PORT with a specific fallback gets what it expects).
+//
+// The preferred port is honored regardless of whether it's inside our
+// sandbox range: users routinely set port 3000 / 5173 / 8000 and expect
+// those URLs. We still sanity-check for non-privileged ports.
 async function allocatePort(preferred?: number | null): Promise<number> {
   if (
     preferred != null &&
-    preferred >= PORT_MIN &&
-    preferred <= PORT_MAX &&
+    preferred >= 1024 &&
+    preferred <= 65535 &&
     !allocatedPorts.has(preferred) &&
     (await isPortFree(preferred))
   ) {
@@ -322,6 +330,33 @@ export async function stopService(id: string, ownerId: string): Promise<void> {
     throw new RuntimeError("already stopped", "already_stopped")
   }
   await killSvc(svc)
+}
+
+// Stops a service and awaits the terminal `end` event (process exit + port
+// release), with a hard timeout so a wedged runner can't block a restart.
+// Idempotent: already-stopped services resolve immediately.
+export async function stopServiceAndWait(
+  id: string,
+  ownerId: string,
+  timeoutMs = 6000
+): Promise<void> {
+  const svc = services.get(id)
+  if (!svc || svc.ownerId !== ownerId) return
+  if (svc.status === "stopped" || svc.status === "crashed") return
+
+  await new Promise<void>((resolve) => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      svc.emitter.off("end", finish)
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(finish, timeoutMs)
+    svc.emitter.once("end", finish)
+    void killSvc(svc).catch(() => finish())
+  })
 }
 
 async function killSvc(svc: RunningService): Promise<void> {
