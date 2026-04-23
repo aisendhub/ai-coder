@@ -526,30 +526,6 @@ export const ServicesPanel = observer(function ServicesPanel({
     }
   }
 
-  // Click the big Run button: if no services are configured yet, open the
-  // first-run editor seeded with heuristic detection. Otherwise, run the
-  // "default" service (or the only configured service, whichever fits).
-  const onRunPrimary = async () => {
-    if (!userId || !targetProjectId) return
-    const list = projectServices.sortedServices
-    if (list.length === 0) {
-      setEditor({
-        mode: "first-run",
-        projectId: targetProjectId,
-        conversationId: active?.id ?? null,
-        label: targetLabel,
-        serviceName: "default",
-        isNew: true,
-        initial: { ...(detectionProbe?.detected ?? { stack: "custom", start: "", env: {} }), name: "default" },
-        detected: detectionProbe?.detected ?? null,
-        cwd: detectionProbe?.cwd ?? activeProject?.cwd ?? "",
-      })
-      return
-    }
-    const pick = list.find((s) => s.name === "default") ?? list[0]
-    await startCached(targetProjectId, pick.name, active?.id ?? null, pick.description ?? pick.name)
-  }
-
   const onEditService = (row: ProjectService) => {
     if (!userId || !targetProjectId) return
     setEditor({
@@ -867,10 +843,14 @@ export const ServicesPanel = observer(function ServicesPanel({
 
   const configuredServices = projectServices.sortedServices
   const hasConfigured = configuredServices.length > 0
+  // Gate the picker auto-open on the services list having loaded for
+  // THIS project. Without this, the panel briefly flashes the picker on
+  // mount (items empty → "no services" → picker) before the initial
+  // refresh settles and reveals the real list. Explicit "+ Add" still
+  // opens the picker regardless of load state.
+  const projectServicesLoaded = projectServices.loadedProjectId === targetProjectId
 
-  // Picker opens explicitly via "+ Add" or implicitly when there are no
-  // configured services yet (the empty state IS the picker).
-  const showPicker = pickerOpen || !hasConfigured
+  const showPicker = pickerOpen || (projectServicesLoaded && !hasConfigured)
   if (showPicker && userId && targetProjectId) {
     return (
       <ServicePicker
@@ -963,44 +943,35 @@ export const ServicesPanel = observer(function ServicesPanel({
         </div>
         <div className="flex-1" />
         <RunnerSelect value={runnerId} onChange={setRunnerId} />
-        {hasConfigured ? (
-          <>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={onAddService}
-                    disabled={!canStart}
-                    aria-label="Add service"
-                  />
-                }
-              >
-                <Plus className="size-3.5" />
-                Add
-              </TooltipTrigger>
-              <TooltipContent>Add another service (api, worker, …)</TooltipContent>
-            </Tooltip>
-            <Button
-              size="sm"
-              onClick={() => { void onRunAll() }}
-              disabled={!canStart || !canRunAll}
-            >
-              <Play className="size-3.5" />
-              Run all
-            </Button>
-          </>
-        ) : (
-          <Button
-            size="sm"
-            onClick={() => { void onRunPrimary() }}
-            disabled={!canStart}
+        {/* Always render the same Add + Run-all pair to keep header
+            layout stable while the services list is still loading.
+            Run-all is disabled until we have at least one enabled row;
+            Add stays enabled so the picker is one click away. */}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onAddService}
+                disabled={!canStart}
+                aria-label="Add service"
+              />
+            }
           >
-            <Play className="size-3.5" />
-            Run
-          </Button>
-        )}
+            <Plus className="size-3.5" />
+            Add
+          </TooltipTrigger>
+          <TooltipContent>Add another service (api, worker, …)</TooltipContent>
+        </Tooltip>
+        <Button
+          size="sm"
+          onClick={() => { void onRunAll() }}
+          disabled={!canStart || !canRunAll}
+        >
+          <Play className="size-3.5" />
+          Run all
+        </Button>
         {onClose && (
           <Button
             variant="ghost"
