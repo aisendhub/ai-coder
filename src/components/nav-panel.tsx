@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FolderGit2, Gauge, GitBranch, LayoutGrid, MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
+import { ChevronDown, ChevronRight, FolderGit2, Gauge, LayoutGrid, MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -12,11 +12,13 @@ import {
 } from "@/components/ui/resizable"
 import { workspace } from "@/models"
 import { cn } from "@/lib/utils"
-import { useConfirm } from "@/lib/confirm"
 import { usePersistentState } from "@/hooks/use-persistent-state"
+import { useDeleteConversation } from "@/hooks/use-delete-conversation"
 import { useSidebarOptional } from "@/components/ui/sidebar"
 import { NewProjectDialog } from "@/components/new-project-dialog"
 import { Board } from "@/components/board"
+import { ConversationRow } from "@/components/conversation-row"
+import { ChatsSection } from "@/components/chats-section"
 import {
   Select,
   SelectContent,
@@ -29,6 +31,14 @@ import {
 type Props = {
   collapsed?: boolean
   onToggle?: () => void
+  // Chats promotion/fullscreen — owned by App.tsx so the promoted copy
+  // and the ghost stub stay in sync.
+  chatsPromoted?: boolean
+  chatsFullscreen?: boolean
+  onPromoteChats?: () => void
+  onRestoreChats?: () => void
+  onEnterChatsFullscreen?: () => void
+  onExitChatsFullscreen?: () => void
 }
 
 function useTheme() {
@@ -52,6 +62,12 @@ function useTheme() {
 export const NavPanel = observer(function NavPanel({
   collapsed = false,
   onToggle,
+  chatsPromoted = false,
+  chatsFullscreen = false,
+  onPromoteChats,
+  onRestoreChats,
+  onEnterChatsFullscreen,
+  onExitChatsFullscreen,
 }: Props) {
   const sidebar = useSidebarOptional()
   const closeMobileNav = () => {
@@ -70,7 +86,7 @@ export const NavPanel = observer(function NavPanel({
   const [tasksOpen, setTasksOpen] = usePersistentState("ai-coder:panels:nav:tasksOpen", true)
   const [chatsOpen, setChatsOpen] = usePersistentState("ai-coder:panels:nav:chatsOpen", true)
   const { dark, toggle: toggleTheme } = useTheme()
-  const confirm = useConfirm()
+  const handleDelete = useDeleteConversation()
 
   const filtered = query
     ? conversations.filter((c) =>
@@ -78,54 +94,9 @@ export const NavPanel = observer(function NavPanel({
       )
     : conversations
 
-  // Split the sidebar so tasks (worktree + agent loop) are surfaced
-  // distinctly from plain chats. Tasks appear first because they're what the
-  // user is most likely watching.
+  // Tasks render inline here; Chats delegates to ChatsSection which
+  // computes its own list (it may be promoted out of the nav entirely).
   const tasks = filtered.filter((c) => c.kind === "task")
-  const chats = filtered.filter((c) => c.kind !== "task")
-
-  // Confirm before deleting; if the conversation has a worktree with
-  // uncommitted changes or unpushed commits, surface that in the prompt so
-  // the user doesn't accidentally trash work that's only on the local branch.
-  const handleDelete = useCallback(async (id: string, label: string, hasWorktree: boolean) => {
-    if (!hasWorktree) {
-      const ok = await confirm({
-        title: `Delete ${label}?`,
-        variant: "destructive",
-        confirmText: "Delete",
-      })
-      if (!ok) return
-      try { await workspace.remove(id) } catch (err) { console.error("delete failed", err) }
-      return
-    }
-    let warning = ""
-    try {
-      const res = await fetch(`/api/conversations/${id}/discard-status`)
-      if (res.ok) {
-        const s = (await res.json()) as {
-          uncommittedFiles: number
-          unpushedCommits: number
-          hasUpstream: boolean
-        }
-        const bits: string[] = []
-        if (s.uncommittedFiles > 0) bits.push(`${s.uncommittedFiles} uncommitted file${s.uncommittedFiles === 1 ? "" : "s"}`)
-        if (s.unpushedCommits > 0) {
-          bits.push(`${s.unpushedCommits} ${s.hasUpstream ? "unpushed" : "local-only"} commit${s.unpushedCommits === 1 ? "" : "s"}`)
-        }
-        if (bits.length) warning = `This branch has ${bits.join(" and ")}. They'll be permanently lost when the reaper runs in 7 days.`
-      }
-    } catch {
-      // Probe failed — fall through and use the generic confirm.
-    }
-    const ok = await confirm({
-      title: `Delete ${label}?`,
-      description: warning || undefined,
-      variant: "destructive",
-      confirmText: "Delete",
-    })
-    if (!ok) return
-    try { await workspace.remove(id) } catch (err) { console.error("delete failed", err) }
-  }, [confirm])
 
   const handleNew = async () => {
     if (!activeProject) {
@@ -389,54 +360,50 @@ export const NavPanel = observer(function NavPanel({
           </ScrollArea>
         )
 
-        const chatsHeader = (
-          <button
-            type="button"
-            onClick={toggleChats}
-            className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent/50 cursor-pointer"
-            aria-expanded={chatsOpen}
-          >
-            {chatsOpen ? (
-              <ChevronDown className="size-3 shrink-0" />
-            ) : (
-              <ChevronRight className="size-3 shrink-0" />
-            )}
-            <MessageSquare className="size-3 shrink-0" />
-            <span>Chats</span>
-            <span className="text-[10px] opacity-60">{chats.length}</span>
-            {loading && (
-              <span className="ml-auto text-[10px]">loading…</span>
-            )}
-          </button>
+        // Chats is rendered via the shared ChatsSection component so the
+        // same instance can be promoted to a side panel or fullscreen from
+        // App.tsx. When promoted, we render a one-row ghost stub here.
+        const chatsSection = chatsPromoted ? (
+          <ChatsSection
+            ghost
+            expanded={false}
+            promoted
+            fullscreen={chatsFullscreen}
+            onPromote={onPromoteChats}
+            onRestore={onRestoreChats}
+            onEnterFullscreen={onEnterChatsFullscreen}
+            onExitFullscreen={onExitChatsFullscreen}
+          />
+        ) : (
+          <ChatsSection
+            expanded={chatsOpen}
+            onToggleExpanded={toggleChats}
+            promoted={false}
+            fullscreen={chatsFullscreen}
+            onPromote={onPromoteChats}
+            onRestore={onRestoreChats}
+            onEnterFullscreen={onEnterChatsFullscreen}
+            onExitFullscreen={onExitChatsFullscreen}
+            externalQuery={query}
+            onConversationOpen={closeMobileNav}
+            loading={loading}
+          />
         )
 
-        const chatsBody = (
-          <ScrollArea className="flex-1 min-h-0">
-            <div className="p-2 flex flex-col gap-0.5">
-              {chats.length === 0 ? (
-                <div className="px-2 py-2 text-xs text-muted-foreground">No chats.</div>
-              ) : (
-                chats.map((c) => (
-                  <ConversationRow
-                    key={c.id}
-                    kind={c.kind}
-                    title={c.title}
-                    updated={c.updatedAt}
-                    branch={c.branch}
-                    iteration={c.loopIteration}
-                    maxIterations={c.maxIterations}
-                    shipped={!!c.shippedAt}
-                    active={c.id === activeId}
-                    running={runningIds.has(c.id)}
-                    unread={unreadIds.has(c.id)}
-                    onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
-                    onDelete={() => void handleDelete(c.id, "this conversation", !!c.worktreePath)}
-                  />
-                ))
-              )}
+        // Layout logic: the resizable split only makes sense when both
+        // sections are present AND expanded. If Chats is promoted elsewhere,
+        // Tasks takes the full height above the ghost stub.
+        if (chatsPromoted) {
+          return (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <div className={cn("flex flex-col min-h-0", tasksOpen && "flex-1")}>
+                {tasksHeader}
+                {tasksOpen && tasksBody}
+              </div>
+              {chatsSection}
             </div>
-          </ScrollArea>
-        )
+          )
+        }
 
         if (tasksOpen && chatsOpen) {
           return (
@@ -454,8 +421,7 @@ export const NavPanel = observer(function NavPanel({
               <ResizableHandle />
               <ResizablePanel id="nav-chats" order={2} defaultSize={50} minSize={15}>
                 <div className="h-full min-h-0 flex flex-col">
-                  {chatsHeader}
-                  {chatsBody}
+                  {chatsSection}
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>
@@ -470,10 +436,7 @@ export const NavPanel = observer(function NavPanel({
               {tasksHeader}
               {tasksOpen && tasksBody}
             </div>
-            <div className={cn("flex flex-col min-h-0", chatsOpen && "flex-1")}>
-              {chatsHeader}
-              {chatsOpen && chatsBody}
-            </div>
+            {chatsSection}
           </div>
         )
       })()}
@@ -518,132 +481,3 @@ export const NavPanel = observer(function NavPanel({
   )
 })
 
-type TaskStatus = "backlog" | "running" | "review" | "shipped"
-
-function taskStatusFor(input: {
-  shipped: boolean
-  running: boolean
-  iteration: number
-}): TaskStatus {
-  if (input.shipped) return "shipped"
-  if (input.running) return "running"
-  if (input.iteration === 0) return "backlog"
-  return "review"
-}
-
-const STATUS_STYLE: Record<TaskStatus, { label: string; tone: string }> = {
-  backlog: { label: "backlog", tone: "text-muted-foreground" },
-  running: { label: "running", tone: "text-emerald-600 dark:text-emerald-400" },
-  review: { label: "review", tone: "text-sky-600 dark:text-sky-400" },
-  shipped: { label: "shipped", tone: "text-emerald-600 dark:text-emerald-400" },
-}
-
-function ConversationRow({
-  kind,
-  title,
-  updated,
-  branch,
-  iteration,
-  maxIterations,
-  shipped,
-  active,
-  running,
-  unread,
-  onClick,
-  onDelete,
-}: {
-  kind: "chat" | "task"
-  title: string
-  updated: string
-  branch: string | null
-  iteration: number
-  maxIterations: number
-  shipped: boolean
-  active: boolean
-  running: boolean
-  unread: boolean
-  onClick: () => void
-  onDelete: () => void
-}) {
-  // Branch labels come through prefixed with `ai-coder/` — drop the namespace
-  // from the pill so the conversation's own slug reads cleanly.
-  const shortBranch = branch?.replace(/^ai-coder\//, "") ?? null
-  const Icon = kind === "task" ? Gauge : MessageSquare
-  const status = kind === "task" ? taskStatusFor({ shipped, running, iteration }) : null
-  const statusStyle = status ? STATUS_STYLE[status] : null
-  return (
-    <div
-      className={cn(
-        "group flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground cursor-pointer min-w-0",
-        active && "bg-sidebar-accent text-sidebar-accent-foreground",
-        shipped && !active && "opacity-70"
-      )}
-      onClick={onClick}
-    >
-      <div className="relative shrink-0">
-        <Icon className={cn("size-4 mt-0.5", shipped && "text-emerald-600 dark:text-emerald-400")} />
-        {running ? (
-          <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-emerald-500 ring-2 ring-sidebar animate-pulse" />
-        ) : unread ? (
-          <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-sky-500 ring-2 ring-sidebar" />
-        ) : null}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className={cn("truncate text-sm", unread && !active && "font-semibold")}>{title}</div>
-        <div className="text-xs text-muted-foreground flex items-center gap-1 min-w-0">
-          {statusStyle && (
-            <>
-              <span className={cn("font-medium", statusStyle.tone)}>{statusStyle.label}</span>
-              <span>·</span>
-            </>
-          )}
-          {unread && !running && !shipped && <span className="text-sky-600">new</span>}
-          {unread && !running && !shipped && <span>·</span>}
-          {kind === "task" && !shipped && (status === "review" || status === "running") && (
-            <>
-              <span className="font-mono text-[10px]">{iteration}/{maxIterations}</span>
-              <span>·</span>
-            </>
-          )}
-          {shortBranch && (
-            <>
-              <span
-                className="inline-flex items-center gap-0.5 font-mono text-[10px] truncate min-w-0"
-                title={branch ?? undefined}
-              >
-                <GitBranch className="size-3 shrink-0" />
-                <span className="truncate">{shortBranch}</span>
-              </span>
-              <span>·</span>
-            </>
-          )}
-          <span className="shrink-0">{formatRelative(updated)}</span>
-        </div>
-      </div>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation()
-          onDelete()
-        }}
-        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-600 shrink-0 cursor-pointer"
-        aria-label="Delete conversation"
-      >
-        <Trash2 className="size-3.5" />
-      </button>
-    </div>
-  )
-}
-
-function formatRelative(iso: string): string {
-  const d = new Date(iso).getTime()
-  const diff = Date.now() - d
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return "just now"
-  if (m < 60) return `${m}m`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h`
-  const days = Math.floor(h / 24)
-  if (days < 7) return `${days}d`
-  return new Date(d).toLocaleDateString()
-}

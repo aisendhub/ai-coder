@@ -16,8 +16,8 @@ import { TerminalPanel } from "@/components/terminal-panel"
 import { FileTreePanel } from "@/components/file-tree-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { GitLogSection } from "@/components/git-log-panel"
+import { ChatsSection } from "@/components/chats-section"
 import { FullscreenOverlay } from "@/components/fullscreen-overlay"
-import { GitCommit } from "lucide-react"
 import { TopBar } from "@/components/top-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { usePersistentState } from "@/hooks/use-persistent-state"
@@ -91,6 +91,8 @@ function DesktopLayout() {
   // to its panel when closed.
   const [gitLogPromoted, setGitLogPromoted] = usePersistentState("ai-coder:panels:gitLogPromoted", false)
   const [gitLogFullscreen, setGitLogFullscreen] = useState(false)
+  const [chatsPromoted, setChatsPromoted] = usePersistentState("ai-coder:panels:chatsPromoted", false)
+  const [chatsFullscreen, setChatsFullscreen] = useState(false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
   const [servicesCollapsed, setServicesCollapsed] = useState(false)
@@ -106,7 +108,7 @@ function DesktopLayout() {
       <div className="h-svh w-screen overflow-hidden">
         <ResizablePanelGroup
           direction="horizontal"
-          autoSaveId="ai-coder-main-4pane"
+          autoSaveId="ai-coder-main-5pane"
           className="h-full w-full"
         >
           <ResizablePanel
@@ -123,11 +125,44 @@ function DesktopLayout() {
             }
           >
             <div className="h-full min-h-0 overflow-hidden border-r">
-              <NavPanel collapsed={navCollapsed} onToggle={toggleNav} />
+              <NavPanel
+                collapsed={navCollapsed}
+                onToggle={toggleNav}
+                chatsPromoted={chatsPromoted}
+                chatsFullscreen={chatsFullscreen}
+                onPromoteChats={() => setChatsPromoted(true)}
+                onRestoreChats={() => setChatsPromoted(false)}
+                onEnterChatsFullscreen={() => setChatsFullscreen(true)}
+                onExitChatsFullscreen={() => setChatsFullscreen(false)}
+              />
             </div>
           </ResizablePanel>
+          {chatsPromoted && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel
+                id="chatsPanel"
+                order={2}
+                defaultSize={20}
+                minSize={15}
+                maxSize={40}
+              >
+                <div className="h-full min-h-0 overflow-hidden border-r bg-sidebar text-sidebar-foreground">
+                  <ChatsSection
+                    expanded
+                    promoted
+                    fullscreen={chatsFullscreen}
+                    onPromote={() => setChatsPromoted(true)}
+                    onRestore={() => setChatsPromoted(false)}
+                    onEnterFullscreen={() => setChatsFullscreen(true)}
+                    onExitFullscreen={() => setChatsFullscreen(false)}
+                  />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
           <ResizableHandle />
-          <ResizablePanel id="chat" order={2} defaultSize={50} minSize={30}>
+          <ResizablePanel id="chat" order={3} defaultSize={50} minSize={30}>
             <div className="h-full min-h-0 overflow-hidden flex flex-col">
               <TopBar
                 rightOpen={rightOpen}
@@ -149,7 +184,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="fileTree"
-                order={3}
+                order={4}
                 defaultSize={22}
                 minSize={15}
                 maxSize={45}
@@ -165,7 +200,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="code"
-                order={4}
+                order={5}
                 defaultSize={32}
                 minSize={20}
                 maxSize={70}
@@ -195,7 +230,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="gitLogPanel"
-                order={7}
+                order={8}
                 defaultSize={26}
                 minSize={18}
                 maxSize={55}
@@ -219,7 +254,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="terminal"
-                order={5}
+                order={6}
                 defaultSize={28}
                 minSize={18}
                 maxSize={60}
@@ -235,7 +270,7 @@ function DesktopLayout() {
               <ResizableHandle />
               <ResizablePanel
                 id="services"
-                order={6}
+                order={7}
                 defaultSize={28}
                 minSize={22}
                 maxSize={50}
@@ -254,11 +289,7 @@ function DesktopLayout() {
           <FilePanelSlot />
         </ResizablePanelGroup>
         {gitLogFullscreen && (
-          <FullscreenOverlay
-            title="Git log"
-            icon={<GitCommit className="size-4" />}
-            onExit={() => setGitLogFullscreen(false)}
-          >
+          <FullscreenOverlay onExit={() => setGitLogFullscreen(false)}>
             <GitLogSection
               expanded
               promoted={gitLogPromoted}
@@ -267,6 +298,19 @@ function DesktopLayout() {
               onRestore={() => setGitLogPromoted(false)}
               onEnterFullscreen={() => setGitLogFullscreen(true)}
               onExitFullscreen={() => setGitLogFullscreen(false)}
+            />
+          </FullscreenOverlay>
+        )}
+        {chatsFullscreen && (
+          <FullscreenOverlay onExit={() => setChatsFullscreen(false)}>
+            <ChatsSection
+              expanded
+              promoted={chatsPromoted}
+              fullscreen
+              onPromote={() => setChatsPromoted(true)}
+              onRestore={() => setChatsPromoted(false)}
+              onEnterFullscreen={() => setChatsFullscreen(true)}
+              onExitFullscreen={() => setChatsFullscreen(false)}
             />
           </FullscreenOverlay>
         )}

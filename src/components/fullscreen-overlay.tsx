@@ -1,19 +1,16 @@
 import { useEffect } from "react"
-import { X, Minimize2 } from "lucide-react"
+import { X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 
-// Modal fullscreen wrapper — same pattern as Board: fixed inset-0 above the
-// whole app, Escape closes. Renders its own title bar above the section's
-// content so the section doesn't need to know it's fullscreen.
+// Fullscreen wrapper — just positioning + Escape-to-close + a floating X
+// button. The section being shown renders its own header (with title,
+// actions, and the kebab menu), so we intentionally don't add a second
+// header here.
 export function FullscreenOverlay({
-  title,
-  icon,
   onExit,
   children,
 }: {
-  title: string
-  icon?: React.ReactNode
   onExit: () => void
   children: React.ReactNode
 }) {
@@ -27,35 +24,25 @@ export function FullscreenOverlay({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-background/95 backdrop-blur-sm"
+      className="fixed inset-0 z-50 bg-background"
       role="dialog"
       aria-modal="true"
     >
-      <div className="flex items-center justify-between border-b bg-background px-4 h-14 shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
-          {icon}
-          <h2 className="text-sm font-semibold truncate">{title}</h2>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <Tooltip>
-            <TooltipTrigger>
-              <Button variant="ghost" size="icon" onClick={onExit} aria-label="Exit fullscreen">
-                <Minimize2 className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Exit fullscreen (Esc)</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger>
-              <Button variant="ghost" size="icon" onClick={onExit} aria-label="Close">
-                <X className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Close (Esc)</TooltipContent>
-          </Tooltip>
-        </div>
-      </div>
-      <div className="flex-1 min-h-0 overflow-hidden">{children}</div>
+      <Tooltip>
+        <TooltipTrigger>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onExit}
+            aria-label="Exit fullscreen"
+            className="absolute right-3 top-2 z-10 size-7"
+          >
+            <X className="size-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Close (Esc)</TooltipContent>
+      </Tooltip>
+      <div className="h-full min-h-0 flex flex-col">{children}</div>
     </div>
   )
 }

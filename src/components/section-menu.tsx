@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { MoreHorizontal, PanelRight, Maximize2, Minimize2, Undo2 } from "lucide-react"
+import { MoreVertical, PanelRight, Maximize2, Minimize2, Undo2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
@@ -62,7 +62,7 @@ export function SectionMenu({
             aria-expanded={open}
             aria-label="Section options"
           >
-            <MoreHorizontal className="size-3.5" />
+            <MoreVertical className="size-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>More options</TooltipContent>
@@ -70,7 +70,7 @@ export function SectionMenu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full mt-1 z-30 min-w-[200px] rounded-md border bg-popover text-popover-foreground shadow-md py-1"
+          className="absolute right-0 top-full mt-1 z-30 min-w-50 rounded-md border bg-popover text-popover-foreground shadow-md py-1"
           onClick={(e) => e.stopPropagation()}
         >
           {promoted ? (
