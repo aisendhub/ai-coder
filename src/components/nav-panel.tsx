@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { FolderGit2, Gauge, GitBranch, LayoutGrid, MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
+import { ChevronDown, ChevronRight, FolderGit2, Gauge, GitBranch, LayoutGrid, MessageSquare, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable"
 import { workspace } from "@/models"
 import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
+import { usePersistentState } from "@/hooks/use-persistent-state"
 import { useSidebarOptional } from "@/components/ui/sidebar"
 import { NewProjectDialog } from "@/components/new-project-dialog"
 import { Board } from "@/components/board"
@@ -61,6 +67,8 @@ export const NavPanel = observer(function NavPanel({
   const [query, setQuery] = useState("")
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [boardOpen, setBoardOpen] = useState(false)
+  const [tasksOpen, setTasksOpen] = usePersistentState("ai-coder:panels:nav:tasksOpen", true)
+  const [chatsOpen, setChatsOpen] = usePersistentState("ai-coder:panels:nav:chatsOpen", true)
   const { dark, toggle: toggleTheme } = useTheme()
   const confirm = useConfirm()
 
@@ -303,82 +311,172 @@ export const NavPanel = observer(function NavPanel({
           />
         </div>
       </div>
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="p-2 flex flex-col gap-0.5">
-          {filtered.length === 0 && !loading && (
-            <div className="px-2 py-3 text-xs text-muted-foreground">
-              {query ? "No matches." : "No conversations yet."}
-            </div>
-          )}
-          {tasks.length > 0 && (
-            <>
-              <div className="text-xs text-muted-foreground px-2 py-1 flex items-center gap-1.5">
-                <Gauge className="size-3" />
-                <span>Tasks</span>
-                <span className="text-[10px] opacity-60">{tasks.length}</span>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="size-5 ml-auto"
-                        onClick={() => setBoardOpen(true)}
-                        aria-label="Open task board"
-                      />
-                    }
-                  >
-                    <LayoutGrid className="size-3" />
-                  </TooltipTrigger>
-                  <TooltipContent side="right">Task board</TooltipContent>
-                </Tooltip>
-              </div>
-              {tasks.map((c) => (
-                <ConversationRow
-                  key={c.id}
-                  kind={c.kind}
-                  title={c.title}
-                  updated={c.updatedAt}
-                  branch={c.branch}
-                  iteration={c.loopIteration}
-                  maxIterations={c.maxIterations}
-                  shipped={!!c.shippedAt}
-                  active={c.id === activeId}
-                  running={runningIds.has(c.id)}
-                  unread={unreadIds.has(c.id)}
-                  onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
-                  onDelete={() => void handleDelete(c.id, "this task", !!c.worktreePath)}
-                />
-              ))}
-            </>
-          )}
-          {chats.length > 0 && (
-            <>
-              <div className="text-xs text-muted-foreground px-2 py-1 mt-1 flex items-center justify-between">
-                <span>Chats</span>
-                {loading && <span className="text-[10px]">loading…</span>}
-              </div>
-              {chats.map((c) => (
-                <ConversationRow
-                  key={c.id}
-                  kind={c.kind}
-                  title={c.title}
-                  updated={c.updatedAt}
-                  branch={c.branch}
-                  iteration={c.loopIteration}
-                  maxIterations={c.maxIterations}
-                  shipped={!!c.shippedAt}
-                  active={c.id === activeId}
-                  running={runningIds.has(c.id)}
-                  unread={unreadIds.has(c.id)}
-                  onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
-                  onDelete={() => void handleDelete(c.id, "this conversation", !!c.worktreePath)}
-                />
-              ))}
-            </>
-          )}
+      {filtered.length === 0 && !loading ? (
+        <div className="flex-1 min-h-0 px-2 py-3 text-xs text-muted-foreground">
+          {query ? "No matches." : "No conversations yet."}
         </div>
-      </ScrollArea>
+      ) : (() => {
+        const toggleTasks = () => setTasksOpen((v) => !v)
+        const toggleChats = () => setChatsOpen((v) => !v)
+
+        const tasksHeader = (
+          <button
+            type="button"
+            onClick={toggleTasks}
+            className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent/50 cursor-pointer"
+            aria-expanded={tasksOpen}
+          >
+            {tasksOpen ? (
+              <ChevronDown className="size-3 shrink-0" />
+            ) : (
+              <ChevronRight className="size-3 shrink-0" />
+            )}
+            <Gauge className="size-3 shrink-0" />
+            <span>Tasks</span>
+            <span className="text-[10px] opacity-60">{tasks.length}</span>
+            <span
+              className="ml-auto flex items-center"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-5"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setBoardOpen(true)
+                      }}
+                      aria-label="Open task board"
+                    />
+                  }
+                >
+                  <LayoutGrid className="size-3" />
+                </TooltipTrigger>
+                <TooltipContent side="right">Task board</TooltipContent>
+              </Tooltip>
+            </span>
+          </button>
+        )
+
+        const tasksBody = (
+          <ScrollArea className="flex-1 min-h-0">
+            <div className="p-2 flex flex-col gap-0.5">
+              {tasks.length === 0 ? (
+                <div className="px-2 py-2 text-xs text-muted-foreground">No tasks.</div>
+              ) : (
+                tasks.map((c) => (
+                  <ConversationRow
+                    key={c.id}
+                    kind={c.kind}
+                    title={c.title}
+                    updated={c.updatedAt}
+                    branch={c.branch}
+                    iteration={c.loopIteration}
+                    maxIterations={c.maxIterations}
+                    shipped={!!c.shippedAt}
+                    active={c.id === activeId}
+                    running={runningIds.has(c.id)}
+                    unread={unreadIds.has(c.id)}
+                    onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
+                    onDelete={() => void handleDelete(c.id, "this task", !!c.worktreePath)}
+                  />
+                ))
+              )}
+            </div>
+          </ScrollArea>
+        )
+
+        const chatsHeader = (
+          <button
+            type="button"
+            onClick={toggleChats}
+            className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent/50 cursor-pointer"
+            aria-expanded={chatsOpen}
+          >
+            {chatsOpen ? (
+              <ChevronDown className="size-3 shrink-0" />
+            ) : (
+              <ChevronRight className="size-3 shrink-0" />
+            )}
+            <MessageSquare className="size-3 shrink-0" />
+            <span>Chats</span>
+            <span className="text-[10px] opacity-60">{chats.length}</span>
+            {loading && (
+              <span className="ml-auto text-[10px]">loading…</span>
+            )}
+          </button>
+        )
+
+        const chatsBody = (
+          <ScrollArea className="flex-1 min-h-0">
+            <div className="p-2 flex flex-col gap-0.5">
+              {chats.length === 0 ? (
+                <div className="px-2 py-2 text-xs text-muted-foreground">No chats.</div>
+              ) : (
+                chats.map((c) => (
+                  <ConversationRow
+                    key={c.id}
+                    kind={c.kind}
+                    title={c.title}
+                    updated={c.updatedAt}
+                    branch={c.branch}
+                    iteration={c.loopIteration}
+                    maxIterations={c.maxIterations}
+                    shipped={!!c.shippedAt}
+                    active={c.id === activeId}
+                    running={runningIds.has(c.id)}
+                    unread={unreadIds.has(c.id)}
+                    onClick={() => { workspace.setActive(c.id); closeMobileNav() }}
+                    onDelete={() => void handleDelete(c.id, "this conversation", !!c.worktreePath)}
+                  />
+                ))
+              )}
+            </div>
+          </ScrollArea>
+        )
+
+        if (tasksOpen && chatsOpen) {
+          return (
+            <ResizablePanelGroup
+              direction="vertical"
+              autoSaveId="ai-coder-nav-split"
+              className="flex-1 min-h-0"
+            >
+              <ResizablePanel id="nav-tasks" order={1} defaultSize={50} minSize={15}>
+                <div className="h-full min-h-0 flex flex-col">
+                  {tasksHeader}
+                  {tasksBody}
+                </div>
+              </ResizablePanel>
+              <ResizableHandle />
+              <ResizablePanel id="nav-chats" order={2} defaultSize={50} minSize={15}>
+                <div className="h-full min-h-0 flex flex-col">
+                  {chatsHeader}
+                  {chatsBody}
+                </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          )
+        }
+
+        // One or zero expanded: plain flex column — whichever is open fills
+        // the remaining space, the other is just a header.
+        return (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className={cn("flex flex-col min-h-0", tasksOpen && "flex-1")}>
+              {tasksHeader}
+              {tasksOpen && tasksBody}
+            </div>
+            <div className={cn("flex flex-col min-h-0", chatsOpen && "flex-1")}>
+              {chatsHeader}
+              {chatsOpen && chatsBody}
+            </div>
+          </div>
+        )
+      })()}
       <div className="border-t flex items-center justify-between px-2 py-1.5">
         <div className="text-xs text-muted-foreground px-1">ai-coder · v0.1</div>
         <div className="flex items-center gap-0.5">
