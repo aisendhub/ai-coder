@@ -942,7 +942,11 @@ export const ServicesPanel = observer(function ServicesPanel({
 
   return (
     <div className="flex flex-col h-full relative">
-      <div className="flex items-center gap-2 px-4 py-3 border-b">
+      {/* @container lets the Add / Run-all labels collapse to just their
+          icons when the panel is docked narrow. Breakpoint tuned so the
+          labels disappear before they'd wrap or shove the close X off
+          the edge. */}
+      <div className="@container flex items-center gap-2 px-4 py-3 border-b">
         <Server className="size-4" />
         <div className="text-sm font-medium">Services</div>
         <div className="flex-1" />
@@ -964,18 +968,26 @@ export const ServicesPanel = observer(function ServicesPanel({
             }
           >
             <Plus className="size-3.5" />
-            Add
+            <span className="hidden @[360px]:inline">Add</span>
           </TooltipTrigger>
           <TooltipContent>Add another service (api, worker, …)</TooltipContent>
         </Tooltip>
-        <Button
-          size="sm"
-          onClick={() => { void onRunAll() }}
-          disabled={!canStart || !canRunAll}
-        >
-          <Play className="size-3.5" />
-          Run all
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="sm"
+                onClick={() => { void onRunAll() }}
+                disabled={!canStart || !canRunAll}
+                aria-label="Run all services"
+              />
+            }
+          >
+            <Play className="size-3.5" />
+            <span className="hidden @[360px]:inline">Run all</span>
+          </TooltipTrigger>
+          <TooltipContent>Start every enabled service</TooltipContent>
+        </Tooltip>
         {onClose && (
           <Button
             variant="ghost"
