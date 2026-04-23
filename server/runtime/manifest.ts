@@ -47,6 +47,8 @@ export type RuntimeEvent =
   | "docker.stop"
   | "dockerfile.generate"
   | "dockerfile.cache.hit"
+  | "port.inject"
+  | "port.detected"
 
 export function logRuntimeEvent(
   event: RuntimeEvent,

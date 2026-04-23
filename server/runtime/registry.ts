@@ -10,6 +10,7 @@ import {
   type RingBuffer,
 } from "./ring-buffer.ts"
 import type { Runner, RunnerHandle, RunnerId } from "./runners/types.ts"
+import { injectPortFlag, extractBoundPort } from "./port.ts"
 
 export type ServiceStatus =
   | "starting"
@@ -249,12 +250,29 @@ export async function startService(
   emitter.setMaxListeners(0)
   const logs = createRingBuffer(LOG_LINE_CAP)
 
+  // Framework-aware command rewrite: if the start command doesn't already
+  // pass $PORT or a --port/-p flag, and we recognize the framework (Vite,
+  // Django, uvicorn, etc.), append the right flag so our allocated port
+  // actually takes effect. No-op for commands that already handle it.
+  const inject = injectPortFlag(manifest.start)
+  const effectiveManifest: RunManifest = inject.injected
+    ? { ...manifest, start: inject.command }
+    : manifest
+  if (inject.injected) {
+    logRuntimeEvent("port.inject", {
+      id,
+      original: manifest.start,
+      rewritten: inject.command,
+      reason: inject.reason,
+    })
+  }
+
   const svc: RunningService = {
     id,
     ...scope,
     worktreeId: scope.worktreeId ?? null,
     label: scope.label ?? null,
-    manifest,
+    manifest: effectiveManifest,
     runnerId,
     handle: null,
     pid: null,
@@ -272,6 +290,28 @@ export async function startService(
   const onLine = (line: LogLine) => {
     logs.push(line)
     emitter.emit("line", line)
+    // Sniff the line for a bound-port URL / "listening on port N" message.
+    // If the app bound somewhere other than where we allocated (e.g. our
+    // injection didn't reach this framework, or Vite stepped to the next
+    // free port), update the snapshot so the card + "Open in browser" link
+    // reflect reality. Last-detected wins — some apps retry ports at boot.
+    const detected = extractBoundPort(line.text)
+    if (
+      detected != null &&
+      detected !== svc.port &&
+      (svc.status === "starting" || svc.status === "running")
+    ) {
+      logRuntimeEvent("port.detected", {
+        id,
+        from: svc.port,
+        to: detected,
+      })
+      // Release our allocated slot (nothing is listening there) so the
+      // next restart doesn't keep preferring a dead number.
+      allocatedPorts.delete(svc.port)
+      svc.port = detected
+      emitter.emit("status", snapshot(svc))
+    }
   }
 
   const onExit = (exit: { code: number | null; signal: string | null; error?: string }) => {
@@ -297,7 +337,13 @@ export async function startService(
 
   let handle: RunnerHandle
   try {
-    handle = await runner.start({ manifest, port, serviceId: id, onLine, onExit })
+    handle = await runner.start({
+      manifest: effectiveManifest,
+      port,
+      serviceId: id,
+      onLine,
+      onExit,
+    })
   } catch (err) {
     allocatedPorts.delete(port)
     svc.status = "crashed"
