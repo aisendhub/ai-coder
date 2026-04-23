@@ -16,6 +16,7 @@ import {
   Unlink,
   Sparkles,
   Settings2,
+  ArrowDownToLine,
 } from "lucide-react"
 
 import {
@@ -1136,29 +1137,6 @@ function ConfiguredServiceCard({
               <span className="text-[10px] font-mono uppercase text-muted-foreground rounded bg-muted px-1.5 py-0.5">
                 {manifest.stack}
               </span>
-              <span className="text-[10px] font-mono text-muted-foreground">
-                {cardStatusLabel(status)}
-              </span>
-              {instance?.pid != null && (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <span
-                        className="text-[10px] font-mono text-muted-foreground rounded bg-muted/60 px-1.5 py-0.5 cursor-help"
-                        aria-label={`process id ${instance.pid}`}
-                      />
-                    }
-                  >
-                    pid {instance.pid}
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Host PID — Stop signals the whole process group so child
-                    processes die too. Useful if you need to kill it manually:
-                    {" "}
-                    <code className="font-mono">kill -TERM -{instance.pid}</code>
-                  </TooltipContent>
-                </Tooltip>
-              )}
             </div>
             <div className="text-xs text-muted-foreground font-mono truncate" title={manifest.start}>
               {manifest.start}
@@ -1356,6 +1334,15 @@ function CardControls({
 // Log viewer uses xterm.js so ANSI colors / cursor moves / progress bars from
 // Vite, Next, chalk, etc. render natively. `@xterm/addon-web-links` turns
 // http(s) URLs in the output into clickable links that open in a new tab.
+async function copyToClipboard(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success(`Copied ${label}`, { description: text, duration: 1500 })
+  } catch {
+    toast.error(`Couldn't copy ${label}`)
+  }
+}
+
 const LogViewer = observer(function LogViewer({ svc }: { svc: Service }) {
   const userId = workspace.userId
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -1465,19 +1452,77 @@ const LogViewer = observer(function LogViewer({ svc }: { svc: Service }) {
     <div className="h-full flex flex-col bg-muted/30 relative">
       <div className="px-4 py-2 border-b flex items-center gap-2 text-xs text-muted-foreground">
         <span>Logs</span>
-        <span className="font-mono truncate" title={svc.cwd}>{svc.cwd}</span>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                onClick={() => copyToClipboard(svc.cwd, "path")}
+                className="font-mono truncate hover:text-foreground cursor-pointer text-left min-w-0"
+                aria-label={`Copy path ${svc.cwd}`}
+              >
+                {svc.cwd}
+              </button>
+            }
+          >
+          </TooltipTrigger>
+          <TooltipContent>Click to copy path</TooltipContent>
+        </Tooltip>
         <span className="flex-1" />
+        <span
+          className={cn(
+            "inline-block size-2 rounded-full shrink-0",
+            cardStatusColor(svc.status),
+            (svc.status === "starting" || svc.status === "stopping") && "animate-pulse"
+          )}
+          aria-label={svc.status}
+        />
+        <span className="text-[10px] font-mono">
+          {cardStatusLabel(svc.status)}
+        </span>
+        {svc.pid != null && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(String(svc.pid), "PID")}
+                  className="text-[10px] font-mono rounded bg-muted/60 px-1.5 py-0.5 cursor-pointer hover:bg-muted hover:text-foreground"
+                  aria-label={`Copy process id ${svc.pid}`}
+                >
+                  pid {svc.pid}
+                </button>
+              }
+            >
+            </TooltipTrigger>
+            <TooltipContent>
+              <div>Click to copy PID</div>
+              <div className="mt-1 text-[10px] opacity-80">
+                Stop signals the whole process group.
+                To kill manually:{" "}
+                <code className="font-mono">kill -TERM -{svc.pid}</code>
+              </div>
+            </TooltipContent>
+          </Tooltip>
+        )}
         <span className="text-[10px] font-mono text-muted-foreground/70 hidden sm:inline">
           ⌘K clear · ⌘F find
         </span>
-        <button
-          type="button"
-          className="underline hover:text-foreground"
-          onClick={() => termRef.current?.scrollToBottom()}
-          aria-label="Scroll to latest"
-        >
-          Jump to latest
-        </button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                className="inline-flex size-6 items-center justify-center rounded hover:bg-accent hover:text-foreground"
+                onClick={() => termRef.current?.scrollToBottom()}
+                aria-label="Jump to latest"
+              />
+            }
+          >
+            <ArrowDownToLine className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipContent>Jump to latest</TooltipContent>
+        </Tooltip>
       </div>
       {searchOpen && (
         <div className="absolute top-9 right-2 z-10 flex items-center gap-1 rounded-md border bg-background shadow-sm p-1">
