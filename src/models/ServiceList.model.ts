@@ -6,8 +6,77 @@ type StartArgs = {
   userId: string
   projectId: string
   conversationId?: string | null
+  serviceName?: string
   label?: string | null
   runnerId?: RunnerId
+}
+
+// A row from project_services. Represents a configured service (web, api,
+// worker, …) — distinct from a *running instance* (Service / ServiceDto).
+// Persistent; the panel renders one card per row.
+export type ProjectServiceDto = {
+  id: string
+  project_id: string
+  name: string
+  description: string | null
+  stack: string
+  start: string
+  build: string | null
+  env: Record<string, string>
+  port: number | null
+  dockerfile: string | null
+  healthcheck: { path: string; timeoutMs: number } | null
+  enabled: boolean
+  order_index: number
+  restart_policy: "always" | "on-failure" | "never"
+  max_restarts: number
+  assigned_port: number | null
+  created_at: string
+  updated_at: string
+}
+
+// A single service proposal shown in the picker. Produced either by the
+// heuristic detector (GET /api/projects/:id/services/detect) or by the
+// one-shot LLM (POST /api/projects/:id/services/detect-llm). The `source`
+// field lets the UI tag rows so users know which proposals to trust more.
+export type DetectedServiceCandidate = {
+  name: string
+  stack: string
+  start: string
+  build?: string
+  env: Record<string, string>
+  port?: number
+  subdir: string
+  rationale: string
+  confidence: "high" | "medium" | "low"
+  alreadySaved: boolean
+  /** "heuristic" for file-tree detection, "ai" for LLM proposals. Panel
+   *  tags this client-side after each call; server endpoints don't emit it. */
+  source?: "heuristic" | "ai"
+}
+
+export type LlmServicesDetectionView = {
+  cwd: string
+  proposals: DetectedServiceCandidate[]
+  costUsd: number
+  error: string | null
+  rawPreview: string | null
+}
+
+export type ProjectServiceWriteDto = {
+  name: string
+  description?: string | null
+  stack: string
+  start: string
+  build?: string | null
+  env?: Record<string, string>
+  port?: number | null
+  dockerfile?: string | null
+  healthcheck?: { path: string; timeoutMs: number } | null
+  enabled?: boolean
+  order_index?: number
+  restart_policy?: "always" | "on-failure" | "never"
+  max_restarts?: number
 }
 
 export type RunnerId = "local-process" | "local-docker"
@@ -206,6 +275,7 @@ export class ServiceList extends BaseList<typeof Service> {
         userId: args.userId,
         projectId: args.projectId,
         conversationId: args.conversationId ?? undefined,
+        serviceName: args.serviceName ?? undefined,
         label: args.label ?? undefined,
         runnerId: args.runnerId ?? undefined,
       }),
@@ -431,6 +501,170 @@ export class ServiceList extends BaseList<typeof Service> {
       { method: "DELETE" }
     )
     if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
+  // ── Project services (configured, persistent) ─────────────────────────────
+  // These sit alongside the running-instance APIs above. A project_service
+  // row is what the user configures; a Service/ServiceDto is a live process.
+  // Server mirrors a single "default" row to the legacy run_manifest column
+  // during rollout, so existing panel paths still work.
+
+  async listProjectServices(
+    userId: string,
+    projectId: string
+  ): Promise<ProjectServiceDto[]> {
+    const res = await fetch(
+      `/api/projects/${projectId}/services?userId=${encodeURIComponent(userId)}`
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const json = (await res.json()) as { services: ProjectServiceDto[] }
+    return json.services
+  }
+
+  async createProjectService(
+    userId: string,
+    projectId: string,
+    service: ProjectServiceWriteDto
+  ): Promise<ProjectServiceDto> {
+    const res = await fetch(`/api/projects/${projectId}/services`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, service }),
+    })
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    return (await res.json()) as ProjectServiceDto
+  }
+
+  async updateProjectService(
+    userId: string,
+    projectId: string,
+    name: string,
+    service: ProjectServiceWriteDto
+  ): Promise<ProjectServiceDto> {
+    const res = await fetch(
+      `/api/projects/${projectId}/services/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, service }),
+      }
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    return (await res.json()) as ProjectServiceDto
+  }
+
+  async detectProjectServices(
+    userId: string,
+    projectId: string,
+    conversationId?: string | null
+  ): Promise<{ cwd: string; candidates: DetectedServiceCandidate[] }> {
+    const params = new URLSearchParams({ userId })
+    if (conversationId) params.set("conversationId", conversationId)
+    const res = await fetch(
+      `/api/projects/${projectId}/services/detect?${params.toString()}`
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    return (await res.json()) as { cwd: string; candidates: DetectedServiceCandidate[] }
+  }
+
+  async detectServicesWithLLM(
+    userId: string,
+    projectId: string,
+    conversationId?: string | null
+  ): Promise<LlmServicesDetectionView> {
+    const res = await fetch(`/api/projects/${projectId}/services/detect-llm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        conversationId: conversationId ?? undefined,
+      }),
+    })
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    return (await res.json()) as LlmServicesDetectionView
+  }
+
+  async deleteProjectServiceRow(
+    userId: string,
+    projectId: string,
+    name: string
+  ): Promise<void> {
+    const res = await fetch(
+      `/api/projects/${projectId}/services/${encodeURIComponent(name)}?userId=${encodeURIComponent(userId)}`,
+      { method: "DELETE" }
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
+  // Per-conversation, per-service manifest overrides. Sparse — null when
+  // the task has no override for this service.
+  async fetchServiceOverride(
+    userId: string,
+    conversationId: string,
+    serviceName: string
+  ): Promise<Partial<RunManifestDto> | null> {
+    const res = await fetch(
+      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override?userId=${encodeURIComponent(userId)}`
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+    const json = (await res.json()) as { override: Partial<RunManifestDto> | null }
+    return json.override
+  }
+
+  async saveServiceOverride(
+    userId: string,
+    conversationId: string,
+    serviceName: string,
+    override: Partial<RunManifestDto>
+  ): Promise<void> {
+    const res = await fetch(
+      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, override }),
+      }
+    )
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `HTTP ${res.status}`)
+    }
+  }
+
+  async clearServiceOverride(
+    userId: string,
+    conversationId: string,
+    serviceName: string
+  ): Promise<void> {
+    const res = await fetch(
+      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override?userId=${encodeURIComponent(userId)}`,
+      { method: "DELETE" }
+    )
+    if (!res.ok && res.status !== 404) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
       throw new Error(body.error || `HTTP ${res.status}`)
     }

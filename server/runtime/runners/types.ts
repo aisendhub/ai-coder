@@ -3,7 +3,12 @@ import type { LogLine } from "../ring-buffer.ts"
 
 // Narrow, open-by-convention. New runners add to this union without breaking
 // callers; the registry rejects unknown ids at start time.
-export type RunnerId = "local-process" | "local-docker"
+//
+// `external` is a synthetic runner: the process was spawned by a previous
+// server session, re-registered at boot via registerExternalService. We
+// don't own the stdio streams, so we can't restart or re-stream; stop
+// signals the pgid directly. See server/runtime/registry.ts.
+export type RunnerId = "local-process" | "local-docker" | "external"
 
 export type RunnerHandle = {
   /** Opaque identifier the runner uses to reference the running instance.

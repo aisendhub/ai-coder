@@ -44,6 +44,8 @@ import {
   buildDetectServicesSystemPrompt,
   buildDetectServicesNoticeText,
   extractDetectedManifest,
+  extractDetectedServices,
+  detectServicesWithLLM,
   buildVerifyRunPrompt,
   buildVerifyRunSystemPrompt,
   buildVerifyRunNoticeText,
@@ -52,6 +54,7 @@ import {
 } from "./agent-loop"
 import {
   detect as detectManifest,
+  detectAllServices,
   mergeManifest,
   startService,
   stopService,
@@ -61,12 +64,32 @@ import {
   listServices,
   subscribeLogs,
   removeService,
+  registerExternalService,
   listRunners,
   getRunnersInfo,
   RuntimeError,
   type ManifestOverride,
   type RunnerId,
+  type RunManifest,
 } from "./runtime/index.ts"
+import {
+  insertServiceInstance,
+  updateServiceInstanceStatus,
+  listLiveServiceInstancesForHost,
+} from "./instance-store.ts"
+import {
+  getProjectService,
+  listProjectServices,
+  upsertProjectService,
+  deleteProjectService,
+  patchProjectService,
+  getConversationServiceOverride,
+  setConversationServiceOverride,
+  manifestFromRow,
+  writeFromManifest,
+  type ProjectServiceRow,
+  type ProjectServiceWrite,
+} from "./services-store.ts"
 import { encryptToken, decryptToken } from "./integrations/crypto.ts"
 import { fetchMe as railwayFetchMe, RailwayApiError } from "./integrations/railway.ts"
 
@@ -799,11 +822,12 @@ async function startRunner(args: {
   return runner
 }
 
-// Runs after every turn. If the assistant's reply contains a
-// <run-manifest>…</run-manifest> block (emitted by the detect-services
-// scripted turn, or by any future "agent edits the config" flow), parse it
-// and save to projects.run_manifest. Emits a bus event so the SSE stream
-// notifies the chat client — the services panel reloads on receipt.
+// Runs after every turn. If the assistant's reply contains either a
+// `<run-services>` block (multi-service) OR a single `<run-manifest>`
+// block (legacy single-service), parse it and upsert to project_services.
+// Also mirrors a single-service save to the legacy projects.run_manifest
+// column during rollout. Emits a bus event so the SSE stream notifies the
+// chat client — the services panel reloads on receipt.
 async function reconcileDetectedServicesIfAny(
   conversationId: string,
   assistantText: string,
@@ -811,20 +835,28 @@ async function reconcileDetectedServicesIfAny(
 ): Promise<void> {
   if (!sb) return
   const textLen = assistantText?.length ?? 0
-  const hasTag = typeof assistantText === "string" && assistantText.includes("<run-manifest")
-  if (!hasTag) {
+  const hasMulti = typeof assistantText === "string" && assistantText.includes("<run-services")
+  const hasSingle = typeof assistantText === "string" && assistantText.includes("<run-manifest")
+  if (!hasMulti && !hasSingle) {
     if (textLen > 0) {
       console.log(
-        `[services.reconcile] no <run-manifest> block in assistant text ` +
+        `[services.reconcile] no <run-services>/<run-manifest> block in assistant text ` +
         `(len=${textLen}, tail="${assistantText.slice(-120).replace(/\n/g, " ")}")`
       )
     }
     return
   }
-  const proposal = extractDetectedManifest(assistantText)
-  if (!proposal) {
+
+  // Prefer multi-service when present. Agents that want to update a single
+  // service in a multi-service app should emit a single-entry <run-services>
+  // block (keyed by name), not a <run-manifest> which would overwrite the
+  // default service and no other.
+  const multi = hasMulti ? extractDetectedServices(assistantText) : null
+  const single = !multi && hasSingle ? extractDetectedManifest(assistantText) : null
+
+  if (!multi && !single) {
     console.warn(
-      `[services.reconcile] <run-manifest> block present but parse failed ` +
+      `[services.reconcile] block present but parse failed ` +
       `(len=${textLen}, tail="${assistantText.slice(-200).replace(/\n/g, " ")}")`
     )
     return
@@ -837,6 +869,48 @@ async function reconcileDetectedServicesIfAny(
     .single()
   if (!conv?.project_id) return
 
+  if (multi) {
+    // Replace or insert each named service. We do NOT delete services the
+    // block omits — agents sometimes propose a partial update (just "api"
+    // to fix a port) and nuking the rest would be surprising. Explicit
+    // delete stays a user action.
+    const saved: Array<{ name: string; port?: number }> = []
+    for (const [idx, svc] of multi.entries()) {
+      try {
+        await upsertProjectService(sb, conv.project_id as string, {
+          name: svc.name,
+          stack: svc.stack,
+          start: svc.start,
+          env: svc.env ?? {},
+          build: svc.build ?? null,
+          port: svc.port ?? null,
+          enabled: svc.enabled ?? true,
+          order_index: svc.order_index ?? idx,
+        })
+        saved.push({ name: svc.name, port: svc.port })
+      } catch (err) {
+        console.error(
+          `[services.reconcile] upsert of '${svc.name}' failed:`,
+          (err as Error).message
+        )
+      }
+    }
+    console.log(
+      `[services.reconcile] saved ${saved.length} service(s) for project ${(conv.project_id as string).slice(0, 8)}`,
+      saved
+    )
+    emit("services.configured", {
+      projectId: conv.project_id,
+      multi: true,
+      services: saved,
+    })
+    return
+  }
+
+  // Single-service path — same shape as before. Writes the default row in
+  // project_services AND mirrors to the legacy projects.run_manifest for
+  // one release.
+  const proposal = single!
   const manifest: Record<string, unknown> = {
     stack: proposal.stack,
     start: proposal.start,
@@ -845,18 +919,30 @@ async function reconcileDetectedServicesIfAny(
   if (proposal.build) manifest.build = proposal.build
   if (proposal.port != null) manifest.port = proposal.port
 
+  try {
+    await upsertProjectService(sb, conv.project_id as string, {
+      name: "default",
+      stack: proposal.stack,
+      start: proposal.start,
+      env: proposal.env ?? {},
+      build: proposal.build ?? null,
+      port: proposal.port ?? null,
+    })
+  } catch (err) {
+    console.error("[services.reconcile] upsert of 'default' failed:", (err as Error).message)
+    emit("services.configure_failed", { error: (err as Error).message })
+    return
+  }
   const { error } = await sb
     .from("projects")
     .update({ run_manifest: manifest })
     .eq("id", conv.project_id)
   if (error) {
-    console.error("[services.reconcile] save failed", error.message)
-    emit("services.configure_failed", { error: error.message })
-    return
+    console.error("[services.reconcile] legacy column update failed", error.message)
   }
 
   console.log(
-    `[services.reconcile] saved manifest for project ${conv.project_id.slice(0, 8)}`,
+    `[services.reconcile] saved manifest for project ${(conv.project_id as string).slice(0, 8)}`,
     { stack: proposal.stack, start: proposal.start }
   )
   emit("services.configured", {
@@ -1623,13 +1709,44 @@ app.post("/api/conversations/:id/detect-services", async (c) => {
     | null
     | undefined
 
+  // Pass whatever services are already configured so the agent can refine
+  // rather than overwrite. Single-service projects look the same to the
+  // agent regardless of whether they came in via <run-manifest> or a lone
+  // `<run-services>` with one entry — the list drives.
+  let existingServices: Array<{
+    name: string
+    stack: string
+    start: string
+    build?: string | null
+    env?: Record<string, string>
+    port?: number | null
+    enabled?: boolean
+  }> | null = null
+  try {
+    const rows = await listProjectServices(sb, conv.project_id as string)
+    if (rows.length > 0) {
+      existingServices = rows.map((r) => ({
+        name: r.name,
+        stack: r.stack,
+        start: r.start,
+        build: r.build ?? null,
+        env: r.env ?? {},
+        port: r.port ?? null,
+        enabled: r.enabled,
+      }))
+    }
+  } catch {
+    /* optional context; ignore */
+  }
+
   const prompt = buildDetectServicesPrompt({
     cwd,
     existingManifest: existingManifest ?? null,
+    existingServices,
   })
   const displayText = buildDetectServicesNoticeText({
     cwd,
-    refining: !!existingManifest,
+    refining: !!existingManifest || !!existingServices,
   })
 
   // If a runner is mid-turn, let it finish — unlike merge, detect is
@@ -1701,6 +1818,7 @@ app.post("/api/conversations/:id/verify-run", async (c) => {
       const final = getService(serviceId, userId) ?? initial
       const history = getLogHistory(serviceId, userId)
       const snapshot: VerifyRunSnapshot = {
+        serviceName: final.serviceName,
         stack: final.stack,
         start: final.start,
         status: final.status,
@@ -2355,6 +2473,321 @@ setInterval(() => { void reapTrashedConversations() }, REAPER_INTERVAL_MS)
 // and lists/streams. See docs/RUNTIME.md; runner code lives in
 // server/runtime/. Chat/agent code must not import runtime internals.
 
+// ─── Instance persistence ───────────────────────────────────────────────────
+// Every spawn writes a row to service_instances; every status transition
+// updates it. At boot, reconcileServiceInstances() probes persisted rows
+// and either re-registers the instance (process still alive) or marks it
+// stopped. See docs/MULTI-SERVICE.md § Phase 9.9.
+
+function attachInstancePersistence(snap: ServiceSnapshotLike, label: string | null): void {
+  if (!sb) return
+  // Use upsert-on-id so a reconciled external instance's row stays keyed by
+  // the same registry id (set by registerExternalService).
+  void insertServiceInstance(sb, {
+    id: snap.id,
+    user_id: snap.ownerId,
+    project_id: snap.projectId,
+    service_name: snap.serviceName,
+    worktree_path: snap.worktreePath ?? null,
+    runner_id: snap.runnerId,
+    pid: snap.pid,
+    port: snap.port,
+    status: snap.status,
+    label,
+  }).catch((err) => {
+    console.warn("[instance-persist] insert failed:", (err as Error).message)
+  })
+
+  const sub = subscribeLogs(snap.id, snap.ownerId)
+  if (!sub) return
+  sub.onStatus((s) => {
+    if (!sb) return
+    void updateServiceInstanceStatus(sb, s.id, {
+      status: s.status,
+      exit_code: s.exitCode ?? null,
+      error: s.error ?? null,
+      port: s.port,
+    }).catch((err) => {
+      console.warn("[instance-persist] status update failed:", (err as Error).message)
+    })
+  })
+  sub.onEnd(() => sub.unsubscribe())
+}
+
+// Narrower shape than ServiceSnapshot so test seams + the external-registered
+// variant can both pass through without importing the full type here.
+type ServiceSnapshotLike = {
+  id: string
+  ownerId: string
+  projectId: string
+  serviceName: string
+  worktreePath: string | null
+  runnerId: RunnerId
+  pid: number | null
+  port: number
+  status: "starting" | "running" | "stopping" | "stopped" | "crashed"
+}
+
+// Boot-time reconcile. Walks every persisted row that thinks it's live on
+// this host, probes the pid (signal 0), and either re-registers via the
+// external runner or flips the row to "stopped". Safe to run multiple times.
+async function reconcileServiceInstances(): Promise<void> {
+  if (!sb) return
+  let rows: Awaited<ReturnType<typeof listLiveServiceInstancesForHost>>
+  try {
+    rows = await listLiveServiceInstancesForHost(sb)
+  } catch (err) {
+    console.warn("[reconcile] list failed:", (err as Error).message)
+    return
+  }
+  if (rows.length === 0) return
+
+  const reaped: string[] = []
+  const kept: string[] = []
+  for (const row of rows) {
+    const pid = row.pid
+    const alive = pid != null && isPidAlive(pid)
+    if (!alive) {
+      try {
+        await updateServiceInstanceStatus(sb, row.id, {
+          status: "stopped",
+          error: "process gone at boot reconcile",
+        })
+      } catch {
+        /* best-effort */
+      }
+      reaped.push(row.id.slice(0, 8))
+      continue
+    }
+    // Re-register in the in-memory registry so the panel shows it. The
+    // original manifest isn't recoverable from this table (we didn't
+    // persist it), so we fabricate a minimal one from the stack/start-less
+    // snapshot — the panel's start command text will be blank for external
+    // instances; users see the live pid/port, can stop via the panel.
+    try {
+      registerExternalService({
+        id: row.id,
+        scope: {
+          ownerId: row.user_id,
+          projectId: row.project_id,
+          serviceName: row.service_name,
+          worktreePath: row.worktree_path,
+          label: row.label,
+        },
+        manifest: {
+          stack: "custom",
+          start: "(started in a previous server session — restart for live logs)",
+          cwd: "",
+          env: {},
+        },
+        runnerId: (row.runner_id as RunnerId) ?? "external",
+        pid: pid!,
+        port: row.port,
+        startedAt: new Date(row.started_at).getTime(),
+      })
+      kept.push(row.id.slice(0, 8))
+    } catch (err) {
+      console.warn(
+        `[reconcile] re-register of ${row.id.slice(0, 8)} failed:`,
+        (err as Error).message
+      )
+    }
+  }
+  console.log(
+    `[reconcile] service_instances: kept=${kept.length} reaped=${reaped.length}`
+  )
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EPERM") {
+      // We know it exists but can't signal it; treat as alive. Happens on
+      // processes owned by a different uid — unusual in local dev but not
+      // impossible (sudo-started server).
+      return true
+    }
+    return false
+  }
+}
+
+// ─── Supervisor ─────────────────────────────────────────────────────────────
+// PM2-style auto-restart. Keyed by scope so counters survive instance churn.
+// Policy is per-service-row (project_services.restart_policy). We treat an
+// instance that stayed up past GRACE_MS as "healthy" and reset the counter;
+// anything that crashes faster is burning retries. Exponential backoff
+// (1s, 2s, 4s, …) capped at 30s so a truly broken service doesn't busy-loop.
+
+const SUPERVISOR_GRACE_MS = 10_000
+const SUPERVISOR_MAX_DELAY_MS = 30_000
+
+type SupervisorScope = {
+  userId: string
+  projectId: string
+  serviceName: string
+  worktreePath: string | null
+}
+
+function supervisorKey(s: SupervisorScope): string {
+  return `${s.userId}:${s.projectId}:${s.serviceName}:${s.worktreePath ?? "null"}`
+}
+
+type SupervisorState = {
+  restarts: number
+  pending: ReturnType<typeof setTimeout> | null
+  // Instance id that most recently called attachSupervisor. We ignore end
+  // events from earlier instances to avoid double-scheduling when the user
+  // manually restarted (stop+start) between a crash and its supervisor fire.
+  latestInstanceId: string | null
+}
+
+const supervisorState = new Map<string, SupervisorState>()
+
+function getSupervisorState(scope: SupervisorScope): SupervisorState {
+  const key = supervisorKey(scope)
+  let state = supervisorState.get(key)
+  if (!state) {
+    state = { restarts: 0, pending: null, latestInstanceId: null }
+    supervisorState.set(key, state)
+  }
+  return state
+}
+
+type SupervisorCtx = SupervisorScope & {
+  conversationId: string | null
+  label: string | null
+  runnerId?: RunnerId
+  manifest: RunManifest
+  snap: { id: string; port: number }
+  policy: "always" | "on-failure" | "never"
+  maxRestarts: number
+}
+
+function attachSupervisor(ctx: SupervisorCtx): void {
+  const scope: SupervisorScope = {
+    userId: ctx.userId,
+    projectId: ctx.projectId,
+    serviceName: ctx.serviceName,
+    worktreePath: ctx.worktreePath,
+  }
+  const state = getSupervisorState(scope)
+  state.latestInstanceId = ctx.snap.id
+
+  const sub = subscribeLogs(ctx.snap.id, ctx.userId)
+  if (!sub) return
+
+  sub.onEnd(() => {
+    try {
+      // Defer the decision a tick so the terminal status is settled.
+      queueMicrotask(() => handleSupervisorExit(ctx, state))
+    } finally {
+      sub.unsubscribe()
+    }
+  })
+}
+
+function handleSupervisorExit(ctx: SupervisorCtx, state: SupervisorState): void {
+  // Ignore stale `end` events from earlier instances of the same scope —
+  // a user-triggered restart (stop+start) replaces `latestInstanceId` and
+  // the outgoing one's end event must not double-schedule.
+  if (state.latestInstanceId !== ctx.snap.id) return
+
+  const snap = getService(ctx.snap.id, ctx.userId)
+  if (!snap) return
+  const crashed = snap.status === "crashed"
+  const cleanExit = snap.status === "stopped" && (snap.exitCode === 0 || snap.exitCode === null)
+
+  // `never` never restarts; `on-failure` restarts only on non-zero exit;
+  // `always` restarts even on clean stop. A user-triggered stop via
+  // /stop sets status=stopped — we still restart on `always` which may
+  // be surprising; tradeoff matches PM2 docs.
+  const wantRestart =
+    ctx.policy === "always" ||
+    (ctx.policy === "on-failure" && crashed)
+  if (!wantRestart) return
+  if (ctx.policy === "on-failure" && cleanExit) return
+
+  // Reset counter if the instance was healthy long enough. Protects
+  // against "one flaky restart locks us out forever" while keeping the
+  // cap meaningful for tight crash loops.
+  const uptime = Date.now() - (snap.startedAt ?? Date.now())
+  if (uptime > SUPERVISOR_GRACE_MS) state.restarts = 0
+
+  if (state.restarts >= ctx.maxRestarts) {
+    console.warn(
+      `[supervisor] exhausted retries for ${supervisorKey(ctx)}:`,
+      `${state.restarts}/${ctx.maxRestarts}`
+    )
+    void emitSupervisorExhaustedNotice(ctx, state.restarts)
+    state.restarts = 0
+    return
+  }
+
+  const delay = Math.min(1000 * 2 ** state.restarts, SUPERVISOR_MAX_DELAY_MS)
+  state.restarts++
+  state.pending = setTimeout(() => {
+    state.pending = null
+    void restartViaSupervisor(ctx)
+  }, delay)
+
+  console.log(
+    `[supervisor] scheduling restart of ${ctx.serviceName} in ${delay}ms ` +
+    `(attempt ${state.restarts}/${ctx.maxRestarts})`
+  )
+}
+
+async function restartViaSupervisor(ctx: SupervisorCtx): Promise<void> {
+  try {
+    const snap = await startService(
+      { ...ctx.manifest },
+      {
+        ownerId: ctx.userId,
+        projectId: ctx.projectId,
+        serviceName: ctx.serviceName,
+        worktreePath: ctx.worktreePath,
+        label: ctx.label,
+      },
+      { preferredPort: ctx.snap.port, runnerId: ctx.runnerId }
+    )
+    // Re-arm the supervisor for the new instance.
+    attachSupervisor({ ...ctx, snap: { id: snap.id, port: snap.port } })
+  } catch (err) {
+    console.error(`[supervisor] restart failed:`, (err as Error).message)
+  }
+}
+
+// Inject a single chat notice when a service blows through its retry cap.
+// The conversation shown is whichever one the user last started the service
+// from — fine as a nudge, even if they've since moved chats.
+async function emitSupervisorExhaustedNotice(
+  ctx: SupervisorCtx,
+  attempts: number
+): Promise<void> {
+  if (!ctx.conversationId) return
+  if (!sb) return
+  const text = [
+    `**\`${ctx.serviceName}\` exhausted its restart budget** (${attempts} attempts).`,
+    "",
+    "The supervisor won't keep retrying — inspect the logs and either fix the",
+    "config or ask the agent to check via the ⬡ button on the service card.",
+  ].join("\n")
+  try {
+    // Same shape as merge / detect-services notices — see the `role === "notice"`
+    // path in startRunner (insert block uses `text` + `events: []`).
+    await sb.from("messages").insert({
+      conversation_id: ctx.conversationId,
+      role: "notice",
+      text,
+      events: [],
+      delivered_at: new Date().toISOString(),
+    })
+  } catch (err) {
+    console.warn("[supervisor] couldn't inject notice:", (err as Error).message)
+  }
+}
+
 function runtimeErrorStatus(code: RuntimeError["code"]): 403 | 404 | 409 | 429 | 500 | 503 {
   switch (code) {
     case "user_cap_reached": return 429
@@ -2370,17 +2803,32 @@ type ManifestContext = {
   ok: true
   projectCwd: string
   effectiveCwd: string
+  serviceName: string
+  // The resolved config for the requested service (defaults to "default"),
+  // shaped like the legacy RunManifest so existing endpoints keep working.
   cachedProjectManifest: RunManifest | null
+  // Raw DB row for the requested service, when one exists. Start-endpoint
+  // uses it to write assigned_port directly on the service row.
+  serviceRow: ProjectServiceRow | null
   override: ManifestOverride | null
+  // Preferred port: per-conversation (legacy assigned_port) first, then the
+  // service row's assigned_port. Phase 9.2+ pushes everyone toward the
+  // service-level field; conv-level stays as a fallback for one release.
   assignedPort: number | null
   conversationId: string | null
   worktreePath: string | null
 }
 
+// Read the current effective manifest for the given scope. Reads through
+// project_services (backfilled during migration 0014) and falls back to the
+// legacy projects.run_manifest column only as a safety net. `serviceName`
+// selects which service row to look up — callers that don't care pass
+// "default" and keep the single-service behaviour.
 async function loadManifestContext(
   userId: string,
   projectId: string,
-  conversationId: string | undefined
+  conversationId: string | undefined,
+  serviceName = "default"
 ): Promise<
   | ManifestContext
   | { ok: false; status: 403 | 404 | 503; error: string }
@@ -2395,16 +2843,37 @@ async function loadManifestContext(
   if (project.user_id !== userId) return { ok: false, status: 403, error: "forbidden" }
 
   const projectCwd = resolveProjectCwd(project.cwd)
-  const cached = (project.run_manifest ?? null) as RunManifest | null
+
+  // Prefer project_services row → fall back to legacy run_manifest when the
+  // requested service is the default and no row exists yet (e.g. a project
+  // created after the migration but before the first save).
+  let cached: RunManifest | null = null
+  let serviceRow: ProjectServiceRow | null = null
+  let serviceAssignedPort: number | null = null
+  try {
+    serviceRow = await getProjectService(sb, projectId, serviceName)
+    if (serviceRow && serviceRow.start) {
+      const m = manifestFromRow(serviceRow)
+      cached = { ...m, cwd: "" } as RunManifest
+      serviceAssignedPort = serviceRow.assigned_port
+    }
+  } catch (err) {
+    console.warn("[manifest] project_services read failed, falling back to legacy column:", err)
+  }
+  if (!cached && serviceName === "default") {
+    cached = (project.run_manifest ?? null) as RunManifest | null
+  }
 
   if (!conversationId) {
     return {
       ok: true,
       projectCwd,
       effectiveCwd: projectCwd,
+      serviceName,
       cachedProjectManifest: cached,
+      serviceRow,
       override: null,
-      assignedPort: null,
+      assignedPort: serviceAssignedPort,
       conversationId: null,
       worktreePath: null,
     }
@@ -2412,20 +2881,36 @@ async function loadManifestContext(
 
   const { data: conv } = await sb
     .from("conversations")
-    .select("id, project_id, worktree_path, run_manifest_override, assigned_port")
+    .select("id, project_id, worktree_path, run_manifest_override, assigned_port, service_overrides")
     .eq("id", conversationId)
     .single()
   if (!conv || conv.project_id !== projectId) {
     return { ok: false, status: 404, error: "conversation not found" }
   }
 
+  // Prefer per-service override keyed by serviceName → legacy
+  // run_manifest_override (only when serviceName === "default").
+  const serviceOverridesMap = (conv.service_overrides ?? null) as
+    | Record<string, ManifestOverride>
+    | null
+  const override: ManifestOverride | null =
+    (serviceOverridesMap?.[serviceName] ?? null) ||
+    (serviceName === "default"
+      ? ((conv.run_manifest_override ?? null) as ManifestOverride | null)
+      : null)
+
+  const assignedPort =
+    (conv.assigned_port as number | null) ?? serviceAssignedPort
+
   return {
     ok: true,
     projectCwd,
     effectiveCwd: conv.worktree_path ? resolve(conv.worktree_path) : projectCwd,
+    serviceName,
     cachedProjectManifest: cached,
-    override: (conv.run_manifest_override ?? null) as ManifestOverride | null,
-    assignedPort: (conv.assigned_port ?? null) as number | null,
+    serviceRow,
+    override,
+    assignedPort,
     conversationId: conv.id as string,
     worktreePath: (conv.worktree_path ?? null) as string | null,
   }
@@ -2479,22 +2964,26 @@ app.post("/api/services/start", async (c) => {
     userId?: string
     projectId?: string
     conversationId?: string
+    serviceName?: string
     label?: string
     overrides?: ManifestOverride
     runnerId?: RunnerId
   }>().catch(() => ({}))
   const { userId, projectId, conversationId } = body
+  const serviceName = body.serviceName || "default"
   if (!userId) return c.json({ error: "userId required" }, 400)
   if (!projectId) return c.json({ error: "projectId required" }, 400)
 
-  const ctx = await loadManifestContext(userId, projectId, conversationId)
+  const ctx = await loadManifestContext(userId, projectId, conversationId, serviceName)
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
 
-  // Prefer cached project manifest; fall back to on-the-fly detection. The
-  // first-run UX caches the detected manifest via PUT /api/projects/:id/manifest
-  // before calling start, so on well-behaved flows `cached` is always set.
+  // Prefer cached service config; fall back to on-the-fly detection only for
+  // the default service (non-default services must be explicitly configured
+  // via the CRUD endpoints — we don't guess what a "worker" service should
+  // run). The first-run UX caches the manifest before calling start, so on
+  // well-behaved flows `cached` is always set.
   let base: RunManifest | null = ctx.cachedProjectManifest
-  if (!base) {
+  if (!base && serviceName === "default") {
     try {
       base = await detectManifest(ctx.effectiveCwd)
     } catch (err) {
@@ -2504,7 +2993,10 @@ app.post("/api/services/start", async (c) => {
   if (!base) {
     return c.json(
       {
-        error: "no runnable manifest — project has no cached start command and detection found nothing",
+        error:
+          serviceName === "default"
+            ? "no runnable manifest — project has no cached start command and detection found nothing"
+            : `service '${serviceName}' not configured — create it first`,
         cwd: ctx.effectiveCwd,
       },
       422
@@ -2524,17 +3016,20 @@ app.post("/api/services/start", async (c) => {
     )
   }
 
-  // Restart semantics: if a service for this exact scope (user + project +
-  // conversation) is still live in the registry, stop it first and wait for
+  // Restart semantics: if an instance for this exact scope (user + project +
+  // serviceName + worktreePath) is still live, stop it first and wait for
   // the process group to exit so its port releases. Common after a page
   // reload — the in-memory registry survives the client disconnect, so the
   // next Run would otherwise spawn a duplicate and the old process would
-  // keep its port. Also silently drops any previously-stopped entries for
-  // the same scope so the registry doesn't accumulate stale rows.
+  // keep its port. Also drops any previously-stopped entries for the same
+  // scope so the registry doesn't accumulate stale rows. Scope keys on the
+  // worktree path (chats share, tasks are isolated), not the conv id.
+  const scopeWorktreePath = ctx.worktreePath
   const scopedExisting = listServices({
     ownerId: userId,
     projectId,
-    worktreeId: conversationId ?? null,
+    serviceName,
+    worktreePath: scopeWorktreePath,
   })
   for (const prev of scopedExisting) {
     const isLive =
@@ -2554,8 +3049,6 @@ app.post("/api/services/start", async (c) => {
         )
       }
     }
-    // Always clean the entry out of the registry — dead or alive after the
-    // stop attempt — so only the new instance represents this scope.
     try {
       removeService(prev.id, userId)
     } catch {
@@ -2564,31 +3057,65 @@ app.post("/api/services/start", async (c) => {
   }
 
   try {
-    // Preferred port priority: per-worktree assigned_port first (keeps
-    // localhost URL stable across restarts for this conversation), then the
-    // manifest's port (what the agent inferred or what the user typed into
-    // the editor). Registry falls through to auto-allocate in 4100-4999 if
-    // both are taken.
+    // Preferred port priority: conv-level assigned_port (legacy, survives one
+    // release) → service-row assigned_port (the forward path) → manifest
+    // port (agent inferred / user typed). Registry falls through to
+    // auto-allocate in its sandbox range if all three are taken.
     const preferredPort = ctx.assignedPort ?? effective.port ?? null
     const snap = await startService(
       effective,
       {
         ownerId: userId,
         projectId,
-        worktreeId: conversationId ?? null,
+        serviceName,
+        worktreePath: scopeWorktreePath,
         label: body.label ?? null,
       },
       { preferredPort, runnerId: body.runnerId }
     )
-    // Persist assigned_port on the conversation so localhost:<port> stays
-    // stable across restarts. Write what we actually bound to; if the
-    // preferred port was taken, we picked a new one.
+    // Persist assigned_port so localhost:<port> stays stable across restarts.
+    // Write to the service row (forward path); also mirror to conversations
+    // for one release so existing readers of conv.assigned_port don't regress.
+    if (sb && snap.port && ctx.serviceRow && ctx.serviceRow.assigned_port !== snap.port) {
+      try {
+        await patchProjectService(sb, projectId, serviceName, {
+          assigned_port: snap.port,
+        })
+      } catch (err) {
+        console.warn("[services.start] failed to persist assigned_port on service row:", err)
+      }
+    }
     if (conversationId && sb && ctx.assignedPort !== snap.port) {
       await sb
         .from("conversations")
         .update({ assigned_port: snap.port })
         .eq("id", conversationId)
     }
+
+    // Persist instance metadata so a server restart can reconcile (either
+    // reattach the live process or mark the row stopped). Logs stay in
+    // memory — reattached instances show a placeholder line.
+    attachInstancePersistence(snap, body.label ?? null)
+
+    // Attach the supervisor (auto-restart on crash) if the service row
+    // asks for it. Survives crashes of individual instances; resets the
+    // restart counter when an instance stays up past a grace period.
+    if (ctx.serviceRow && ctx.serviceRow.restart_policy !== "never") {
+      attachSupervisor({
+        userId,
+        projectId,
+        serviceName,
+        worktreePath: scopeWorktreePath,
+        conversationId: conversationId ?? null,
+        label: body.label ?? null,
+        runnerId: body.runnerId,
+        manifest: effective,
+        snap,
+        policy: ctx.serviceRow.restart_policy,
+        maxRestarts: ctx.serviceRow.max_restarts,
+      })
+    }
+
     return c.json(snap)
   } catch (err) {
     if (err instanceof RuntimeError) {
@@ -2650,6 +3177,13 @@ app.put("/api/projects/:id/manifest", async (c) => {
   const toStore: Record<string, unknown> = { ...manifest }
   delete toStore.cwd // never store cwd; always derived at run time
 
+  // Forward path: write to project_services[default]. Mirror to the legacy
+  // projects.run_manifest column for one release so rollback is safe.
+  try {
+    await upsertProjectService(sb, projectId, writeFromManifest("default", manifest))
+  } catch (err) {
+    return c.json({ error: `failed to save service: ${(err as Error).message}` }, 500)
+  }
   const { error } = await sb
     .from("projects")
     .update({ run_manifest: toStore })
@@ -2672,12 +3206,312 @@ app.delete("/api/projects/:id/manifest", async (c) => {
   if (!project) return c.json({ error: "project not found" }, 404)
   if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
+  // Delete the default service row and clear the legacy column together.
+  try {
+    await deleteProjectService(sb, projectId, "default")
+  } catch (err) {
+    console.warn("[manifest] delete default service row failed:", err)
+  }
   const { error } = await sb
     .from("projects")
     .update({ run_manifest: null })
     .eq("id", projectId)
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ ok: true })
+})
+
+// ─── Plural service CRUD ────────────────────────────────────────────────────
+// Per-project service configurations (web, api, worker, …). One row per
+// service. The legacy /api/projects/:id/manifest endpoints keep working and
+// read/write the default service row; these endpoints are the new surface
+// for multi-service setups.
+
+type ProjectAuth =
+  | { ok: true }
+  | { ok: false; status: 403 | 404 | 503; error: string }
+
+async function authorizeProject(
+  projectId: string,
+  userId: string
+): Promise<ProjectAuth> {
+  if (!sb) return { ok: false, status: 503, error: "persistence disabled" }
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, user_id")
+    .eq("id", projectId)
+    .single()
+  if (!project) return { ok: false, status: 404, error: "project not found" }
+  if (project.user_id !== userId) return { ok: false, status: 403, error: "forbidden" }
+  return { ok: true }
+}
+
+function sanitizeServiceWrite(raw: unknown, fallbackName?: string): ProjectServiceWrite | null {
+  if (!raw || typeof raw !== "object") return null
+  const r = raw as Record<string, unknown>
+  const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : fallbackName
+  if (!name) return null
+  if (typeof r.start !== "string" || !r.start.trim()) return null
+  const out: ProjectServiceWrite = {
+    name,
+    stack: typeof r.stack === "string" && r.stack ? r.stack : "custom",
+    start: r.start,
+  }
+  if (typeof r.description === "string" || r.description === null) out.description = r.description as string | null
+  if (typeof r.build === "string" || r.build === null) out.build = r.build as string | null
+  if (r.env && typeof r.env === "object") out.env = r.env as Record<string, string>
+  if (typeof r.port === "number" || r.port === null) out.port = r.port as number | null
+  if (typeof r.dockerfile === "string" || r.dockerfile === null) out.dockerfile = r.dockerfile as string | null
+  if (
+    r.healthcheck &&
+    typeof r.healthcheck === "object" &&
+    typeof (r.healthcheck as Record<string, unknown>).path === "string" &&
+    typeof (r.healthcheck as Record<string, unknown>).timeoutMs === "number"
+  ) {
+    out.healthcheck = r.healthcheck as ProjectServiceWrite["healthcheck"]
+  } else if (r.healthcheck === null) {
+    out.healthcheck = null
+  }
+  if (typeof r.enabled === "boolean") out.enabled = r.enabled
+  if (typeof r.order_index === "number") out.order_index = r.order_index
+  if (
+    r.restart_policy === "always" ||
+    r.restart_policy === "on-failure" ||
+    r.restart_policy === "never"
+  ) {
+    out.restart_policy = r.restart_policy
+  }
+  if (typeof r.max_restarts === "number") out.max_restarts = r.max_restarts
+  if (typeof r.assigned_port === "number" || r.assigned_port === null) {
+    out.assigned_port = r.assigned_port as number | null
+  }
+  return out
+}
+
+app.get("/api/projects/:id/services", async (c) => {
+  const projectId = c.req.param("id")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const rows = await listProjectServices(sb!, projectId)
+  return c.json({ services: rows })
+})
+
+app.post("/api/projects/:id/services", async (c) => {
+  const projectId = c.req.param("id")
+  const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
+  const { userId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+
+  const write = sanitizeServiceWrite(body.service)
+  if (!write) return c.json({ error: "invalid service — need at least { name, start }" }, 400)
+
+  // Reject collisions — POST is strictly create; use PUT to update.
+  const existing = await getProjectService(sb!, projectId, write.name)
+  if (existing) return c.json({ error: `service '${write.name}' already exists` }, 409)
+  try {
+    const row = await upsertProjectService(sb!, projectId, write)
+    return c.json(row)
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
+// Multi-service heuristic detect. Scans the project cwd (or the active
+// conversation's worktree) and returns every plausible runnable service —
+// root + one-level subdirs + apps/*, services/*, packages/* on common
+// monorepo layouts. Each candidate carries an `alreadySaved` flag so the
+// picker UI can dim rows that match an existing project_services row.
+//
+// REGISTRATION ORDER MATTERS: this must come BEFORE the `:name` routes
+// below — otherwise Hono matches "detect" as a service name and 404s with
+// "service not found". Same reason /api/services/runners sits before
+// /api/services/:id further down.
+app.get("/api/projects/:id/services/detect", async (c) => {
+  const projectId = c.req.param("id")
+  const userId = c.req.query("userId")
+  const conversationId = c.req.query("conversationId") || undefined
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+
+  // Resolve cwd: prefer the conversation's worktree when present so a task's
+  // monorepo view shows what the user has actually built in it.
+  const { data: project } = await sb!
+    .from("projects")
+    .select("cwd")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+  let cwd = resolveProjectCwd(project.cwd)
+  if (conversationId) {
+    const { data: conv } = await sb!
+      .from("conversations")
+      .select("worktree_path, project_id")
+      .eq("id", conversationId)
+      .single()
+    if (conv && conv.project_id === projectId && conv.worktree_path) {
+      cwd = resolve(conv.worktree_path)
+    }
+  }
+
+  const [candidates, existing] = await Promise.all([
+    detectAllServices(cwd).catch(() => [] as Awaited<ReturnType<typeof detectAllServices>>),
+    listProjectServices(sb!, projectId).catch(() => [] as ProjectServiceRow[]),
+  ])
+  const existingByName = new Set(existing.map((r) => r.name))
+
+  return c.json({
+    cwd,
+    candidates: candidates.map((cand) => ({
+      ...cand,
+      alreadySaved: existingByName.has(cand.name),
+    })),
+  })
+})
+
+// AI (LLM) multi-service detect. Synchronous single-shot LLM call — the
+// model inspects the tree with read-only tools and returns every service
+// it thinks is runnable, via a `<run-services>` block. Returns the
+// proposals to the caller rather than auto-saving; the picker decides
+// which ones to persist.
+//
+// For the conversation-aware "configure via chat" path, see
+// POST /api/conversations/:id/detect-services — that one runs inside the
+// chat's runner and reconcile auto-saves after the turn.
+app.post("/api/projects/:id/services/detect-llm", async (c) => {
+  const projectId = c.req.param("id")
+  const body = await c.req.json<{ userId?: string; conversationId?: string }>().catch(() => ({}))
+  const { userId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+
+  const { data: project } = await sb!
+    .from("projects")
+    .select("cwd")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+  let cwd = resolveProjectCwd(project.cwd)
+  if (body.conversationId) {
+    const { data: conv } = await sb!
+      .from("conversations")
+      .select("worktree_path, project_id")
+      .eq("id", body.conversationId)
+      .single()
+    if (conv && conv.project_id === projectId && conv.worktree_path) {
+      cwd = resolve(conv.worktree_path)
+    }
+  }
+
+  // Existing rows inform the model so it proposes ADDITIONS / refinements
+  // rather than duplicates. Empty list = first-time setup.
+  let existing: Array<{ name: string; stack: string; start: string; port?: number | null }> = []
+  try {
+    const rows = await listProjectServices(sb!, projectId)
+    existing = rows.map((r) => ({
+      name: r.name,
+      stack: r.stack,
+      start: r.start,
+      port: r.port,
+    }))
+  } catch {
+    /* advisory */
+  }
+
+  const result = await detectServicesWithLLM({ cwd, existingServices: existing })
+  const existingByName = new Set(existing.map((r) => r.name))
+  return c.json({
+    cwd,
+    proposals: result.proposals.map((p) => ({
+      name: p.name,
+      stack: p.stack,
+      start: p.start,
+      build: p.build,
+      env: p.env ?? {},
+      port: p.port,
+      subdir: "",                // LLM embeds any `cd <subdir>` in `start`
+      rationale: p.rationale,
+      confidence: p.confidence,
+      alreadySaved: existingByName.has(p.name),
+    })),
+    costUsd: result.costUsd,
+    error: result.error ?? null,
+    rawPreview: result.error && result.raw ? result.raw.slice(0, 400) : null,
+  })
+})
+
+app.get("/api/projects/:id/services/:name", async (c) => {
+  const projectId = c.req.param("id")
+  const name = c.req.param("name")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const row = await getProjectService(sb!, projectId, name)
+  if (!row) return c.json({ error: "service not found" }, 404)
+  return c.json(row)
+})
+
+app.put("/api/projects/:id/services/:name", async (c) => {
+  const projectId = c.req.param("id")
+  const name = c.req.param("name")
+  const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
+  const { userId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+
+  // URL path wins on name — clients renaming a service do it via DELETE+POST.
+  const write = sanitizeServiceWrite(body.service, name)
+  if (!write) return c.json({ error: "invalid service — need at least { start }" }, 400)
+  write.name = name
+
+  try {
+    const row = await upsertProjectService(sb!, projectId, write)
+    // Keep legacy column mirrored for the default service during rollout so
+    // downstream readers we haven't migrated yet see the same data.
+    if (name === "default") {
+      const manifestShape: Record<string, unknown> = {
+        stack: row.stack,
+        start: row.start,
+        env: row.env ?? {},
+      }
+      if (row.build) manifestShape.build = row.build
+      if (row.port != null) manifestShape.port = row.port
+      if (row.dockerfile) manifestShape.dockerfile = row.dockerfile
+      if (row.healthcheck) manifestShape.healthcheck = row.healthcheck
+      await sb!
+        .from("projects")
+        .update({ run_manifest: manifestShape })
+        .eq("id", projectId)
+    }
+    return c.json(row)
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
+app.delete("/api/projects/:id/services/:name", async (c) => {
+  const projectId = c.req.param("id")
+  const name = c.req.param("name")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeProject(projectId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+
+  try {
+    await deleteProjectService(sb!, projectId, name)
+    if (name === "default") {
+      await sb!.from("projects").update({ run_manifest: null }).eq("id", projectId)
+    }
+    return c.json({ ok: true })
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
 })
 
 // Ask the LLM to inspect the project cwd and propose a run manifest. Used by
@@ -2813,6 +3647,72 @@ app.delete("/api/conversations/:id/manifest-override", async (c) => {
   return c.json({ ok: true })
 })
 
+// ─── Plural conversation overrides (per-service) ────────────────────────────
+// Per-conversation, per-service manifest override. Sparse — most tasks
+// don't have any overrides. The column is `conversations.service_overrides`
+// (jsonb map keyed by service name). See docs/MULTI-SERVICE.md.
+
+async function authorizeConversation(
+  conversationId: string,
+  userId: string
+): Promise<ProjectAuth> {
+  if (!sb) return { ok: false, status: 503, error: "persistence disabled" }
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, user_id")
+    .eq("id", conversationId)
+    .single()
+  if (!conv) return { ok: false, status: 404, error: "conversation not found" }
+  if (conv.user_id !== userId) return { ok: false, status: 403, error: "forbidden" }
+  return { ok: true }
+}
+
+app.get("/api/conversations/:id/services/:name/override", async (c) => {
+  const conversationId = c.req.param("id")
+  const serviceName = c.req.param("name")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeConversation(conversationId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const override = await getConversationServiceOverride(sb!, conversationId, serviceName)
+  return c.json({ override })
+})
+
+app.put("/api/conversations/:id/services/:name/override", async (c) => {
+  const conversationId = c.req.param("id")
+  const serviceName = c.req.param("name")
+  const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
+  const { userId } = body
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeConversation(conversationId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+
+  const override = sanitizeOverride(body.override)
+  if (!override) return c.json({ error: "invalid override — need at least one manifest field" }, 400)
+
+  try {
+    await setConversationServiceOverride(sb!, conversationId, serviceName, override)
+    return c.json({ ok: true, override })
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
+app.delete("/api/conversations/:id/services/:name/override", async (c) => {
+  const conversationId = c.req.param("id")
+  const serviceName = c.req.param("name")
+  const userId = c.req.query("userId")
+  if (!userId) return c.json({ error: "userId required" }, 400)
+  const auth = await authorizeConversation(conversationId, userId)
+  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  try {
+    await setConversationServiceOverride(sb!, conversationId, serviceName, null)
+    return c.json({ ok: true })
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
 app.post("/api/services/:id/stop", async (c) => {
   const id = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
@@ -2865,11 +3765,23 @@ app.get("/api/services", (c) => {
   const userId = c.req.query("userId")
   if (!userId) return c.json({ error: "userId required" }, 400)
   const projectId = c.req.query("projectId") ?? undefined
-  const conversationId = c.req.query("conversationId")
-  const worktreeId =
-    conversationId === "null" ? null : conversationId ?? undefined
+  const serviceName = c.req.query("serviceName") ?? undefined
+  // `worktreePath` is the authoritative scope discriminator. Accept:
+  //   - absent / "undefined" → no filter (legacy list-all-in-project)
+  //   - "null"               → only the null bucket (chats on main cwd)
+  //   - any other string     → exact path match (task worktrees)
+  const wpRaw = c.req.query("worktreePath")
+  let worktreePath: string | null | undefined
+  if (wpRaw === undefined || wpRaw === "undefined") worktreePath = undefined
+  else if (wpRaw === "null" || wpRaw === "") worktreePath = null
+  else worktreePath = wpRaw
   return c.json({
-    services: listServices({ ownerId: userId, projectId, worktreeId }),
+    services: listServices({
+      ownerId: userId,
+      projectId,
+      serviceName,
+      worktreePath,
+    }),
   })
 })
 
@@ -3180,6 +4092,10 @@ const port = Number(process.env.PORT ?? 3001)
 const hostname = process.env.HOST ?? "127.0.0.1"
 const server = serve({ fetch: app.fetch, port, hostname }, ({ address, port }) => {
   console.log(`ai-coder backend listening on ${address}:${port}`)
+  // Fire-and-forget: reattach or reap service instances that outlived the
+  // last process. Safe to run on every boot — idempotent. Errors are
+  // logged inside the helper; nothing else waits on this.
+  void reconcileServiceInstances()
 })
 
 // ── Terminal PTY over WebSocket ──────────────────────────────────────────────

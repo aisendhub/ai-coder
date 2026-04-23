@@ -240,9 +240,87 @@ Each is one file; order by user demand.
 
 ---
 
+## Phase 9+ — Multi-service per project
+
+Design: [MULTI-SERVICE.md](MULTI-SERVICE.md). Un-punts the "multiple manifests grouped by the project" open question from [RUNTIME.md](RUNTIME.md). Each phase below is independently shippable.
+
+### Phase 9.1 — Schema + backfill + read-path abstraction ✅
+
+Zero user-visible change. Reads routed through a new store helper; writes still hit the legacy `projects.run_manifest` column.
+
+- ✅ Migration `0014_project_services.sql` (sequence bumped past the live 0013)
+  - ✅ `project_services` table (unique(project_id, name) + RLS via `projects.user_id`)
+  - ✅ `conversations.service_overrides jsonb` column
+  - ✅ Backfill of the existing default service + conversation overrides + assigned ports
+  - ✅ Applied to Supabase
+- ✅ `server/services-store.ts` — `list/get/upsert/delete/patch` project service + conversation override helpers + `manifestFromRow` / `writeFromManifest` adapters
+- ✅ `loadManifestContext` reads from `project_services` (falls back to `projects.run_manifest` only for the default service during rollout)
+- ✅ Typecheck + live-endpoint probe
+
+### Phase 9.2 — Plural endpoints + registry scope rework ✅
+
+Rename `RunningService.worktreeId` → `worktreePath` and add `serviceName`. Instances correctly share across chats on main, isolate per worktree, coexist across services.
+
+- ✅ `GET/POST/PUT/DELETE /api/projects/:id/services[/:name]`
+- ✅ `POST /api/services/start` accepts `serviceName` (default `"default"`)
+- ✅ Registry scope uses `worktreePath: string | null` derived from `conversations.worktree_path`; `serviceName` is required
+- ✅ `listServices` filter accepts `serviceName` and `worktreePath` (null = main-cwd bucket)
+- ✅ Restart-before-start matches `(owner, project, serviceName, worktreePath)`
+- ✅ Legacy `/api/projects/:id/manifest` endpoints still work — reads resolve via project_services[default], writes mirror to both columns
+
+### Phase 9.3 — Client models ✅
+
+- ✅ `ProjectService` / `ProjectServiceList` MobX models on `workspace`
+- ✅ Auto-refresh on `setActiveProject` and `ai-coder:turn-done`
+- ✅ Full CRUD on the collection via `workspace.projectServices.create/update/remove`
+
+### Phase 9.4 — List rendering + Run all + Add service ✅
+
+- ✅ Panel renders one card per configured service (sorted by `order_index`)
+- ✅ Header: **Run all** (enabled services only, sequential start), **+ Add** (editor in new-service mode with a name field)
+- ✅ Per-card Run / Stop / Configure / Delete / Check-with-agent
+- ✅ Reorder: Up/Down arrows on each card persist `order_index` atomically
+- ✅ Editor surfaces `enabled`, `restart_policy`, `max_restarts`, `description` under an Advanced toggle
+
+### Phase 9.5 — Agent multi-service detect + reconcile ✅
+
+- ✅ DETECT_SERVICES system prompt teaches both `<run-manifest>` (single) and `<run-services>` (array) forms
+- ✅ `extractDetectedServices` parses the array; reconcile upserts each service by name
+- ✅ Legacy `<run-manifest>` still parses and saves to `default` (back-compat)
+- ✅ Detect-services prompt takes `existingServices` so multi-service configs get refined, not overwritten
+
+### Phase 9.6 — Per-service verify-run + chat notices ✅
+
+- ✅ `VerifyRunSnapshot.serviceName` wired end-to-end
+- ✅ System prompt tells the agent to emit a targeted single-entry `<run-services>` block (never bare `<run-manifest>`) so fixes don't nuke the default row in multi-service apps
+- ✅ Chat notice text names the service
+
+### Phase 9.7 — Per-conversation overrides ✅
+
+- ✅ `GET/PUT/DELETE /api/conversations/:id/services/:name/override`
+- ✅ Model helpers: `fetchServiceOverride` / `saveServiceOverride` / `clearServiceOverride`
+- ✅ Editor footer: "Save for task" + "Clear task override" buttons (only shown when on a worktree task)
+
+### Phase 9.8 — Supervisor ✅
+
+- ✅ Attached after startService when `restart_policy !== "never"`
+- ✅ Exponential backoff (1s, 2s, 4s, …) capped at 30s
+- ✅ Counter resets after 10s uptime; `max_restarts` is the hard cap
+- ✅ `role:"notice"` chat insert on retry exhaustion (uses the same `text`/`events: []`/`delivered_at` shape as merge + detect-services)
+
+### Phase 9.9 — Instance persistence + boot reconcile ✅
+
+- ✅ Migration `0015_service_instances.sql` (RLS via `user_id`, host-scoped indexes)
+- ✅ `server/instance-store.ts` — insert on spawn, update on every status change
+- ✅ `reconcileServiceInstances` at boot: probes each row's pid via `process.kill(pid, 0)`, re-registers live ones via the new `external` runner, marks dead ones stopped
+- ✅ `external` runner: stop via `process.kill(-pid, SIGTERM)`; reattached cards show a "reattached" pill with a tooltip explaining logs are unavailable
+
+---
+
 ## Open questions tracked
 
 - ⬜ Is in-memory services registry OK, or do we need Postgres-backed so services survive Hono restarts? Lean in-memory for Phase 1 (services are ephemeral anyway).
 - ⬜ Should Phase 4 prefer Nixpacks (dependency) or hand-written templates (zero dep, more code)? Start with Nixpacks, template top 3 stacks if it becomes a liability.
 - ⬜ Do chats get a "Run" button or only worktrees/projects? Probably project-level only; worktrees inherit, chats are interactive and shouldn't be long-running service owners.
 - ⬜ Secrets: `.env` discovery locally vs. platform-native in prod — finalize on Phase 2.
+- ⬜ Per-service-per-conversation assigned ports? v1 pragma: single `assigned_port` per service. If two worktrees run the same service simultaneously, first wins; the other auto-allocates via `isPortFree`. Revisit if users hit it.

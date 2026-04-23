@@ -19,15 +19,25 @@ export type ServiceStatus =
   | "stopped"
   | "crashed"
 
+// Scope identifies *which configured service on which filesystem* a running
+// instance belongs to. The tuple (ownerId, projectId, serviceName,
+// worktreePath) is the unique bucket — two conversations on the same main
+// branch (both worktreePath=null) share; two tasks on different worktree
+// paths are isolated; two services with different names coexist.
+//
+// worktreePath is the actual filesystem path (or null for the project's base
+// cwd), NOT a conversation id. See docs/MULTI-SERVICE.md § Registry scope.
 export type ServiceScope = {
   ownerId: string
   projectId: string
-  worktreeId?: string | null
+  serviceName: string
+  worktreePath?: string | null
   label?: string | null
 }
 
-type RunningService = ServiceScope & {
+type RunningService = Omit<ServiceScope, "worktreePath"> & {
   id: string
+  worktreePath: string | null
   manifest: RunManifest
   runnerId: RunnerId
   handle: RunnerHandle | null
@@ -46,7 +56,8 @@ export type ServiceSnapshot = {
   id: string
   ownerId: string
   projectId: string
-  worktreeId: string | null
+  serviceName: string
+  worktreePath: string | null
   label: string | null
   stack: RunManifest["stack"]
   start: string
@@ -157,7 +168,8 @@ function snapshot(svc: RunningService): ServiceSnapshot {
     id: svc.id,
     ownerId: svc.ownerId,
     projectId: svc.projectId,
-    worktreeId: svc.worktreeId ?? null,
+    serviceName: svc.serviceName,
+    worktreePath: svc.worktreePath,
     label: svc.label ?? null,
     stack: svc.manifest.stack,
     start: svc.manifest.start,
@@ -269,8 +281,10 @@ export async function startService(
 
   const svc: RunningService = {
     id,
-    ...scope,
-    worktreeId: scope.worktreeId ?? null,
+    ownerId: scope.ownerId,
+    projectId: scope.projectId,
+    serviceName: scope.serviceName,
+    worktreePath: scope.worktreePath ?? null,
     label: scope.label ?? null,
     manifest: effectiveManifest,
     runnerId,
@@ -436,16 +450,22 @@ export function getService(id: string, ownerId: string): ServiceSnapshot | null 
   return snapshot(svc)
 }
 
+// Filter semantics:
+//   - undefined    → don't filter on that dimension
+//   - null (for worktreePath) → only match instances with worktreePath === null
+//   - string       → exact match
 export function listServices(filter: {
   ownerId: string
   projectId?: string
-  worktreeId?: string | null
+  serviceName?: string
+  worktreePath?: string | null
 }): ServiceSnapshot[] {
   const out: ServiceSnapshot[] = []
   for (const svc of services.values()) {
     if (svc.ownerId !== filter.ownerId) continue
     if (filter.projectId && svc.projectId !== filter.projectId) continue
-    if (filter.worktreeId !== undefined && (svc.worktreeId ?? null) !== filter.worktreeId) {
+    if (filter.serviceName && svc.serviceName !== filter.serviceName) continue
+    if (filter.worktreePath !== undefined && svc.worktreePath !== filter.worktreePath) {
       continue
     }
     out.push(snapshot(svc))
@@ -494,6 +514,61 @@ export function subscribeLogs(
     },
   }
   return sub
+}
+
+// Re-register an instance that was spawned by a previous server process.
+// Used during boot reconcile (see server/index.ts): we persisted the pid+
+// port, the OS process is still alive (caller verified via kill(pid, 0)),
+// and we want the panel to show it again. We can't recover stdout/stderr
+// (those streams closed when the parent process exited), so logs stay
+// empty until the user restarts. Stop works via signal to the pid/pgid.
+export function registerExternalService(input: {
+  id: string
+  scope: ServiceScope & { worktreePath: string | null }
+  manifest: RunManifest
+  runnerId: RunnerId
+  pid: number
+  port: number
+  startedAt: number
+}): ServiceSnapshot {
+  const emitter = new EventEmitter()
+  emitter.setMaxListeners(0)
+  const logs = createRingBuffer(LOG_LINE_CAP)
+  // Seed a single advisory log line so the UI doesn't show a blank pane.
+  logs.push({
+    ts: Date.now(),
+    stream: "stdout",
+    text:
+      "[reattached] This service was started in a previous server session. " +
+      "Live logs aren't available here — stop and re-run to capture output.",
+  })
+
+  const svc: RunningService = {
+    id: input.id,
+    ownerId: input.scope.ownerId,
+    projectId: input.scope.projectId,
+    serviceName: input.scope.serviceName,
+    worktreePath: input.scope.worktreePath,
+    label: input.scope.label ?? null,
+    manifest: input.manifest,
+    // Always "external" — the registered external runner's stop() signals
+    // the pgid. The input.runnerId on the stored row tells us what ORIGINAL
+    // runner spawned it, but once reattached there's only one way to stop.
+    runnerId: "external" as RunnerId,
+    handle: { id: String(input.pid), pid: input.pid },
+    pid: input.pid,
+    port: input.port,
+    status: "running",
+    exitCode: null,
+    error: null,
+    startedAt: input.startedAt,
+    stoppedAt: null,
+    logs,
+    emitter,
+  }
+  services.set(svc.id, svc)
+  allocatedPorts.add(input.port)
+  return snapshot(svc)
 }
 
 export function removeService(id: string, ownerId: string): boolean {

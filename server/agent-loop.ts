@@ -467,6 +467,189 @@ function tryParse(text: string): unknown {
   }
 }
 
+// ─── Multi-service LLM proposer ─────────────────────────────────────────────
+// Stateless, synchronous (over one LLM call) — returns an ARRAY of proposed
+// services rather than auto-saving like the chat-based detect-services flow.
+// The picker calls this when the user clicks "Detect with AI": we want the
+// model to inspect the repo, propose every runnable process it sees, and
+// hand the list back for the user to pick from.
+//
+// The existing `extractDetectedServices` parser accepts the `<run-services>`
+// block shape, so we ask for that. Falls back to a single-service result
+// when the model emits `<run-manifest>` instead.
+
+export type LlmServicesDetectionResult = {
+  proposals: LlmServiceProposal[]
+  costUsd: number
+  raw: string
+  error?: string
+}
+
+const RUN_DETECT_SERVICES_SYSTEM_PROMPT = `You are a release engineer inspecting an unknown codebase.
+Your job: propose how to START every runnable service in this project for
+local development.
+
+You have read-only tools (Read, Glob, Grep, Bash for small read-only
+commands like \`cat\`, \`ls\`, \`head\`, \`test -f\`). Do NOT modify anything.
+
+Steps you should take:
+1. Look at the repo root AND one level deep for obvious anchors:
+   package.json, Procfile, Dockerfile, pyproject.toml, requirements.txt,
+   go.mod, Gemfile, Cargo.toml, index.html, apps/*, services/*.
+2. For each anchor that represents a runnable process, compose a short
+   start command.
+3. If package.json exists: prefer scripts.dev, then scripts.start. Detect
+   the package manager from the lockfile.
+4. If README/READ*.md mentions run commands, read it — often it names the
+   services and how to launch each one.
+5. Keep start commands short. The host injects PORT via env; use \`$PORT\`
+   in the command when the app needs an explicit port argument.
+6. If a service lives in a subdir (\`api/\`, \`apps/web/\`, etc.), prefix
+   with \`cd <subdir> && \` so the command runs from the project root.
+
+Names should be short identifiers (lowercase letters, digits, _ or -).
+Conventional names: "web", "api", "worker", "scheduler", "default".
+Each service needs its own distinct port.
+
+Respond with ONLY the \`<run-services>\` block — no markdown, no commentary:
+
+<run-services>
+{
+  "services": [
+    {
+      "name": "web",
+      "stack": "node" | "bun" | "python" | "go" | "ruby" | "static" | "docker" | "custom",
+      "start": "exact shell command",
+      "build": "optional build command — omit when none",
+      "env": { "KEY": "value" },
+      "port": 3000,
+      "enabled": true,
+      "rationale": "one to two sentences; cite the file you read",
+      "confidence": "high" | "medium" | "low"
+    }
+  ]
+}
+</run-services>
+
+Rules:
+- If you find exactly one service, return a one-entry array — the shape is
+  still \`<run-services>\`.
+- If you find nothing runnable, return \`{"services":[]}\` with empty array.
+- "start" must be non-empty for every entry.
+- No preamble. No code fences. Just the block.`
+
+export async function detectServicesWithLLM({
+  cwd,
+  existingServices,
+  abort,
+}: {
+  cwd: string
+  /** Optional — existing configured services, passed to the model so it
+   *  doesn't re-propose the same ones. Shape mirrors the persisted row. */
+  existingServices?: Array<{
+    name: string
+    stack: string
+    start: string
+    port?: number | null
+  }>
+  abort?: AbortController
+}): Promise<LlmServicesDetectionResult> {
+  const lines = [
+    `Worktree: ${cwd}`,
+    "",
+    "Inspect this directory and propose every runnable service you find.",
+    "Return the <run-services> block per the schema in your system prompt.",
+  ]
+  if (existingServices && existingServices.length > 0) {
+    lines.push(
+      "",
+      "Services already configured (propose ADDITIONS or refinements, do",
+      "not duplicate these unless they're wrong):",
+      "```json",
+      JSON.stringify(existingServices, null, 2),
+      "```"
+    )
+  }
+  const userMessage = lines.join("\n")
+
+  const log = (event: string, details: Record<string, unknown> = {}) => {
+    const tail = Object.entries(details)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" ")
+    console.log(`[runtime] llm.detect-services.${event}${tail ? " " + tail : ""}`)
+  }
+
+  log("start", { cwd })
+
+  let finalText = ""
+  let costUsd = 0
+  try {
+    const messages = query({
+      prompt: userMessage,
+      options: {
+        cwd,
+        permissionMode: "bypassPermissions",
+        systemPrompt: RUN_DETECT_SERVICES_SYSTEM_PROMPT,
+        allowedTools: ["Read", "Glob", "Grep", "Bash"],
+        settingSources: [],
+        includePartialMessages: false,
+        abortController: abort,
+      },
+    })
+    for await (const msg of messages) {
+      if (msg.type === "assistant") {
+        for (const block of msg.message.content) {
+          if (block.type === "text") finalText += block.text
+        }
+      } else if (msg.type === "result") {
+        costUsd = Number(msg.total_cost_usd ?? 0)
+        const maybeErr = msg as unknown as { is_error?: boolean; subtype?: string }
+        if (maybeErr.is_error) {
+          const subtype = maybeErr.subtype ?? "unknown"
+          log("agent_error", { subtype, costUsd })
+          return {
+            proposals: [],
+            costUsd,
+            raw: finalText,
+            error: `agent-sdk returned is_error (${subtype})`,
+          }
+        }
+        break
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log("exception", { message })
+    return { proposals: [], costUsd, raw: finalText, error: message }
+  }
+
+  // Primary path: a `<run-services>` block. Falls back to the single-service
+  // `<run-manifest>` form if the model emits the older shape.
+  let proposals: LlmServiceProposal[] | null = extractDetectedServices(finalText)
+  if (!proposals) {
+    const single = extractDetectedManifest(finalText)
+    if (single) {
+      proposals = [{ ...single, name: "default", enabled: true }]
+    }
+  }
+  if (!proposals) {
+    log("parse_failed", {
+      finalTextLen: finalText.length,
+      head: finalText.slice(0, 120),
+    })
+    return {
+      proposals: [],
+      costUsd,
+      raw: finalText,
+      error: finalText.trim()
+        ? `couldn't parse <run-services> block from model output (${finalText.length} chars)`
+        : "model returned no text",
+    }
+  }
+  log("ok", { count: proposals.length, costUsd })
+  return { proposals, costUsd, raw: finalText }
+}
+
 // ─── Chat-driven service detection ───────────────────────────────────────────
 // The standalone `detectManifestWithLLM` above runs a fresh session with no
 // context. That's wrong for anything the user just built in chat — the agent
@@ -517,7 +700,20 @@ The host injects \`PORT\` as an env var AND expands \`$PORT\` in the start
 command via its shell. In the "port" field of the manifest, report the
 number the app will bind to (usually the fallback in the code).
 
-End your reply with exactly this block (and nothing after it):
+**Multi-service apps**: if the repo has multiple processes the user will
+want to run locally (web + api, web + worker, frontend + backend, etc.),
+emit a \`<run-services>\` block with an array. Each entry has the same
+fields as a single manifest plus a short \`name\` ("web", "api",
+"worker"). Only do this when the processes are genuinely separate
+programs — a build step that precedes the server is NOT a second service,
+it's a \`build\` field on the server. Each service needs its own bind
+port — they can't share.
+
+End your reply with EITHER (a) a single \`<run-manifest>\` block for
+single-service apps, OR (b) a \`<run-services>\` block for multi-service
+apps. Not both, and nothing after it.
+
+Single-service form:
 
 <run-manifest>
 {
@@ -531,14 +727,47 @@ End your reply with exactly this block (and nothing after it):
 }
 </run-manifest>
 
+Multi-service form:
+
+<run-services>
+{
+  "services": [
+    {
+      "name": "web",
+      "stack": "node",
+      "start": "npm run dev -- --port $PORT",
+      "env": {},
+      "port": 5173,
+      "enabled": true,
+      "rationale": "Vite dev server from package.json",
+      "confidence": "high"
+    },
+    {
+      "name": "api",
+      "stack": "node",
+      "start": "cd api && npm run dev",
+      "env": {},
+      "port": 3001,
+      "enabled": true,
+      "rationale": "Express API from api/package.json",
+      "confidence": "medium"
+    }
+  ]
+}
+</run-services>
+
 Rules:
 - The block is MANDATORY — the host parses it to save the config.
-- "start" must be non-empty. If you genuinely can't figure it out, explain
-  why in your reply and still emit the block with "start": "".
+- "start" must be non-empty on every service. If you genuinely can't
+  figure one out, explain why and emit the block with "start": "" for
+  that service.
 - "port" is a JSON number (e.g. 3000, not "3000"). Omit the field only if
   you truly can't find any port reference in the code.
+- Each service needs its own distinct bind port — they can't share.
 - The host injects \`PORT\` as an env var AND expands \`$PORT\` in the start
   string via its shell. When in doubt, pass \`$PORT\` as an explicit flag.
+- For multi-service, "name" must be a short identifier: lowercase letters,
+  digits, \`_\`, \`-\`. Conventional: "web", "api", "worker", "scheduler".
 - Do NOT start the service yourself. This turn is configuration only.`
 
 export function buildDetectServicesSystemPrompt(): string {
@@ -548,22 +777,42 @@ export function buildDetectServicesSystemPrompt(): string {
 export function buildDetectServicesPrompt(input: {
   cwd: string
   existingManifest?: { stack: string; start: string; build?: string; env?: Record<string, string> } | null
+  existingServices?: Array<{
+    name: string
+    stack: string
+    start: string
+    build?: string | null
+    env?: Record<string, string>
+    port?: number | null
+    enabled?: boolean
+  }> | null
 }): string {
   const lines = [
     "[Host task — configure services]",
     "",
     "The user wants to configure how to run this project locally. Inspect the",
     "codebase and, drawing on the full conversation history, propose the best",
-    "start command.",
+    "start command(s).",
     "",
     `Working directory: \`${input.cwd}\``,
   ]
-  if (input.existingManifest) {
+  const hasExistingList = input.existingServices && input.existingServices.length > 0
+  if (hasExistingList) {
     lines.push(
       "",
-      "A configuration already exists — treat this as a refinement pass.",
-      "Propose an updated manifest that reflects any changes the user has made",
-      "in this conversation since it was saved:",
+      `A multi-service configuration already exists (${input.existingServices!.length} service${input.existingServices!.length === 1 ? "" : "s"}) — treat this as a refinement pass.`,
+      "Propose an updated list that reflects any changes in this conversation.",
+      "Keep existing service names unless you're renaming intentionally:",
+      "```json",
+      JSON.stringify(input.existingServices, null, 2),
+      "```"
+    )
+  } else if (input.existingManifest) {
+    lines.push(
+      "",
+      "A single-service configuration already exists — treat this as a refinement pass.",
+      "If the project actually has multiple services now, upgrade to the",
+      "multi-service form. Otherwise emit an updated single-service block:",
       "```json",
       JSON.stringify(input.existingManifest, null, 2),
       "```"
@@ -576,9 +825,10 @@ export function buildDetectServicesPrompt(input: {
   }
   lines.push(
     "",
-    "When you're done, emit the `<run-manifest>` block exactly as described in",
-    "your system prompt. The host parses it to save the configuration. Do not",
-    "start the service."
+    "When you're done, emit EITHER a `<run-manifest>` (single service) or",
+    "`<run-services>` (array) block exactly as described in your system",
+    "prompt. The host parses it to save the configuration. Do not start the",
+    "service."
   )
   return lines.join("\n")
 }
@@ -636,6 +886,77 @@ export function extractDetectedManifest(assistantText: string): LlmManifestPropo
   return { stack, start, env, build, port, rationale, confidence }
 }
 
+// Multi-service proposal. Same fields as LlmManifestProposal + a name,
+// optional enabled flag, and optional order_index. Used when the agent
+// emits a `<run-services>` block for a monorepo / multi-process app.
+export type LlmServiceProposal = LlmManifestProposal & {
+  name: string
+  enabled?: boolean
+  order_index?: number
+}
+
+const DETECT_SERVICES_BLOCK_RE = /<run-services>\s*([\s\S]*?)\s*<\/run-services>/i
+const VALID_SERVICE_NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/
+
+// Parse a `<run-services>` block into one-or-more services. Returns null
+// when the block is missing / malformed / empty, so callers can fall back
+// to the single-service `<run-manifest>` extractor.
+export function extractDetectedServices(assistantText: string): LlmServiceProposal[] | null {
+  const match = DETECT_SERVICES_BLOCK_RE.exec(assistantText)
+  if (!match) return null
+  const payload = match[1].trim()
+  const obj = tryParse(payload)
+  if (!obj || typeof obj !== "object") return null
+  const arr = (obj as Record<string, unknown>).services
+  if (!Array.isArray(arr) || arr.length === 0) return null
+
+  const allowedStacks: LlmManifestStack[] = [
+    "node", "bun", "python", "go", "ruby", "static", "docker", "custom",
+  ]
+  const out: LlmServiceProposal[] = []
+  const seenNames = new Set<string>()
+  for (const raw of arr) {
+    if (!raw || typeof raw !== "object") continue
+    const r = raw as Record<string, unknown>
+    const name = typeof r.name === "string" ? r.name.trim() : ""
+    if (!name || !VALID_SERVICE_NAME_RE.test(name) || seenNames.has(name)) continue
+    const start = typeof r.start === "string" ? r.start.trim() : ""
+    if (!start) continue // empty-start entries count as "gave up" — drop
+    const stack = allowedStacks.includes(r.stack as LlmManifestStack)
+      ? (r.stack as LlmManifestStack)
+      : "custom"
+    const build = typeof r.build === "string" && r.build.trim() ? r.build.trim() : undefined
+    const env: Record<string, string> = {}
+    if (r.env && typeof r.env === "object") {
+      for (const [k, v] of Object.entries(r.env as Record<string, unknown>)) {
+        if (typeof v === "string") env[k] = v
+      }
+    }
+    const confidence =
+      r.confidence === "high" || r.confidence === "medium" || r.confidence === "low"
+        ? r.confidence
+        : "low"
+    const rationale = typeof r.rationale === "string" ? r.rationale : ""
+    const port = coercePort(r.port)
+    const enabled = typeof r.enabled === "boolean" ? r.enabled : true
+    const order_index = typeof r.order_index === "number" ? r.order_index : undefined
+    out.push({
+      name,
+      stack,
+      start,
+      env,
+      build,
+      port,
+      rationale,
+      confidence,
+      enabled,
+      order_index,
+    })
+    seenNames.add(name)
+  }
+  return out.length === 0 ? null : out
+}
+
 // ─── Verify-run: post-Run closed-loop check ─────────────────────────────────
 // After starting a service (typically first run after configuration), we feed
 // the captured output + final status back to the agent. The agent confirms it
@@ -644,6 +965,8 @@ export function extractDetectedManifest(assistantText: string): LlmManifestPropo
 // post-turn reconcile saves it automatically.
 
 export type VerifyRunSnapshot = {
+  /** Which configured service this instance came from (default|api|worker|…). */
+  serviceName: string
   stack: string
   start: string
   status: string
@@ -668,20 +991,37 @@ You have the full conversation history and your normal tools.
 Your job: read the captured output, then either:
 - Confirm the service started cleanly (one short sentence, with the URL).
 - Diagnose a failure. If the fix is a small config change (command, env, build
-  step, stack mismatch), emit an updated block and the host will save it:
+  step, stack mismatch), emit an updated multi-service block targeting ONLY
+  this service (by its "name") and the host will save the update in place:
 
-  <run-manifest>
-  { "stack": "...", "start": "...", "build": "...", "env": {...},
-    "port": 3000,
-    "rationale": "one short sentence", "confidence": "high|medium|low" }
-  </run-manifest>
+  <run-services>
+  {
+    "services": [
+      {
+        "name": "<same service name as the one you just checked>",
+        "stack": "...",
+        "start": "...",
+        "build": "...",
+        "env": {...},
+        "port": 3000,
+        "rationale": "one short sentence",
+        "confidence": "high|medium|low"
+      }
+    ]
+  }
+  </run-services>
 
-  If the fix needs the user (install a missing package, set a secret env var,
-  pick a free port), explain what and why — don't guess silently.
+  Other services stay untouched — emitting a single-entry block by name is
+  how a targeted update works. If the fix needs the user (install a missing
+  package, set a secret env var, pick a free port), explain what and why —
+  don't guess silently.
 
 Rules:
 - Do NOT start or stop the service yourself. It already ran; the host owns
   lifecycle.
+- Do NOT emit a bare \`<run-manifest>\` block from verify-run — always use
+  \`<run-services>\` so you don't accidentally overwrite the "default"
+  service in a multi-service app.
 - Don't declare success unless you see actual evidence (listening-on-port
   log, readiness marker, no errors in the tail).
 - **Port mismatch is a common failure mode.** If the "port" field says N
@@ -689,7 +1029,7 @@ Rules:
   start command is probably ignoring \`$PORT\`. Vite needs \`--port $PORT\`,
   Django needs \`runserver 0.0.0.0:$PORT\`, uvicorn needs \`--port $PORT\`,
   Rails needs \`-p $PORT\`, Next needs \`-p $PORT\` or PORT env. Emit an
-  updated run-manifest with a corrected start command.
+  updated block with a corrected start command.
 - Keep replies tight. One or two sentences is usually right.`
 
 export function buildVerifyRunSystemPrompt(): string {
@@ -709,8 +1049,9 @@ export function buildVerifyRunPrompt(input: {
   const header = [
     "[Host task — verify run]",
     "",
-    `I just started the service per the saved configuration and watched it for ${Math.round(input.watchMs / 1000)}s.`,
+    `I just started service **\`${snap.serviceName}\`** per its saved configuration and watched it for ${Math.round(input.watchMs / 1000)}s.`,
     "",
+    `- Service name: \`${snap.serviceName}\`  (use this exact name when you emit a fix block)`,
     `- Stack: ${snap.stack}`,
     `- Command: \`${snap.start}\``,
     `- Status: ${snap.status}${snap.pid != null ? ` (pid ${snap.pid})` : ""}`,
@@ -733,7 +1074,7 @@ export function buildVerifyRunPrompt(input: {
 
   const ask =
     snap.status === "crashed"
-      ? "\nThe service crashed. Walk me through what the output says and, if you can fix it with a config change, emit the updated <run-manifest> block."
+      ? `\nThe service crashed. Walk me through what the output says and, if you can fix it with a config change, emit an updated \`<run-services>\` block with a single entry named "${snap.serviceName}".`
       : snap.status === "running"
         ? "\nConfirm it looks healthy, or flag anything off (port conflicts, unhandled rejections, warnings that matter)."
         : "\nStatus isn't terminal yet — say what you see and whether it looks on track."
@@ -745,22 +1086,23 @@ export function buildVerifyRunNoticeText(input: {
   snapshot: VerifyRunSnapshot
 }): string {
   const s = input.snapshot
+  const label = s.serviceName === "default" ? "the service" : `\`${s.serviceName}\``
   if (s.status === "running") {
     return [
-      `Verifying **\`${s.start}\`** at \`${s.url}\`.`,
+      `Verifying ${label} (\`${s.start}\`) at \`${s.url}\`.`,
       "",
       "The agent will read the service's output and confirm it started cleanly — or diagnose if not.",
     ].join("\n")
   }
   if (s.status === "crashed") {
     return [
-      "**Service crashed during startup.** Asking the agent to diagnose.",
+      `**${s.serviceName === "default" ? "Service" : `\`${s.serviceName}\``} crashed during startup.** Asking the agent to diagnose.`,
       "",
       s.error ? `Reason: \`${s.error}\`` : "See the captured output in chat.",
     ].join("\n")
   }
   return [
-    `Checking service (\`${s.status}\`).`,
+    `Checking ${label} (\`${s.status}\`).`,
     "",
     "The agent will review the captured output.",
   ].join("\n")

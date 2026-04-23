@@ -12,11 +12,14 @@ export type ServiceDto = {
   id: string
   ownerId: string
   projectId: string
-  worktreeId: string | null
+  serviceName: string
+  worktreePath: string | null
   label: string | null
   stack: string
   start: string
   cwd: string
+  /** "local-process" | "local-docker" | "external" (reattached at boot). */
+  runnerId: string
   pid: number | null
   port: number
   status: ServiceStatus
@@ -35,11 +38,13 @@ export type LogLine = {
 
 export class Service extends BaseModel {
   @observable projectId = ""
-  @observable worktreeId: string | null = null
+  @observable serviceName = "default"
+  @observable worktreePath: string | null = null
   @observable label: string | null = null
   @observable stack = ""
   @observable start = ""
   @observable cwd = ""
+  @observable runnerId = "local-process"
   @observable pid: number | null = null
   @observable port = 0
   @observable status: ServiceStatus = "starting"
@@ -52,11 +57,13 @@ export class Service extends BaseModel {
   @action setFromDto(dto: ServiceDto) {
     this.id = dto.id
     this.projectId = dto.projectId
-    this.worktreeId = dto.worktreeId
+    this.serviceName = dto.serviceName
+    this.worktreePath = dto.worktreePath
     this.label = dto.label
     this.stack = dto.stack
     this.start = dto.start
     this.cwd = dto.cwd
+    this.runnerId = dto.runnerId
     this.pid = dto.pid
     this.port = dto.port
     this.status = dto.status
@@ -65,6 +72,11 @@ export class Service extends BaseModel {
     this.startedAt = dto.startedAt
     this.stoppedAt = dto.stoppedAt
     this.url = dto.url
+  }
+
+  /** Reattached from a previous server session — can stop, can't stream logs. */
+  get isReattached(): boolean {
+    return this.runnerId === "external"
   }
 
   get isLive(): boolean {

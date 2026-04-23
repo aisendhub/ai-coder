@@ -4,6 +4,7 @@ import { BaseModel } from "./Base.model"
 import { Conversation } from "./Conversation.model"
 import { Project } from "./Project.model"
 import { ServiceList } from "./ServiceList.model"
+import { ProjectServiceList } from "./ProjectServiceList.model"
 import { supabase } from "@/lib/supabase"
 
 class ConversationList extends BaseList<typeof Conversation> {
@@ -37,6 +38,7 @@ export class Workspace extends BaseModel {
   conversations = ConversationList.create()
   projects = ProjectList.create()
   services = ServiceList.create()
+  projectServices = ProjectServiceList.create()
 
   private convChannel: ReturnType<typeof supabase.channel> | null = null
   private projectChannel: ReturnType<typeof supabase.channel> | null = null
@@ -107,6 +109,14 @@ export class Workspace extends BaseModel {
     if (current && current.projectId !== id) {
       this.setActive(null)
     }
+    // Clear prior-project service rows so the panel doesn't flash stale cards
+    // before the fresh list loads. Callers re-fetch on the next render.
+    this.projectServices.clearAll()
+    if (this.userId && id) {
+      void this.projectServices.refresh(this.userId, id).catch(() => {
+        /* advisory; panel surfaces its own errors */
+      })
+    }
   }
 
   async signIn(userId: string) {
@@ -125,6 +135,11 @@ export class Workspace extends BaseModel {
       this.activeProjectId = pick
     })
     await this.refresh()
+    if (pick) {
+      void this.projectServices.refresh(userId, pick).catch(() => {
+        /* advisory */
+      })
+    }
     this.subscribeConversations()
     this.subscribeProjects()
     this.startRunnersPoll()
@@ -150,6 +165,7 @@ export class Workspace extends BaseModel {
       this.activeProjectId = null
       this.conversations.setItems([])
       this.projects.setItems([])
+      this.projectServices.clearAll()
       this.runningServerIds = new Set()
       this.unreadIds = new Set()
     })

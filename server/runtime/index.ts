@@ -5,15 +5,19 @@
 import { registerRunner } from "./registry.ts"
 import { localProcessRunner } from "./runners/local-process.ts"
 import { localDockerRunner } from "./runners/local-docker.ts"
+import { externalRunner } from "./runners/external.ts"
 
 // Register runners on module load. Order doesn't matter; the list is a map.
 // local-docker is registered even when docker isn't installed — availability
-// is probed lazily at start time.
+// is probed lazily at start time. external is a stop-channel for processes
+// inherited from a prior server session; never starts anything.
 registerRunner(localProcessRunner)
 registerRunner(localDockerRunner)
+registerRunner(externalRunner)
 
 export {
   detect,
+  detectAllServices,
   mergeManifest,
   logRuntimeEvent,
 } from "./manifest.ts"
@@ -25,6 +29,7 @@ export type {
   RunManifest,
   ManifestOverride,
   RuntimeEvent,
+  DetectedServiceCandidate,
 } from "./manifest.ts"
 
 export {
@@ -36,6 +41,7 @@ export {
   getLogHistory,
   subscribeLogs,
   removeService,
+  registerExternalService,
   shutdownAll,
   installShutdownHook,
   registerRunner,
