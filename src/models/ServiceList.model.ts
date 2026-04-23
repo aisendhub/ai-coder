@@ -179,8 +179,11 @@ export class ServiceList extends BaseList<typeof Service> {
     }
   }
 
-  async refresh(userId: string): Promise<void> {
-    this.setLoading(true)
+  // `opts.silent` skips the loading flag toggle. Background polls use it
+  // so header spinners don't flash on the 5s cadence. Explicit user-
+  // initiated refreshes (none today) would omit the flag.
+  async refresh(userId: string, opts: { silent?: boolean } = {}): Promise<void> {
+    if (!opts.silent) this.setLoading(true)
     try {
       const res = await fetch(
         `/api/services?userId=${encodeURIComponent(userId)}`
@@ -199,7 +202,7 @@ export class ServiceList extends BaseList<typeof Service> {
         for (const dto of json.services) this.upsertDto(dto)
       })
     } finally {
-      this.setLoading(false)
+      if (!opts.silent) this.setLoading(false)
     }
   }
 

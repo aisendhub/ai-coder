@@ -301,22 +301,24 @@ export const ServicesPanel = observer(function ServicesPanel({
   // the project's main cwd; any path = task worktree (isolated bucket).
   const scopeWorktreePath = active?.worktreePath ?? null
 
-  const refresh = useCallback(async () => {
+  // Silent refresh by design — the background poll catches services
+  // started in another tab / session. The user doesn't need a spinner
+  // every five seconds; per-service SSE (subscribeLogs) already updates
+  // live status for anything we're already tracking.
+  const silentRefresh = useCallback(() => {
     if (!userId) return
-    try {
-      await services.refresh(userId)
-    } catch (err) {
+    void services.refresh(userId, { silent: true }).catch((err) => {
       console.error("[services] refresh failed", err)
-    }
+    })
   }, [userId, services])
 
   useEffect(() => {
-    void refresh()
+    silentRefresh()
     void services.refreshRunners()
     if (userId) void services.refreshRailwayIntegration(userId)
-    const t = window.setInterval(() => { void refresh() }, 5000)
+    const t = window.setInterval(silentRefresh, 5000)
     return () => window.clearInterval(t)
-  }, [refresh, services, userId])
+  }, [silentRefresh, services, userId])
 
   // Live project-services list (one row per configured service). Auto-
   // refreshed when active project changes via workspace.setActiveProject,
@@ -921,7 +923,14 @@ export const ServicesPanel = observer(function ServicesPanel({
         )
       })}
     </div>
-  ) : null // picker handles the empty case before we get here
+  ) : !projectServicesLoaded ? (
+    // Stable placeholder while the services list fetches. Without this,
+    // the body flashes empty until the picker or the cards resolve.
+    <div className="p-6 flex items-center justify-center gap-2 text-xs text-muted-foreground">
+      <Loader2 className="size-3.5 animate-spin" />
+      <span>Loading services…</span>
+    </div>
+  ) : null // picker handles the post-load empty case before we get here
 
   // Header button layout:
   //   (empty state)  → [RunnerSelect]  Run
@@ -935,12 +944,7 @@ export const ServicesPanel = observer(function ServicesPanel({
     <div className="flex flex-col h-full relative">
       <div className="flex items-center gap-2 px-4 py-3 border-b">
         <Server className="size-4" />
-        <div className="text-sm font-medium">
-          Services
-          {services.loading && (
-            <Loader2 className="inline size-3 ml-1.5 animate-spin text-muted-foreground" />
-          )}
-        </div>
+        <div className="text-sm font-medium">Services</div>
         <div className="flex-1" />
         <RunnerSelect value={runnerId} onChange={setRunnerId} />
         {/* Always render the same Add + Run-all pair to keep header
