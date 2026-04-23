@@ -485,35 +485,66 @@ export type LlmServicesDetectionResult = {
   error?: string
 }
 
-const RUN_DETECT_SERVICES_SYSTEM_PROMPT = `You are a release engineer inspecting an unknown codebase.
-Your job: propose how to START every runnable service in this project for
-local development.
+const RUN_DETECT_SERVICES_SYSTEM_PROMPT = `You are a release engineer cataloguing every runnable service in an
+unknown codebase. Your job: enumerate EVERY process the user could start
+for local development, whether or not it looks "already configured".
+The host downstream dedupes by name — your task is thorough enumeration,
+not optimization.
 
 You have read-only tools (Read, Glob, Grep, Bash for small read-only
-commands like \`cat\`, \`ls\`, \`head\`, \`test -f\`). Do NOT modify anything.
+commands like \`ls\`, \`cat\`, \`head\`, \`test -f\`, \`find\`). Do NOT
+modify anything.
 
-Steps you should take:
-1. Look at the repo root AND one level deep for obvious anchors:
-   package.json, Procfile, Dockerfile, pyproject.toml, requirements.txt,
-   go.mod, Gemfile, Cargo.toml, index.html, apps/*, services/*.
-2. For each anchor that represents a runnable process, compose a short
-   start command.
-3. If package.json exists: prefer scripts.dev, then scripts.start. Detect
-   the package manager from the lockfile.
-4. If README/READ*.md mentions run commands, read it — often it names the
-   services and how to launch each one.
-5. Keep start commands short. The host injects PORT via env; use \`$PORT\`
-   in the command when the app needs an explicit port argument.
-6. If a service lives in a subdir (\`api/\`, \`apps/web/\`, etc.), prefix
-   with \`cd <subdir> && \` so the command runs from the project root.
+**You MUST inspect the filesystem before answering.** Do not guess from
+context or from lists the user gives you — any list the user provides is
+for cross-checking only, NOT a substitute for looking at the tree. At
+minimum, before you emit the block:
 
-Names should be short identifiers (lowercase letters, digits, _ or -).
-Conventional names: "web", "api", "worker", "scheduler", "default".
-Each service needs its own distinct port.
+1. Run \`ls -la\` at the project root to see the actual layout.
+2. If \`package.json\` exists at the root, Read it in full. Note every
+   entry in \`scripts\` (dev, start, server, worker, etc.) and any
+   \`workspaces\` / \`packageManager\` fields.
+3. If \`Procfile\`, \`docker-compose.yml\`, \`docker-compose.yaml\`,
+   \`pyproject.toml\`, \`requirements.txt\`, \`go.mod\`, \`Gemfile\`, or
+   \`Cargo.toml\` exists, Read it.
+4. Glob for subdirs with their own project anchors (\`package.json\`,
+   \`pyproject.toml\`, \`go.mod\`, \`Cargo.toml\`, \`index.html\`). Each
+   one is a candidate service. Common layouts: \`apps/*\`, \`services/*\`,
+   \`packages/*\`, \`api/\`, \`web/\`, \`server/\`, \`client/\`,
+   \`worker/\`.
+5. If README / READ*.md exists, skim it for run instructions.
+6. For each server file (Node \`server.js\`/\`server.ts\`, Python
+   \`main.py\`/\`app.py\`/\`server.py\`/\`manage.py\`, Go \`main.go\`…)
+   Read the top ~30 lines to see what port it binds to and whether it
+   reads \`PORT\` env.
 
-Respond with ONLY the \`<run-services>\` block — no markdown, no commentary.
-The payload must be EITHER \`{"services": [...]}\` OR a bare \`[...]\` array.
-Use an array even for one service so the host always sees a list:
+Report EVERY runnable process you find — the root service, every
+workspace package that runs a server, every subdir with its own entry
+point. One entry per service. The host hides duplicates of services
+the user already has; you don't skip them yourself.
+
+Start-command rules:
+- Keep commands short. The host injects \`PORT\` as an env var AND
+  expands \`$PORT\` in the command via its shell.
+- Node / Express / Fastify / Hono: typically reads \`process.env.PORT\`.
+  \`npm run dev\` or \`npm start\` works as-is.
+- Next.js: \`npm run dev -- -p $PORT\`.
+- Vite: **ignores PORT env** — must use \`npm run dev -- --port $PORT\`.
+- Django: \`python manage.py runserver 0.0.0.0:$PORT\`.
+- Flask: \`flask run --port $PORT\`.
+- FastAPI / uvicorn: \`uvicorn main:app --port $PORT --reload\`.
+- Rails: \`rails server -p $PORT\` or \`bin/dev -p $PORT\`.
+- If a service lives in a subdir, prefix \`cd <subdir> && \`.
+
+Names: short identifier (lowercase letters, digits, \`_\`, \`-\`; max
+40 chars). Prefer "default" for the single root service; "web", "api",
+"worker", "scheduler" for conventional monorepo roles. Each service
+needs its own distinct port.
+
+Respond with ONLY the \`<run-services>\` block — no markdown, no
+commentary, no preamble, no code fences. The payload must be EITHER
+\`{"services": [...]}\` OR a bare \`[...]\` array. Use an array even for
+one service so the host always sees a list:
 
 <run-services>
 {
@@ -526,19 +557,22 @@ Use an array even for one service so the host always sees a list:
       "env": { "KEY": "value" },
       "port": 3000,
       "enabled": true,
-      "rationale": "one to two sentences; cite the file you read",
+      "rationale": "one sentence citing file:line you read",
       "confidence": "high" | "medium" | "low"
     }
   ]
 }
 </run-services>
 
-Rules:
-- Always use \`<run-services>\`. Never emit \`<run-manifest>\` from this
-  turn — the host presents every response as a pick-list, even for one
-  service.
-- If you find nothing runnable, emit an empty array (\`{"services":[]}\`).
-- "start" must be non-empty for every entry.
+Rules recap:
+- Always use \`<run-services>\`. Never emit \`<run-manifest>\`.
+- Enumerate every runnable service found. Only emit
+  \`{"services":[]}\` when you truly find nothing runnable after the
+  inspection steps above.
+- "start" must be non-empty on every entry.
+- \`rationale\` must cite the file you read (e.g. "package.json line 7:
+  scripts.dev" or "server.py:25 port=8000"). This is how the user
+  verifies you actually looked.
 - No preamble. No code fences. Just the block.`
 
 export async function detectServicesWithLLM({
@@ -558,16 +592,24 @@ export async function detectServicesWithLLM({
   abort?: AbortController
 }): Promise<LlmServicesDetectionResult> {
   const lines = [
-    `Worktree: ${cwd}`,
+    `Project root: ${cwd}`,
     "",
-    "Inspect this directory and propose every runnable service you find.",
-    "Return the <run-services> block per the schema in your system prompt.",
+    "Run your filesystem inspection (ls + Read package.json / other",
+    "anchors + Glob subdir package.json) and list EVERY runnable service",
+    "you find. Return the <run-services> block per the schema in your",
+    "system prompt.",
   ]
   if (existingServices && existingServices.length > 0) {
     lines.push(
       "",
-      "Services already configured (propose ADDITIONS or refinements, do",
-      "not duplicate these unless they're wrong):",
+      "For reference, here are the services the user already has",
+      "configured. This is INFORMATIONAL ONLY — it is NOT a list of",
+      "services to skip. You must still inspect the filesystem and",
+      "report every runnable service you find. The host dedupes by name",
+      "automatically; your job is thorough enumeration, not optimization.",
+      "If any of these look misconfigured compared to what you read in",
+      "the files (wrong port, wrong start command), include a corrected",
+      "entry with the same name.",
       "```json",
       JSON.stringify(existingServices, null, 2),
       "```"
@@ -660,12 +702,35 @@ export async function detectServicesWithLLM({
 // used by the merge-flow-style scripted-turn approach: injected into the
 // conversation's own runner, so the agent sees the full session history.
 
-const DETECT_SERVICES_SYSTEM_PROMPT = `You are configuring how to start this project locally.
-You have the full conversation history + read/write tools. Use that context —
-if the user just built something, you already know what.
+const DETECT_SERVICES_SYSTEM_PROMPT = `You are cataloguing every runnable service in this project for local
+development. Your job: list EVERY process the user could start — the
+root server, every workspace package that runs a server, every subdir
+with its own entry point. The host dedupes by name; your task is
+thorough enumeration, not optimization.
 
-Inspect the project (package.json, Procfile, README, entry files, etc.) and
-propose ONE start command suitable for local development. Keep it short.
+You have the full conversation history and read/write tools. The chat
+history is ADDITIONAL context — it is NOT a substitute for inspecting
+the filesystem. Before you emit the block, you MUST at minimum:
+
+1. Run \`ls -la\` at the project root so you see the actual layout.
+2. If \`package.json\` exists, Read it in full. Note every entry in
+   \`scripts\` and any \`workspaces\` / \`packageManager\` fields.
+3. If \`Procfile\`, \`docker-compose.yml\`, \`pyproject.toml\`,
+   \`requirements.txt\`, \`go.mod\`, \`Gemfile\`, or \`Cargo.toml\`
+   exists, Read it.
+4. Glob for subdir project anchors (\`package.json\`, \`pyproject.toml\`,
+   \`go.mod\`, \`Cargo.toml\`, \`index.html\`) under \`apps/*\`,
+   \`services/*\`, \`packages/*\`, and any conventionally-named subdir
+   like \`api/\`, \`web/\`, \`server/\`, \`client/\`, \`worker/\`.
+5. For each server entry file you find, Read the top ~30 lines to see
+   what port it binds to and whether it reads \`PORT\` env.
+6. If README / READ*.md exists, skim it for run instructions.
+
+The user may have ALREADY configured some services — the caller will
+tell you which ones in the user message. Treat that list as
+INFORMATIONAL, for cross-checking. You must still report every service
+you find in the filesystem. Do NOT skip a service just because it's in
+the user's existing list; the host handles deduplication.
 
 **Infer the bind port AND make the command actually respect it.** This
 matters because many frameworks don't read \`PORT\` env by default. Just
@@ -778,11 +843,13 @@ export function buildDetectServicesPrompt(input: {
   }> | null
 }): string {
   const lines = [
-    "[Host task — configure services]",
+    "[Host task — catalogue services]",
     "",
-    "The user wants to configure how to run this project locally. Inspect the",
-    "codebase and, drawing on the full conversation history, propose the best",
-    "start command(s).",
+    "Run the filesystem inspection described in your system prompt (ls,",
+    "Read package.json, Glob subdir anchors, scan server entry files for",
+    "port bindings) and list EVERY runnable service you find. The host",
+    "will present this list to the user as a pick-list; they approve each",
+    "one. Your job is thorough enumeration — the host dedupes by name.",
     "",
     `Working directory: \`${input.cwd}\``,
   ]
@@ -790,9 +857,11 @@ export function buildDetectServicesPrompt(input: {
   if (hasExistingList) {
     lines.push(
       "",
-      `A multi-service configuration already exists (${input.existingServices!.length} service${input.existingServices!.length === 1 ? "" : "s"}) — treat this as a refinement pass.`,
-      "Propose an updated list that reflects any changes in this conversation.",
-      "Keep existing service names unless you're renaming intentionally:",
+      "The user has already configured these services. This is",
+      "INFORMATIONAL ONLY — NOT a list of services to skip. Still inspect",
+      "the filesystem and report every runnable service you find; include",
+      "corrections if any of these look wrong compared to what the code",
+      "actually does:",
       "```json",
       JSON.stringify(input.existingServices, null, 2),
       "```"
@@ -800,9 +869,10 @@ export function buildDetectServicesPrompt(input: {
   } else if (input.existingManifest) {
     lines.push(
       "",
-      "A single-service configuration already exists — treat this as a refinement pass.",
-      "If the project actually has multiple services now, upgrade to the",
-      "multi-service form. Otherwise emit an updated single-service block:",
+      "A single-service configuration already exists. INFORMATIONAL ONLY",
+      "— if you find more services, list them all; if this one looks",
+      "wrong compared to the actual code, list a corrected entry with the",
+      "same name:",
       "```json",
       JSON.stringify(input.existingManifest, null, 2),
       "```"
