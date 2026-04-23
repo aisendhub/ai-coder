@@ -376,18 +376,20 @@ const ChangesSection = observer(function ChangesSection({
               // and Push buttons are hidden because the merge flow handles
               // both stages.
               <Tooltip>
-                <TooltipTrigger>
-                  <Button
-                    size="sm"
-                    variant="default"
-                    onClick={handleMerge}
-                    disabled={merging || mergePending}
-                    aria-label={mergePending ? "Merging" : "Merge"}
-                    className="@max-[360px]:px-1.5"
-                  >
-                    <GitMerge className={cn("size-3.5", (merging || mergePending) && "animate-pulse")} />
-                    <span className="@max-[360px]:hidden">{mergePending ? "Merging…" : "Merge"}</span>
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={handleMerge}
+                      disabled={merging || mergePending}
+                      aria-label={mergePending ? "Merging" : "Merge"}
+                      className="@max-[360px]:px-1.5"
+                    />
+                  }
+                >
+                  <GitMerge className={cn("size-3.5", (merging || mergePending) && "animate-pulse")} />
+                  <span className="@max-[360px]:hidden">{mergePending ? "Merging…" : "Merge"}</span>
                 </TooltipTrigger>
                 <TooltipContent>
                   {mergePending
@@ -400,60 +402,68 @@ const ChangesSection = observer(function ChangesSection({
               // agent. No ship flow because there's no task branch to merge.
               <>
                 <Tooltip>
-                  <TooltipTrigger>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
-                      disabled={files.length === 0}
-                      aria-label="Commit"
-                      className="@max-[360px]:px-1.5"
-                    >
-                      <GitCommitVertical className="size-3.5" />
-                      <span className="@max-[360px]:hidden">Commit</span>
-                    </Button>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => dispatchPrompt("Commit all current changes with a descriptive commit message.")}
+                        disabled={files.length === 0}
+                        aria-label="Commit"
+                        className="@max-[360px]:px-1.5"
+                      />
+                    }
+                  >
+                    <GitCommitVertical className="size-3.5" />
+                    <span className="@max-[360px]:hidden">Commit</span>
                   </TooltipTrigger>
                   <TooltipContent>Commit all current changes</TooltipContent>
                 </Tooltip>
                 <Tooltip>
-                  <TooltipTrigger>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => dispatchPrompt(files.length > 0
-                        ? "Commit the latest changes with a concise message and then push."
-                        : "Push the latest commits to the remote repository.")}
-                      disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
-                      aria-label="Push"
-                      className="@max-[360px]:px-1.5"
-                    >
-                      <ArrowUpFromLine className="size-3.5" />
-                      <span className="@max-[360px]:hidden">Push</span>
-                    </Button>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => dispatchPrompt(files.length > 0
+                          ? "Commit the latest changes with a concise message and then push."
+                          : "Push the latest commits to the remote repository.")}
+                        disabled={(data?.unpushedCount ?? 0) === 0 && files.length === 0}
+                        aria-label="Push"
+                        className="@max-[360px]:px-1.5"
+                      />
+                    }
+                  >
+                    <ArrowUpFromLine className="size-3.5" />
+                    <span className="@max-[360px]:hidden">Push</span>
                   </TooltipTrigger>
                   <TooltipContent>Push to remote</TooltipContent>
                 </Tooltip>
               </>
             )}
             <Tooltip>
-              <TooltipTrigger>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={fetchChanges}
-                  disabled={loading}
-                >
-                  <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={fetchChanges}
+                    disabled={loading}
+                  />
+                }
+              >
+                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
               </TooltipTrigger>
               <TooltipContent>Refresh changes</TooltipContent>
             </Tooltip>
             {onClose && (
               <Tooltip>
-                <TooltipTrigger>
-                  <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close changes">
-                    <X className="size-3.5" />
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close changes" />
+                  }
+                >
+                  <X className="size-3.5" />
                 </TooltipTrigger>
                 <TooltipContent>Close</TooltipContent>
               </Tooltip>
@@ -473,18 +483,22 @@ const ChangesSection = observer(function ChangesSection({
               />
             </div>
             <Tooltip>
-              <TooltipTrigger>
-                <Button size="sm" variant="ghost" onClick={expandAll} disabled={filteredFiles.length === 0}>
-                  <ChevronsUpDown className="size-3.5" />
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button size="sm" variant="ghost" onClick={expandAll} disabled={filteredFiles.length === 0} />
+                }
+              >
+                <ChevronsUpDown className="size-3.5" />
               </TooltipTrigger>
               <TooltipContent>Expand all</TooltipContent>
             </Tooltip>
             <Tooltip>
-              <TooltipTrigger>
-                <Button size="sm" variant="ghost" onClick={collapseAll} disabled={filteredFiles.length === 0}>
-                  <ChevronsDownUp className="size-3.5" />
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button size="sm" variant="ghost" onClick={collapseAll} disabled={filteredFiles.length === 0} />
+                }
+              >
+                <ChevronsDownUp className="size-3.5" />
               </TooltipTrigger>
               <TooltipContent>Collapse all</TooltipContent>
             </Tooltip>
@@ -567,19 +581,21 @@ function FileCard({
         </button>
         {canOpen && (
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="size-6 p-0 opacity-0 group-hover/file-card:opacity-100 focus-visible:opacity-100 transition-opacity"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  workspace.openFile(file.path)
-                }}
-                aria-label="Open full file"
-              >
-                <FileText className="size-3.5" />
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="size-6 p-0 opacity-0 group-hover/file-card:opacity-100 focus-visible:opacity-100 transition-opacity"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    workspace.openFile(file.path)
+                  }}
+                  aria-label="Open full file"
+                />
+              }
+            >
+              <FileText className="size-3.5" />
             </TooltipTrigger>
             <TooltipContent>Open full file</TooltipContent>
           </Tooltip>

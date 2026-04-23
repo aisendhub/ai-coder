@@ -153,19 +153,21 @@ export const GitLogSection = observer(function GitLogSection({
             onClick={(e) => e.stopPropagation()}
           >
             <Tooltip>
-              <TooltipTrigger>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    fetchLog()
-                  }}
-                  disabled={loading}
-                  aria-label="Refresh git log"
-                >
-                  <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      fetchLog()
+                    }}
+                    disabled={loading}
+                    aria-label="Refresh git log"
+                  />
+                }
+              >
+                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
               </TooltipTrigger>
               <TooltipContent>Refresh git log</TooltipContent>
             </Tooltip>
@@ -181,18 +183,20 @@ export const GitLogSection = observer(function GitLogSection({
             )}
             {fullscreen && onExitFullscreen && (
               <Tooltip>
-                <TooltipTrigger>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onExitFullscreen()
-                    }}
-                    aria-label="Close"
-                  >
-                    <X className="size-3.5" />
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onExitFullscreen()
+                      }}
+                      aria-label="Close"
+                    />
+                  }
+                >
+                  <X className="size-3.5" />
                 </TooltipTrigger>
                 <TooltipContent>Close (Esc)</TooltipContent>
               </Tooltip>
@@ -254,16 +258,18 @@ function CommitRow({ commit }: { commit: Commit }) {
         </div>
       </div>
       <Tooltip>
-        <TooltipTrigger>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="size-6 p-0 opacity-0 group-hover/commit:opacity-100 focus-visible:opacity-100 transition-opacity"
-            onClick={copy}
-            aria-label="Copy commit SHA"
-          >
-            <Copy className="size-3.5" />
-          </Button>
+        <TooltipTrigger
+          render={
+            <Button
+              size="sm"
+              variant="ghost"
+              className="size-6 p-0 opacity-0 group-hover/commit:opacity-100 focus-visible:opacity-100 transition-opacity"
+              onClick={copy}
+              aria-label="Copy commit SHA"
+            />
+          }
+        >
+          <Copy className="size-3.5" />
         </TooltipTrigger>
         <TooltipContent>Copy SHA</TooltipContent>
       </Tooltip>

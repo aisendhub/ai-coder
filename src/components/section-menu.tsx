@@ -50,20 +50,22 @@ export function SectionMenu({
   return (
     <div ref={rootRef} className="relative inline-flex">
       <Tooltip>
-        <TooltipTrigger>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={(e) => {
-              e.stopPropagation()
-              setOpen((v) => !v)
-            }}
-            aria-haspopup="menu"
-            aria-expanded={open}
-            aria-label="Section options"
-          >
-            <MoreVertical className="size-3.5" />
-          </Button>
+        <TooltipTrigger
+          render={
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={(e) => {
+                e.stopPropagation()
+                setOpen((v) => !v)
+              }}
+              aria-haspopup="menu"
+              aria-expanded={open}
+              aria-label="Section options"
+            />
+          }
+        >
+          <MoreVertical className="size-3.5" />
         </TooltipTrigger>
         <TooltipContent>More options</TooltipContent>
       </Tooltip>

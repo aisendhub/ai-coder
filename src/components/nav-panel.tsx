@@ -85,6 +85,7 @@ export const NavPanel = observer(function NavPanel({
   const [boardOpen, setBoardOpen] = useState(false)
   const [tasksOpen, setTasksOpen] = usePersistentState("ai-coder:panels:nav:tasksOpen", true)
   const [chatsOpen, setChatsOpen] = usePersistentState("ai-coder:panels:nav:chatsOpen", true)
+  const [projectOpen, setProjectOpen] = usePersistentState("ai-coder:panels:nav:projectOpen", true)
   const { dark, toggle: toggleTheme } = useTheme()
   const handleDelete = useDeleteConversation()
 
@@ -249,38 +250,56 @@ export const NavPanel = observer(function NavPanel({
           </Select>
         </div>
         {activeProject && (
-          <div className="text-[10px] text-muted-foreground px-1 font-mono truncate" title={activeProject.cwd}>
-            {activeProject.cwd}
-          </div>
+          <button
+            type="button"
+            onClick={() => setProjectOpen((v) => !v)}
+            className="flex items-center gap-1 px-1 text-[10px] text-muted-foreground font-mono hover:text-foreground cursor-pointer min-w-0"
+            aria-expanded={projectOpen}
+            aria-label={projectOpen ? "Collapse project actions" : "Expand project actions"}
+            title={activeProject.cwd}
+          >
+            <span className="truncate">{activeProject.cwd}</span>
+            <span className="ml-auto shrink-0 flex items-center">
+              {projectOpen ? (
+                <ChevronDown className="size-3" />
+              ) : (
+                <ChevronRight className="size-3" />
+              )}
+            </span>
+          </button>
         )}
-        <div className="flex gap-1">
-          <Button
-            className="flex-1 justify-start gap-2"
-            onClick={handleNew}
-            disabled={!activeProject}
-          >
-            <Plus className="size-4" />
-            Chat
-          </Button>
-          <Button
-            className="flex-1 justify-start gap-2"
-            variant="secondary"
-            onClick={handleNewTask}
-            disabled={!activeProject}
-          >
-            <Gauge className="size-4" />
-            Task
-          </Button>
-        </div>
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search"
-            className="pl-8"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </div>
+        {(projectOpen || !activeProject) && (
+          <>
+            <div className="flex gap-1">
+              <Button
+                className="flex-1 justify-start gap-2"
+                onClick={handleNew}
+                disabled={!activeProject}
+              >
+                <Plus className="size-4" />
+                Chat
+              </Button>
+              <Button
+                className="flex-1 justify-start gap-2"
+                variant="secondary"
+                onClick={handleNewTask}
+                disabled={!activeProject}
+              >
+                <Gauge className="size-4" />
+                Task
+              </Button>
+            </div>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search"
+                className="pl-8"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+          </>
+        )}
       </div>
       {filtered.length === 0 && !loading ? (
         <div className="flex-1 min-h-0 px-2 py-3 text-xs text-muted-foreground">
@@ -310,37 +329,41 @@ export const NavPanel = observer(function NavPanel({
               onClick={(e) => e.stopPropagation()}
             >
               <Tooltip>
-                <TooltipTrigger>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      void handleNewTask()
-                    }}
-                    disabled={!activeProject}
-                    aria-label="New task"
-                  >
-                    <Plus className="size-3.5" />
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void handleNewTask()
+                      }}
+                      disabled={!activeProject}
+                      aria-label="New task"
+                    />
+                  }
+                >
+                  <Plus className="size-3.5" />
                 </TooltipTrigger>
                 <TooltipContent side="right">
                   {activeProject ? "New task" : "Select a project first"}
                 </TooltipContent>
               </Tooltip>
               <Tooltip>
-                <TooltipTrigger>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setBoardOpen(true)
-                    }}
-                    aria-label="Open task board"
-                  >
-                    <LayoutGrid className="size-3.5" />
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setBoardOpen(true)
+                      }}
+                      aria-label="Open task board"
+                    />
+                  }
+                >
+                  <LayoutGrid className="size-3.5" />
                 </TooltipTrigger>
                 <TooltipContent side="right">Task board</TooltipContent>
               </Tooltip>

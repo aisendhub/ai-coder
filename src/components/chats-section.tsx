@@ -121,19 +121,21 @@ export const ChatsSection = observer(function ChatsSection({
         onClick={(e) => e.stopPropagation()}
       >
         <Tooltip>
-          <TooltipTrigger>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={(e) => {
-                e.stopPropagation()
-                void handleNewChat()
-              }}
-              disabled={!activeProject}
-              aria-label="New chat"
-            >
-              <Plus className="size-3.5" />
-            </Button>
+          <TooltipTrigger
+            render={
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void handleNewChat()
+                }}
+                disabled={!activeProject}
+                aria-label="New chat"
+              />
+            }
+          >
+            <Plus className="size-3.5" />
           </TooltipTrigger>
           <TooltipContent side="right">
             {activeProject ? "New chat" : "Select a project first"}
@@ -151,19 +153,20 @@ export const ChatsSection = observer(function ChatsSection({
         )}
         {fullscreen && onExitFullscreen && (
           <Tooltip>
-            <TooltipTrigger>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="size-5"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onExitFullscreen()
-                }}
-                aria-label="Close"
-              >
-                <X className="size-3" />
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onExitFullscreen()
+                  }}
+                  aria-label="Close"
+                />
+              }
+            >
+              <X className="size-3.5" />
             </TooltipTrigger>
             <TooltipContent side="right">Close (Esc)</TooltipContent>
           </Tooltip>

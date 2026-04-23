@@ -175,34 +175,40 @@ export const FileTreePanel = observer(function FileTreePanel({
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <Tooltip>
-              <TooltipTrigger>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setShowHidden((v) => !v)}
-                  aria-pressed={showHidden}
-                  aria-label={showHidden ? "Hide dotfiles" : "Show dotfiles"}
-                  className={cn(showHidden && "bg-accent text-accent-foreground")}
-                >
-                  {showHidden ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowHidden((v) => !v)}
+                    aria-pressed={showHidden}
+                    aria-label={showHidden ? "Hide dotfiles" : "Show dotfiles"}
+                    className={cn(showHidden && "bg-accent text-accent-foreground")}
+                  />
+                }
+              >
+                {showHidden ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
               </TooltipTrigger>
               <TooltipContent>{showHidden ? "Hide dotfiles" : "Show dotfiles"}</TooltipContent>
             </Tooltip>
             <Tooltip>
-              <TooltipTrigger>
-                <Button size="sm" variant="ghost" onClick={refreshAll} aria-label="Refresh">
-                  <RefreshCw className={cn("size-3.5", rootState?.loading && "animate-spin")} />
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button size="sm" variant="ghost" onClick={refreshAll} aria-label="Refresh" />
+                }
+              >
+                <RefreshCw className={cn("size-3.5", rootState?.loading && "animate-spin")} />
               </TooltipTrigger>
               <TooltipContent>Refresh tree</TooltipContent>
             </Tooltip>
             {onClose && (
               <Tooltip>
-                <TooltipTrigger>
-                  <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close files">
-                    <X className="size-3.5" />
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close files" />
+                  }
+                >
+                  <X className="size-3.5" />
                 </TooltipTrigger>
                 <TooltipContent>Close</TooltipContent>
               </Tooltip>
@@ -221,18 +227,22 @@ export const FileTreePanel = observer(function FileTreePanel({
             />
           </div>
           <Tooltip>
-            <TooltipTrigger>
-              <Button size="sm" variant="ghost" onClick={expandAll} aria-label="Expand all">
-                <ChevronsUpDown className="size-3.5" />
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button size="sm" variant="ghost" onClick={expandAll} aria-label="Expand all" />
+              }
+            >
+              <ChevronsUpDown className="size-3.5" />
             </TooltipTrigger>
             <TooltipContent>Expand all loaded folders</TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger>
-              <Button size="sm" variant="ghost" onClick={collapseAll} aria-label="Collapse all">
-                <ChevronsDownUp className="size-3.5" />
-              </Button>
+            <TooltipTrigger
+              render={
+                <Button size="sm" variant="ghost" onClick={collapseAll} aria-label="Collapse all" />
+              }
+            >
+              <ChevronsDownUp className="size-3.5" />
             </TooltipTrigger>
             <TooltipContent>Collapse all</TooltipContent>
           </Tooltip>
