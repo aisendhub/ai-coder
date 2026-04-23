@@ -63,6 +63,11 @@ import type {
   ProjectServiceWriteDto,
   DetectedServiceCandidate,
 } from "@/models/ServiceList.model"
+import {
+  SERVICES_PROPOSED_EVENT,
+  consumeLatestServicesProposal,
+  type ServicesProposedEventDetail,
+} from "@/lib/hooks/services-proposal"
 
 // Editor state shape. `serviceName` identifies which row we're editing; the
 // first-run flow seeds it to "default" but users can rename in the editor.
@@ -232,7 +237,33 @@ export const ServicesPanel = observer(function ServicesPanel({
   // Full editor only opens via the picker's gear icon or when editing an
   // existing service — matches the "no-config-by-default" guidance.
   const [pickerOpen, setPickerOpen] = useState(false)
+  // Agent-seeded proposals: when a `<run-services>` block lands in chat,
+  // we open the picker pre-populated with that list. Null = nothing seeded
+  // currently. Drained when the picker opens.
+  const [seededProposals, setSeededProposals] = useState<DetectedServiceCandidate[] | null>(null)
   const [runnerId, setRunnerId] = useState<RunnerId>("local-process")
+
+  // Listen for agent-proposed services. The event fires in the hook
+  // (src/lib/hooks/services-proposal.ts) whenever an assistant message
+  // contains a `<run-services>` / `<run-manifest>` block. If the panel is
+  // already mounted we drain the mailbox here; App.tsx ensures the panel
+  // mounts in response to the same event.
+  useEffect(() => {
+    // Drain any proposal that arrived before we mounted.
+    const pending = consumeLatestServicesProposal()
+    if (pending && pending.candidates.length > 0) {
+      setSeededProposals(pending.candidates)
+      setPickerOpen(true)
+    }
+    const onProposed = (ev: Event) => {
+      const detail = (ev as CustomEvent<ServicesProposedEventDetail>).detail
+      if (!detail || detail.candidates.length === 0) return
+      setSeededProposals(detail.candidates)
+      setPickerOpen(true)
+    }
+    window.addEventListener(SERVICES_PROPOSED_EVENT, onProposed)
+    return () => window.removeEventListener(SERVICES_PROPOSED_EVENT, onProposed)
+  }, [])
 
   if (collapsed) {
     const liveCount = services.items.filter((s) => s.isLive).length
@@ -849,7 +880,12 @@ export const ServicesPanel = observer(function ServicesPanel({
         hasActiveConversation={!!active?.id}
         configurePhase={configurePhase}
         dismissible={hasConfigured}
-        onClose={() => setPickerOpen(false)}
+        seededProposals={seededProposals}
+        onConsumeSeed={() => setSeededProposals(null)}
+        onClose={() => {
+          setSeededProposals(null)
+          setPickerOpen(false)
+        }}
         // Don't close on save — users commonly pick several candidates in a
         // row. When they're done, they hit the back arrow (dismissible) or
         // stay in the auto-hide empty state until a save surfaces the list.
@@ -1512,6 +1548,8 @@ const ServicePicker = observer(function ServicePicker({
   hasActiveConversation,
   configurePhase,
   dismissible,
+  seededProposals,
+  onConsumeSeed,
   onClose,
   onSaveCandidate,
   onEditCandidate,
@@ -1527,6 +1565,11 @@ const ServicePicker = observer(function ServicePicker({
    *  so the user can abort. False on the empty-state flow where there's
    *  nowhere to go back to. */
   dismissible: boolean
+  /** Proposals from the agent (via ai-coder:services-proposed). When set,
+   *  we prepend them to the list so they render above heuristic hits and
+   *  call onConsumeSeed to clear the parent's buffer. */
+  seededProposals?: DetectedServiceCandidate[] | null
+  onConsumeSeed?: () => void
   onClose: () => void
   onSaveCandidate: (cand: DetectedServiceCandidate, run: boolean) => void
   onEditCandidate: (cand: DetectedServiceCandidate) => void
@@ -1559,7 +1602,13 @@ const ServicePicker = observer(function ServicePicker({
       .detectProjectServices(userId, projectId, conversationId)
       .then((res) => {
         if (cancelled) return
-        setCandidates(res.candidates.map((c) => ({ ...c, source: "heuristic" })))
+        setCandidates((prev) => {
+          // Preserve any previously-added AI / seeded candidates; refresh
+          // only the heuristic subset from the response.
+          const preserved = prev.filter((c) => c.source !== "heuristic")
+          const fresh = res.candidates.map((c) => ({ ...c, source: "heuristic" as const }))
+          return [...fresh, ...preserved]
+        })
         setError(null)
       })
       .catch((err) => {
@@ -1571,6 +1620,22 @@ const ServicePicker = observer(function ServicePicker({
       })
     return () => { cancelled = true }
   }, [services, userId, projectId, conversationId])
+
+  // Drain seeded proposals (from `ai-coder:services-proposed`) into the
+  // candidate list. Runs whenever the parent hands us a new seed so chat-
+  // driven proposals flow in without needing to re-open the picker.
+  useEffect(() => {
+    if (!seededProposals || seededProposals.length === 0) return
+    setCandidates((prev) => {
+      // Dedupe by name: the heuristic pass may have already found the same
+      // service. Agent rationale is usually richer, so agent-sourced entries
+      // replace heuristic ones with the same name.
+      const agentNames = new Set(seededProposals.map((c) => c.name))
+      const remaining = prev.filter((c) => !agentNames.has(c.name))
+      return [...seededProposals, ...remaining]
+    })
+    onConsumeSeed?.()
+  }, [seededProposals, onConsumeSeed])
 
   const posting = configurePhase === "posting"
 

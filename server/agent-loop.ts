@@ -511,7 +511,9 @@ Names should be short identifiers (lowercase letters, digits, _ or -).
 Conventional names: "web", "api", "worker", "scheduler", "default".
 Each service needs its own distinct port.
 
-Respond with ONLY the \`<run-services>\` block — no markdown, no commentary:
+Respond with ONLY the \`<run-services>\` block — no markdown, no commentary.
+The payload must be EITHER \`{"services": [...]}\` OR a bare \`[...]\` array.
+Use an array even for one service so the host always sees a list:
 
 <run-services>
 {
@@ -532,9 +534,10 @@ Respond with ONLY the \`<run-services>\` block — no markdown, no commentary:
 </run-services>
 
 Rules:
-- If you find exactly one service, return a one-entry array — the shape is
-  still \`<run-services>\`.
-- If you find nothing runnable, return \`{"services":[]}\` with empty array.
+- Always use \`<run-services>\`. Never emit \`<run-manifest>\` from this
+  turn — the host presents every response as a pick-list, even for one
+  service.
+- If you find nothing runnable, emit an empty array (\`{"services":[]}\`).
 - "start" must be non-empty for every entry.
 - No preamble. No code fences. Just the block.`
 
@@ -700,47 +703,34 @@ The host injects \`PORT\` as an env var AND expands \`$PORT\` in the start
 command via its shell. In the "port" field of the manifest, report the
 number the app will bind to (usually the fallback in the code).
 
-**Multi-service apps**: if the repo has multiple processes the user will
-want to run locally (web + api, web + worker, frontend + backend, etc.),
-emit a \`<run-services>\` block with an array. Each entry has the same
-fields as a single manifest plus a short \`name\` ("web", "api",
-"worker"). Only do this when the processes are genuinely separate
-programs — a build step that precedes the server is NOT a second service,
-it's a \`build\` field on the server. Each service needs its own bind
-port — they can't share.
+**Always produce a list of services** (even for a single-service repo).
+The host shows your proposal to the user as a pick-list — they review,
+adjust, and save. Emit a \`<run-services>\` block with an array. For one
+service, return a single-entry array. For a monorepo (web + api, web +
+worker, etc.), return one entry per runnable process. A build step that
+precedes the server is NOT a second service — it's the \`build\` field.
 
-End your reply with EITHER (a) a single \`<run-manifest>\` block for
-single-service apps, OR (b) a \`<run-services>\` block for multi-service
-apps. Not both, and nothing after it.
+Each service needs its own distinct bind port. Never use
+\`<run-manifest>\` from this turn; the host treats it as a legacy
+single-service shape.
 
-Single-service form:
-
-<run-manifest>
-{
-  "stack": "node" | "bun" | "python" | "go" | "ruby" | "static" | "docker" | "custom",
-  "start": "exact shell command",
-  "build": "optional build command — omit when none",
-  "env": { "KEY": "value" },
-  "port": 3000,
-  "rationale": "one short sentence — include which file/line told you the port",
-  "confidence": "high" | "medium" | "low"
-}
-</run-manifest>
-
-Multi-service form:
+End your reply with exactly one \`<run-services>\` block and nothing
+after it. The payload must be EITHER \`{"services":[...]}\` or a bare
+\`[...]\` array:
 
 <run-services>
 {
   "services": [
     {
       "name": "web",
-      "stack": "node",
-      "start": "npm run dev -- --port $PORT",
-      "env": {},
+      "stack": "node" | "bun" | "python" | "go" | "ruby" | "static" | "docker" | "custom",
+      "start": "exact shell command",
+      "build": "optional build command — omit when none",
+      "env": { "KEY": "value" },
       "port": 5173,
       "enabled": true,
-      "rationale": "Vite dev server from package.json",
-      "confidence": "high"
+      "rationale": "one short sentence — include which file/line told you the port",
+      "confidence": "high" | "medium" | "low"
     },
     {
       "name": "api",
@@ -757,17 +747,17 @@ Multi-service form:
 </run-services>
 
 Rules:
-- The block is MANDATORY — the host parses it to save the config.
-- "start" must be non-empty on every service. If you genuinely can't
-  figure one out, explain why and emit the block with "start": "" for
-  that service.
+- The block is MANDATORY — the host parses it to show the pick-list.
+- Always an array. Single-service → one entry. Nothing runnable → empty
+  array (\`{"services":[]}\`).
+- "start" must be non-empty on every entry.
 - "port" is a JSON number (e.g. 3000, not "3000"). Omit the field only if
   you truly can't find any port reference in the code.
 - Each service needs its own distinct bind port — they can't share.
 - The host injects \`PORT\` as an env var AND expands \`$PORT\` in the start
   string via its shell. When in doubt, pass \`$PORT\` as an explicit flag.
-- For multi-service, "name" must be a short identifier: lowercase letters,
-  digits, \`_\`, \`-\`. Conventional: "web", "api", "worker", "scheduler".
+- "name" must be a short identifier: lowercase letters, digits, \`_\`,
+  \`-\`. Conventional: "web", "api", "worker", "scheduler", "default".
 - Do NOT start the service yourself. This turn is configuration only.`
 
 export function buildDetectServicesSystemPrompt(): string {
@@ -898,17 +888,26 @@ export type LlmServiceProposal = LlmManifestProposal & {
 const DETECT_SERVICES_BLOCK_RE = /<run-services>\s*([\s\S]*?)\s*<\/run-services>/i
 const VALID_SERVICE_NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/
 
-// Parse a `<run-services>` block into one-or-more services. Returns null
-// when the block is missing / malformed / empty, so callers can fall back
-// to the single-service `<run-manifest>` extractor.
+// Parse a `<run-services>` block into one-or-more services. Accepts two
+// payload shapes the models actually produce:
+//   1. { "services": [ {...}, ... ] }    — spec shape
+//   2. [ {...}, ... ]                     — bare array (seen in practice)
+// Returns null when the block is missing / malformed / empty, so callers
+// can fall back to the single-service `<run-manifest>` extractor.
 export function extractDetectedServices(assistantText: string): LlmServiceProposal[] | null {
   const match = DETECT_SERVICES_BLOCK_RE.exec(assistantText)
   if (!match) return null
   const payload = match[1].trim()
-  const obj = tryParse(payload)
-  if (!obj || typeof obj !== "object") return null
-  const arr = (obj as Record<string, unknown>).services
-  if (!Array.isArray(arr) || arr.length === 0) return null
+  const parsed = tryParse(payload)
+  if (!parsed) return null
+  let arr: unknown[] | null = null
+  if (Array.isArray(parsed)) {
+    arr = parsed
+  } else if (typeof parsed === "object") {
+    const wrapped = (parsed as Record<string, unknown>).services
+    if (Array.isArray(wrapped)) arr = wrapped
+  }
+  if (!arr || arr.length === 0) return null
 
   const allowedStacks: LlmManifestStack[] = [
     "node", "bun", "python", "go", "ruby", "static", "docker", "custom",

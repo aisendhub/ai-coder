@@ -85,6 +85,15 @@ function DesktopLayout() {
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [fileTreeOpen, setFileTreeOpen] = usePersistentState("ai-coder:panels:fileTreeOpen", false)
+  // When the agent's reply drops a <run-services> block, open the services
+  // panel automatically so the user sees the pick-list without hunting for
+  // it. The panel itself listens for the same event to open the picker +
+  // seed its candidate list (see services-panel.tsx).
+  useEffect(() => {
+    const onProposed = () => setServicesOpen(true)
+    window.addEventListener("ai-coder:services-proposed", onProposed)
+    return () => window.removeEventListener("ai-coder:services-proposed", onProposed)
+  }, [setServicesOpen])
   // Section promotion: when promoted, a section lives in its own dockable
   // side panel instead of inside its parent accordion. Fullscreen is a
   // separate axis — a promoted section can also be fullscreened and returns
@@ -326,6 +335,11 @@ function MobileLayout() {
   // Mobile hides the file-tree trigger (handled inside FileTreeTrigger);
   // we keep a no-op state here just to satisfy TopBar's prop shape.
   const [fileTreeOpen, setFileTreeOpen] = useState(false)
+  useEffect(() => {
+    const onProposed = () => setServicesOpen(true)
+    window.addEventListener("ai-coder:services-proposed", onProposed)
+    return () => window.removeEventListener("ai-coder:services-proposed", onProposed)
+  }, [setServicesOpen])
   return (
     <ChatStateProvider>
       <SidebarProvider style={{ height: "100svh" } as React.CSSProperties}>

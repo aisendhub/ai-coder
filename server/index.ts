@@ -822,134 +822,45 @@ async function startRunner(args: {
   return runner
 }
 
-// Runs after every turn. If the assistant's reply contains either a
-// `<run-services>` block (multi-service) OR a single `<run-manifest>`
-// block (legacy single-service), parse it and upsert to project_services.
-// Also mirrors a single-service save to the legacy projects.run_manifest
-// column during rollout. Emits a bus event so the SSE stream notifies the
-// chat client — the services panel reloads on receipt.
+// Runs after every turn. We DO NOT auto-save anymore — the assistant's
+// `<run-services>` / `<run-manifest>` block stays in the message text,
+// and the client (see src/lib/agent-response-hooks.ts) parses it from
+// the message text, opens the services panel, and presents the services
+// as a pick-list. This keeps a single propose-then-approve flow for both
+// heuristic + AI + chat-driven detection.
+//
+// What's left for the server to do: log parse failures so we notice when
+// models drift off-spec, and emit an advisory SSE event so any client
+// that's already open can react without waiting for Supabase realtime.
 async function reconcileDetectedServicesIfAny(
-  conversationId: string,
+  _conversationId: string,
   assistantText: string,
   emit: (event: string, data: unknown) => void
 ): Promise<void> {
-  if (!sb) return
   const textLen = assistantText?.length ?? 0
   const hasMulti = typeof assistantText === "string" && assistantText.includes("<run-services")
   const hasSingle = typeof assistantText === "string" && assistantText.includes("<run-manifest")
-  if (!hasMulti && !hasSingle) {
-    if (textLen > 0) {
-      console.log(
-        `[services.reconcile] no <run-services>/<run-manifest> block in assistant text ` +
-        `(len=${textLen}, tail="${assistantText.slice(-120).replace(/\n/g, " ")}")`
-      )
-    }
-    return
-  }
+  if (!hasMulti && !hasSingle) return
 
-  // Prefer multi-service when present. Agents that want to update a single
-  // service in a multi-service app should emit a single-entry <run-services>
-  // block (keyed by name), not a <run-manifest> which would overwrite the
-  // default service and no other.
   const multi = hasMulti ? extractDetectedServices(assistantText) : null
   const single = !multi && hasSingle ? extractDetectedManifest(assistantText) : null
 
   if (!multi && !single) {
     console.warn(
-      `[services.reconcile] block present but parse failed ` +
+      `[services.proposed] block present but parse failed ` +
       `(len=${textLen}, tail="${assistantText.slice(-200).replace(/\n/g, " ")}")`
     )
     return
   }
 
-  const { data: conv } = await sb
-    .from("conversations")
-    .select("project_id, user_id")
-    .eq("id", conversationId)
-    .single()
-  if (!conv?.project_id) return
-
-  if (multi) {
-    // Replace or insert each named service. We do NOT delete services the
-    // block omits — agents sometimes propose a partial update (just "api"
-    // to fix a port) and nuking the rest would be surprising. Explicit
-    // delete stays a user action.
-    const saved: Array<{ name: string; port?: number }> = []
-    for (const [idx, svc] of multi.entries()) {
-      try {
-        await upsertProjectService(sb, conv.project_id as string, {
-          name: svc.name,
-          stack: svc.stack,
-          start: svc.start,
-          env: svc.env ?? {},
-          build: svc.build ?? null,
-          port: svc.port ?? null,
-          enabled: svc.enabled ?? true,
-          order_index: svc.order_index ?? idx,
-        })
-        saved.push({ name: svc.name, port: svc.port })
-      } catch (err) {
-        console.error(
-          `[services.reconcile] upsert of '${svc.name}' failed:`,
-          (err as Error).message
-        )
-      }
-    }
-    console.log(
-      `[services.reconcile] saved ${saved.length} service(s) for project ${(conv.project_id as string).slice(0, 8)}`,
-      saved
-    )
-    emit("services.configured", {
-      projectId: conv.project_id,
-      multi: true,
-      services: saved,
-    })
-    return
-  }
-
-  // Single-service path — same shape as before. Writes the default row in
-  // project_services AND mirrors to the legacy projects.run_manifest for
-  // one release.
-  const proposal = single!
-  const manifest: Record<string, unknown> = {
-    stack: proposal.stack,
-    start: proposal.start,
-    env: proposal.env ?? {},
-  }
-  if (proposal.build) manifest.build = proposal.build
-  if (proposal.port != null) manifest.port = proposal.port
-
-  try {
-    await upsertProjectService(sb, conv.project_id as string, {
-      name: "default",
-      stack: proposal.stack,
-      start: proposal.start,
-      env: proposal.env ?? {},
-      build: proposal.build ?? null,
-      port: proposal.port ?? null,
-    })
-  } catch (err) {
-    console.error("[services.reconcile] upsert of 'default' failed:", (err as Error).message)
-    emit("services.configure_failed", { error: (err as Error).message })
-    return
-  }
-  const { error } = await sb
-    .from("projects")
-    .update({ run_manifest: manifest })
-    .eq("id", conv.project_id)
-  if (error) {
-    console.error("[services.reconcile] legacy column update failed", error.message)
-  }
-
+  const count = multi?.length ?? (single ? 1 : 0)
   console.log(
-    `[services.reconcile] saved manifest for project ${(conv.project_id as string).slice(0, 8)}`,
-    { stack: proposal.stack, start: proposal.start }
+    `[services.proposed] assistant proposed ${count} service(s); ` +
+    `client will surface the pick-list from the message text.`
   )
-  emit("services.configured", {
-    projectId: conv.project_id,
-    manifest,
-    rationale: proposal.rationale,
-    confidence: proposal.confidence,
+  emit("services.proposed", {
+    count,
+    multi: !!multi,
   })
 }
 

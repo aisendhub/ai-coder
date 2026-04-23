@@ -4,6 +4,7 @@ import { BaseList } from "./BaseList.model"
 import { Message, type StreamEvent } from "./Message.model"
 import { supabase } from "@/lib/supabase"
 import type { Attachment, AttachmentMeta } from "@/lib/attachment"
+import { runAgentResponseHooks } from "@/lib/agent-response-hooks"
 
 class MessageList extends BaseList<typeof Message> {
   get ItemType() {
@@ -199,6 +200,7 @@ export class Conversation extends BaseModel {
         deliveredAt: row.delivered_at ?? null,
         isOptimistic: false,
       })
+      this.fireResponseHooks(row, "")
       return
     }
     this.messages.addItem(
@@ -213,15 +215,32 @@ export class Conversation extends BaseModel {
         deliveredAt: row.delivered_at ?? null,
       })
     )
+    this.fireResponseHooks(row, "")
   }
 
   @action private applyUpdate(row: MessageRow) {
     const m = this.messages.find(row.id)
     if (!m) return
+    const priorText = m.text ?? ""
     m.setProps({
       text: row.text,
       events: Array.isArray(row.events) ? (row.events as StreamEvent[]) : [],
       deliveredAt: row.delivered_at ?? m.deliveredAt,
+    })
+    this.fireResponseHooks(row, priorText)
+  }
+
+  // Run agent-response hooks on every assistant/notice row we see.
+  // Hooks self-register (see src/lib/hooks/*); this model doesn't know
+  // or care what side effects they trigger.
+  private fireResponseHooks(row: MessageRow, priorText: string) {
+    if (row.role !== "assistant" && row.role !== "notice") return
+    if (!row.text) return
+    runAgentResponseHooks(row.text, {
+      conversationId: this.id,
+      projectId: this.projectId || null,
+      messageId: row.id,
+      priorText,
     })
   }
 
