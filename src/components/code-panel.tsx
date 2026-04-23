@@ -23,10 +23,29 @@ import {
 // Each section's header is also accordion-collapsible; when one section is
 // collapsed the other takes the remaining space and the resize handle goes
 // away (there's nothing to size against). Open-states persist across reloads.
+type CodePanelProps = {
+  collapsed?: boolean
+  onClose?: () => void
+  // Section promotion/fullscreen state, owned by App.tsx so the promoted
+  // copy and the ghosted stub stay in sync.
+  gitLogPromoted?: boolean
+  gitLogFullscreen?: boolean
+  onPromoteGitLog?: () => void
+  onRestoreGitLog?: () => void
+  onEnterGitLogFullscreen?: () => void
+  onExitGitLogFullscreen?: () => void
+}
+
 export const CodePanel = observer(function CodePanel({
   collapsed = false,
   onClose,
-}: { collapsed?: boolean; onClose?: () => void } = {}) {
+  gitLogPromoted = false,
+  gitLogFullscreen = false,
+  onPromoteGitLog,
+  onRestoreGitLog,
+  onEnterGitLogFullscreen,
+  onExitGitLogFullscreen,
+}: CodePanelProps = {}) {
   const [changesOpen, setChangesOpen] = usePersistentState(
     "ai-coder:panels:changesOpen",
     true
@@ -41,6 +60,36 @@ export const CodePanel = observer(function CodePanel({
   if (collapsed) {
     // Narrow rail — accordions don't make sense. Show just the Changes rail.
     return <ChangesSection collapsed onClose={onClose} />
+  }
+
+  const gitLogMenuProps = {
+    promoted: gitLogPromoted,
+    fullscreen: gitLogFullscreen,
+    onPromote: onPromoteGitLog,
+    onRestore: onRestoreGitLog,
+    onEnterFullscreen: onEnterGitLogFullscreen,
+    onExitFullscreen: onExitGitLogFullscreen,
+  }
+
+  // Git log promoted → render ghost stub instead of the resizable split.
+  // Changes takes the remaining height; the stub is a single clickable row
+  // that restores Git log to this spot.
+  if (gitLogPromoted) {
+    return (
+      <div className="flex h-full flex-col min-h-0">
+        <ChangesSection
+          expanded={changesOpen}
+          onToggleExpanded={toggleChanges}
+          onClose={onClose}
+        />
+        <GitLogSection
+          ghost
+          expanded={false}
+          onToggleExpanded={toggleGitLog}
+          {...gitLogMenuProps}
+        />
+      </div>
+    )
   }
 
   if (changesOpen && gitLogOpen) {
@@ -58,7 +107,11 @@ export const CodePanel = observer(function CodePanel({
         <ResizableHandle />
         <ResizablePanel id="gitlog" order={2} defaultSize={35} minSize={15}>
           <div className="h-full min-h-0 flex flex-col">
-            <GitLogSection expanded onToggleExpanded={toggleGitLog} />
+            <GitLogSection
+              expanded
+              onToggleExpanded={toggleGitLog}
+              {...gitLogMenuProps}
+            />
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
@@ -73,7 +126,11 @@ export const CodePanel = observer(function CodePanel({
         onToggleExpanded={toggleChanges}
         onClose={onClose}
       />
-      <GitLogSection expanded={gitLogOpen} onToggleExpanded={toggleGitLog} />
+      <GitLogSection
+        expanded={gitLogOpen}
+        onToggleExpanded={toggleGitLog}
+        {...gitLogMenuProps}
+      />
     </div>
   )
 })

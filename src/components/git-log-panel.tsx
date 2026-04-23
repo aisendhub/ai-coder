@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, GitCommit, RefreshCw, Copy } from "lucide-react"
+import { ArrowUpRight, ChevronDown, ChevronRight, GitCommit, RefreshCw, Copy } from "lucide-react"
 import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { workspace } from "@/models"
+import { SectionMenu } from "@/components/section-menu"
 
 type Commit = {
   sha: string
@@ -24,12 +25,32 @@ type LogResponse = {
 
 type Props = {
   expanded: boolean
-  onToggleExpanded: () => void
+  // Omit to hide the chevron (e.g. in the promoted standalone panel, where
+  // there's nothing to collapse into).
+  onToggleExpanded?: () => void
+  // Section-level state. Same values whether this instance is the source
+  // (in the accordion) or the destination (in a promoted side panel).
+  promoted?: boolean
+  fullscreen?: boolean
+  onPromote?: () => void
+  onRestore?: () => void
+  onEnterFullscreen?: () => void
+  onExitFullscreen?: () => void
+  // Rendering role: when ghost, this instance is the placeholder in the
+  // original accordion — it just shows a stub pointing to the promoted copy.
+  ghost?: boolean
 }
 
 export const GitLogSection = observer(function GitLogSection({
   expanded,
   onToggleExpanded,
+  promoted = false,
+  fullscreen = false,
+  onPromote,
+  onRestore,
+  onEnterFullscreen,
+  onExitFullscreen,
+  ghost = false,
 }: Props) {
   const active = workspace.active
   const conversationId = active?.id ?? null
@@ -79,20 +100,46 @@ export const GitLogSection = observer(function GitLogSection({
     return () => window.removeEventListener("ai-coder:turn-done", onTurnDone)
   }, [expanded, fetchLog])
 
-  return (
-    <div className={cn("flex flex-col min-h-0", expanded && "flex-1")}>
+  // Ghost mode: this section has been promoted elsewhere; show only a stub
+  // in its original spot so the user can find their way back.
+  if (ghost) {
+    return (
       <div className="shrink-0 border-b">
         <button
           type="button"
-          onClick={onToggleExpanded}
-          className="flex h-10 w-full items-center gap-2 px-3 text-left hover:bg-accent/40"
-          aria-expanded={expanded}
+          onClick={onRestore}
+          className="flex h-10 w-full items-center gap-2 px-3 text-left opacity-60 hover:opacity-100 hover:bg-accent/40 cursor-pointer"
+          aria-label="Return Git log to sidebar"
         >
-          {expanded ? (
-            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+          <ArrowUpRight className="size-3.5 shrink-0 text-muted-foreground" />
+          <GitCommit className="size-4 shrink-0" />
+          <h2 className="text-sm font-medium">Git log</h2>
+          <span className="ml-auto text-[10px] uppercase tracking-wide text-muted-foreground">
+            in panel
+          </span>
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className={cn("flex flex-col min-h-0", expanded && "flex-1")}>
+      <div className="shrink-0 border-b">
+        <div
+          className={cn(
+            "flex h-10 w-full items-center gap-2 px-3",
+            onToggleExpanded && "cursor-pointer hover:bg-accent/40"
           )}
+          onClick={onToggleExpanded}
+          role={onToggleExpanded ? "button" : undefined}
+          aria-expanded={onToggleExpanded ? expanded : undefined}
+        >
+          {onToggleExpanded &&
+            (expanded ? (
+              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+            ))}
           <GitCommit className="size-4 shrink-0" />
           <h2 className="text-sm font-medium">Git log</h2>
           <span className="text-xs text-muted-foreground">{commits.length || ""}</span>
@@ -101,7 +148,10 @@ export const GitLogSection = observer(function GitLogSection({
               {branch}
             </span>
           )}
-          <span className="ml-auto flex items-center" onClick={(e) => e.stopPropagation()}>
+          <span
+            className={cn("flex items-center gap-0.5", !branch && "ml-auto")}
+            onClick={(e) => e.stopPropagation()}
+          >
             <Tooltip>
               <TooltipTrigger>
                 <Button
@@ -119,8 +169,18 @@ export const GitLogSection = observer(function GitLogSection({
               </TooltipTrigger>
               <TooltipContent>Refresh git log</TooltipContent>
             </Tooltip>
+            {onPromote && onRestore && onEnterFullscreen && onExitFullscreen && (
+              <SectionMenu
+                promoted={promoted}
+                fullscreen={fullscreen}
+                onPromote={onPromote}
+                onRestore={onRestore}
+                onEnterFullscreen={onEnterFullscreen}
+                onExitFullscreen={onExitFullscreen}
+              />
+            )}
           </span>
-        </button>
+        </div>
       </div>
       {expanded && (
         <ScrollArea className="flex-1 min-h-0">

@@ -15,6 +15,9 @@ import { ServicesPanel } from "@/components/services-panel"
 import { TerminalPanel } from "@/components/terminal-panel"
 import { FileTreePanel } from "@/components/file-tree-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
+import { GitLogSection } from "@/components/git-log-panel"
+import { FullscreenOverlay } from "@/components/fullscreen-overlay"
+import { GitCommit } from "lucide-react"
 import { TopBar } from "@/components/top-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { usePersistentState } from "@/hooks/use-persistent-state"
@@ -82,6 +85,12 @@ function DesktopLayout() {
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [fileTreeOpen, setFileTreeOpen] = usePersistentState("ai-coder:panels:fileTreeOpen", false)
+  // Section promotion: when promoted, a section lives in its own dockable
+  // side panel instead of inside its parent accordion. Fullscreen is a
+  // separate axis — a promoted section can also be fullscreened and returns
+  // to its panel when closed.
+  const [gitLogPromoted, setGitLogPromoted] = usePersistentState("ai-coder:panels:gitLogPromoted", false)
+  const [gitLogFullscreen, setGitLogFullscreen] = useState(false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [codeCollapsed, setCodeCollapsed] = useState(false)
   const [servicesCollapsed, setServicesCollapsed] = useState(false)
@@ -167,7 +176,40 @@ function DesktopLayout() {
                 }
               >
                 <div className="h-full min-h-0 overflow-hidden border-l">
-                  <CodePanel collapsed={codeCollapsed} onClose={() => setRightOpen(false)} />
+                  <CodePanel
+                    collapsed={codeCollapsed}
+                    onClose={() => setRightOpen(false)}
+                    gitLogPromoted={gitLogPromoted}
+                    gitLogFullscreen={gitLogFullscreen}
+                    onPromoteGitLog={() => setGitLogPromoted(true)}
+                    onRestoreGitLog={() => setGitLogPromoted(false)}
+                    onEnterGitLogFullscreen={() => setGitLogFullscreen(true)}
+                    onExitGitLogFullscreen={() => setGitLogFullscreen(false)}
+                  />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
+          {gitLogPromoted && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel
+                id="gitLogPanel"
+                order={7}
+                defaultSize={26}
+                minSize={18}
+                maxSize={55}
+              >
+                <div className="h-full min-h-0 overflow-hidden border-l">
+                  <GitLogSection
+                    expanded
+                    promoted
+                    fullscreen={gitLogFullscreen}
+                    onPromote={() => setGitLogPromoted(true)}
+                    onRestore={() => setGitLogPromoted(false)}
+                    onEnterFullscreen={() => setGitLogFullscreen(true)}
+                    onExitFullscreen={() => setGitLogFullscreen(false)}
+                  />
                 </div>
               </ResizablePanel>
             </>
@@ -211,6 +253,23 @@ function DesktopLayout() {
           )}
           <FilePanelSlot />
         </ResizablePanelGroup>
+        {gitLogFullscreen && (
+          <FullscreenOverlay
+            title="Git log"
+            icon={<GitCommit className="size-4" />}
+            onExit={() => setGitLogFullscreen(false)}
+          >
+            <GitLogSection
+              expanded
+              promoted={gitLogPromoted}
+              fullscreen
+              onPromote={() => setGitLogPromoted(true)}
+              onRestore={() => setGitLogPromoted(false)}
+              onEnterFullscreen={() => setGitLogFullscreen(true)}
+              onExitFullscreen={() => setGitLogFullscreen(false)}
+            />
+          </FullscreenOverlay>
+        )}
       </div>
     </ChatStateProvider>
   )
