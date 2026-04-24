@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDownUp, ChevronsUpDown, Search, FileText, GitMerge, X } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, RefreshCw, FileX, FilePlus, Pencil, GitCommitVertical, ArrowUpFromLine, ChevronsDown, ChevronsUp, Search, FileText, GitMerge, X } from "lucide-react"
 import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -193,7 +193,9 @@ const ChangesSection = observer(function ChangesSection({
   const [data, setData] = useState<ChangesResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
+  // Per-file-card collapse state keyed by path. `true` = collapsed (body
+  // hidden). Default undefined → expanded, matching the `?? false` below.
+  const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>({})
   const [search, setSearch] = useState("")
   const [merging, setMerging] = useState(false)
   const confirm = useConfirm()
@@ -323,15 +325,20 @@ const ChangesSection = observer(function ChangesSection({
 
   const collapseAll = useCallback(() => {
     const next: Record<string, boolean> = {}
-    for (const f of filteredFiles) next[f.path] = false
-    setOpenCards((prev) => ({ ...prev, ...next }))
+    for (const f of filteredFiles) next[f.path] = true
+    setCollapsedCards((prev) => ({ ...prev, ...next }))
   }, [filteredFiles])
 
   const expandAll = useCallback(() => {
     const next: Record<string, boolean> = {}
-    for (const f of filteredFiles) next[f.path] = true
-    setOpenCards((prev) => ({ ...prev, ...next }))
+    for (const f of filteredFiles) next[f.path] = false
+    setCollapsedCards((prev) => ({ ...prev, ...next }))
   }, [filteredFiles])
+
+  // True if at least one card in the current filter is currently expanded.
+  // Drives the single toggle button below: any expanded → click collapses
+  // everything; none expanded → click expands everything.
+  const anyExpanded = filteredFiles.some((f) => !(collapsedCards[f.path] ?? false))
 
   if (collapsed) {
     return (
@@ -497,22 +504,22 @@ const ChangesSection = observer(function ChangesSection({
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <Button size="sm" variant="ghost" onClick={expandAll} disabled={filteredFiles.length === 0} />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={anyExpanded ? collapseAll : expandAll}
+                    disabled={filteredFiles.length === 0}
+                    aria-label={anyExpanded ? "Collapse all" : "Expand all"}
+                  />
                 }
               >
-                <ChevronsUpDown className="size-3.5" />
+                {anyExpanded ? (
+                  <ChevronsUp className="size-3.5" />
+                ) : (
+                  <ChevronsDown className="size-3.5" />
+                )}
               </TooltipTrigger>
-              <TooltipContent>Expand all</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button size="sm" variant="ghost" onClick={collapseAll} disabled={filteredFiles.length === 0} />
-                }
-              >
-                <ChevronsDownUp className="size-3.5" />
-              </TooltipTrigger>
-              <TooltipContent>Collapse all</TooltipContent>
+              <TooltipContent>{anyExpanded ? "Collapse all" : "Expand all"}</TooltipContent>
             </Tooltip>
           </div>
         )}
@@ -540,9 +547,9 @@ const ChangesSection = observer(function ChangesSection({
             <FileCard
               key={f.path}
               file={f}
-              collapsed={openCards[f.path] ?? false}
+              collapsed={collapsedCards[f.path] ?? false}
               onToggle={() =>
-                setOpenCards((c) => ({ ...c, [f.path]: !c[f.path] }))
+                setCollapsedCards((c) => ({ ...c, [f.path]: !c[f.path] }))
               }
             />
           ))}
