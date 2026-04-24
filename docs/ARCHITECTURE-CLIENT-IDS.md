@@ -4,6 +4,20 @@
 
 This is the same pattern used by CouchDB, Firebase, Linear, and any modern optimistic-UI app. We adopt it because we have a streaming agent + realtime sync and cannot afford to wait for a round-trip every time the client creates something.
 
+## The decision rule (use this for every new row)
+
+> **If the client needs to refer to the row — render it, link to it, scroll to it, set an FK on it — *before* the server's insert confirms, the client generates the id.**
+> **Otherwise, the row is server-authored and the id source is irrelevant, as long as retries are idempotent.**
+
+This is the single test. Apply it whenever you add a create endpoint or a new row type. It subsumes the worked examples in the table below.
+
+Concretely:
+
+- ✅ **Client-generated** when: the client inserts an optimistic row, another insert in the same request needs this row's id as an FK, a URL/route needs the id instantly, or a retry needs to be idempotent via PK conflict.
+- 🚫 **Server-authored (id source doesn't matter)** when: the row is created in response to an internal server event (auto-loop tick, supervisor intervention, merge flow notice, watcher callback), or a composite natural key already handles idempotency, or the row is a derivative the client only ever observes via realtime.
+
+If you're not sure which bucket a new row lands in, err toward client-generated — the cost is one `crypto.randomUUID()` call, and retrofitting later means changing every caller.
+
 ## Why
 
 1. **Instant UX.** The user creates a chat / sends a message / opens a comment and sees it *now*. No spinner while the server rolls a UUID.
@@ -27,17 +41,23 @@ The pattern falls apart if any step invents its own id. Every step above referen
 
 ## Where it's applied
 
-| Row type | Status | Notes |
-|---|---|---|
-| **Messages (comments flow)** | ✅ | Client generates `messageId`, passes to `/api/file-comments` POST which inserts `messages.id = messageId` before the `file_comments` row (FK satisfied). See [server/index.ts `app.post("/api/file-comments"…)`](../server/index.ts). |
-| **File comments** | ✅ | `file_comments.id` is generated server-side today, but the *linked* `message_id` is deterministic. Comment row id could also become client-deterministic in a v2; no caller needs it pre-insert. |
-| **Conversations (chat + task)** | ✅ | Client generates `conversationId` before POSTing `/api/conversations`. URL/sidebar update instantly. Server insert carries the same id. |
-| **Messages (runTurn path)** | ⚠️ Partial | Optimistic row carries a client UUID today (via `BaseModel.create()`), but the server insert uses its own UUID. The `applyInsert` fallback upgrades by role+text match. Retrofit: pass the client id through `/api/chat` and have `startRunner` use it. Tracked as follow-up. |
-| **Projects** | ❌ | Server-generated. Low value to retrofit — projects are rare to create. Leave as-is. |
-| **Tasks / task drafts** | ✅ | Same as conversations (tasks ARE conversations with `kind='task'`). |
-| **Attachments** | N/A | Attachment ids are local-only (not stored as PK in DB); they label upload items in the composer. |
+Every ✅ row in this table passes the decision rule above. Every 🚫 row fails it (and is noted with the reason). If a new row type isn't here, apply the rule to decide which bucket it goes in.
 
-## When NOT to use it
+| Row type | Status | Why |
+|---|---|---|
+| **Conversations (chat + task)** | ✅ | Client needs the id in the URL/sidebar instantly. See `workspace.createNew` / `createTaskDraft`. |
+| **Messages — runTurn first iteration** | ✅ | Optimistic user + assistant rows render before the first SSE event. Client passes `userMessageId` + `assistantMessageId` to `/api/chat`; server uses them on the first iteration's inserts. |
+| **Messages — nudge (mid-turn)** | ✅ | Same optimistic render + deterministic swap as runTurn. `/api/messages/nudge` accepts `messageId`. |
+| **Messages — comments flow** | ✅ | The file_comments row has an FK to messages; we need the id *before* inserting the comment. |
+| **File comments (`file_comments.id`)** | ✅ | Accepted as `commentId` on the POST. Lets future threading / replies link to a comment before its insert confirms. |
+| **Projects** | ✅ | Client renders the project in the sidebar + sets `activeProjectId` before server round-trip. |
+| **Attachments** | N/A | Not a DB row — local-only composer id. |
+| **Messages — auto-loop iterations 2+** | 🚫 | Server-authored. The server runs iteration N+1 autonomously; the client has no optimistic row waiting, no FK to set, no route to update. It observes via realtime only. |
+| **Notice rows (merge, supervisor, verify-run)** | 🚫 | Server-authored. Fired by scripted flows; the client has no template for when they'll appear. |
+| **`service_instances`** | 🚫 | Id comes from the runtime registry via upsert-on-id. Functionally equivalent (deterministic + idempotent); only different because the id source is server-side, not the browser. Revisit if a future UI flow lets the user manually spawn an instance — then the UI should generate the id. |
+| **`project_services`** | 🚫 | Composite primary key `(project_id, name)`. The `id` column is incidental; no code links by it. Upsert on the natural key covers idempotency. |
+
+## When NOT to use it (beyond server-authored rows)
 
 - **Server-owned artifacts.** A commit SHA, a git-blame line, a compiled bundle hash — anything the server computes from external sources. Those aren't "things the client creates."
 - **Untrusted clients.** If you ever open the API to third parties, client-supplied ids become a small attack surface (squatting on predictable UUIDs to DoS PK inserts). Solution: validate format + reject conflicts, same as a normal auth check.
@@ -88,9 +108,11 @@ Deterministic ids subsume the `RETURNING id` pattern for every use case that mat
 
 ## Follow-up work
 
-- [ ] Retrofit `runTurn` / `/api/chat` to accept a client-generated message id, so the fallback optimistic-upgrade path in `applyInsert` can be removed entirely.
-- [ ] Consider making `file_comments.id` client-generated so the comment row has a stable id before the first fetch (today: `id` comes back in the POST response).
-- [ ] Audit any other create endpoints that don't yet follow the pattern.
+- [x] Retrofit `runTurn` / `/api/chat` to accept a client-generated message id, remove the role+text fallback in `applyInsert`. Done.
+- [x] Client-generate `file_comments.id`. Done (accepted as `commentId` on POST).
+- [x] Retrofit projects. Done.
+- [ ] Revisit `service_instances` if/when a UI flow spawns them directly (today: registry-spawned only).
+- [ ] Audit future create endpoints against the decision rule as they land.
 
 ## Related files
 

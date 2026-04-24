@@ -16,38 +16,35 @@ Work here is a retrofit, not a rewrite. Each item is scoped, reversible, and tes
 
 When you're writing a new `create` endpoint: these are not optional.
 
-## Retrofit checklist
+## The decision rule (canonical — apply to every new row)
 
-Status legend: ✅ done, 🟡 in progress, ❌ not started, 🚫 won't do
+> **If the client needs to refer to the row — render it, link to it, scroll to it, set an FK on it — *before* the server's insert confirms, the client generates the id.**
+> **Otherwise, the row is server-authored and the id source is irrelevant, as long as retries are idempotent.**
 
-### Phase 1 — highest-value
+This is the single test for whether a new row type belongs in the ✅ or 🚫 bucket below. See [ARCHITECTURE-CLIENT-IDS.md](ARCHITECTURE-CLIENT-IDS.md) for the underlying reasoning.
 
-- [✅] **Conversations (chat + task creation)** — `POST /api/conversations`, `workspace.createNew` / `workspace.createTaskDraft`. Done in commit `c98bc9e`.
-- [✅] **Messages — comments flow** — `POST /api/file-comments`. Done in commit `ee29d93`.
-- [❌] **Messages — runTurn (new-turn) flow** — `POST /api/chat`. Client already generates an optimistic UUID via `BaseModel.create()`, but it's not passed through. Server's `startRunner` inserts its own.
-  - Client change: `Conversation.runTurn` sends `messageId` (user + assistant placeholder) to `/api/chat`.
-  - Server change: `/api/chat` accepts `userMessageId` + `assistantMessageId`. `startRunner` uses `userMessageId` when it inserts the user row (skipping insert if `skipFirstUserInsert` is already set) and `assistantMessageId` for the assistant placeholder.
-  - Fallback role+text match in `applyInsert` can then be removed.
-- [❌] **Messages — nudge flow** — `POST /api/messages/nudge`. Accept `messageId`, use it on insert. Client's `Conversation.send` already creates an optimistic row; pass the id to both the local row and the request.
+## Retrofit status
 
-### Phase 2 — consistency / low friction
+Status legend: ✅ done, 🟡 in progress, ❌ not started, 🚫 won't do (passes the "server-authored" side of the rule).
 
-- [❌] **Projects** — `POST /api/projects`. Low call volume, but trivial retrofit. Worth doing so every entity follows the rule.
-- [❌] **File comments row itself** (`file_comments.id`) — today server-generated. Linked `message_id` is already deterministic. Accepting a client-provided `id` lets callers link *to* a comment (e.g. future "reply" threading) without waiting for the insert response.
+### ✅ Done
 
-### Phase 3 — server-authored rows (explicitly exempt)
+- **Conversations (chat + task)** — `POST /api/conversations`, `workspace.createNew` / `workspace.createTaskDraft`. Shipped in `c98bc9e`.
+- **Messages — comments flow** — `POST /api/file-comments` inserts the messages row + the comment row with client-provided ids. Shipped in `ee29d93`.
+- **Messages — runTurn first iteration** — `Conversation.runTurn` sends `userMessageId` + `assistantMessageId` to `/api/chat`; `startRunner` uses them on the first iteration's inserts. Subsequent auto-loop iterations stay server-id (see 🚫 below). Shipped in `5c864ac`.
+- **Messages — nudge flow** — `Conversation.send` generates the id, `/api/messages/nudge` uses it, 23505 is idempotent. Shipped in `5c864ac`.
+- **Projects** — `workspace.createProject` generates the id, optimistic insert, rollback on failure. Shipped in `5c864ac`.
+- **File comments row itself (`file_comments.id`)** — optional `commentId` on the POST. Shipped in `5c864ac`.
+- **Legacy applyInsert fallback removed** — every optimistic row now carries a deterministic id; the role+text fuzzy-match is dead code and was removed in `5c864ac`.
 
-These rows are created server-side in response to agent/loop events, not client actions. They stay server-generated.
+### 🚫 Exempt — the rule says server-authored
 
-- [🚫] **Assistant message placeholders inserted mid-turn** outside of `/api/chat` (e.g. follow-up iterations) — server-authored, no client is waiting to link to them by a pre-known id. If we ever *do* need to link, revisit.
-- [🚫] **Notice messages (merge flow, supervisor, verify-run, etc.)** — role=`notice`, authored by the server when it fires a scripted flow. No client UI waiting to pre-insert them.
-- [🚫] **Service instances** (`service_instances`) — already uses the runtime registry's UUID via `upsert({ onConflict: "id" })`. Functionally equivalent to the pattern.
-- [🚫] **Project services** (`project_services`) — composite key `(project_id, name)` + upsert. The row's `id` is incidental; no one links to it before insert.
+Each of these was checked against the decision rule and failed the client-needs-the-id-pre-confirmation test. Revisit if a future flow changes that.
 
-### Phase 4 — cleanups after Phase 1 lands
-
-- [❌] Remove the legacy role+text fallback in `Conversation.applyInsert`. Once every message-creating call site carries a deterministic id, the fallback is dead code.
-- [❌] Consider making `BaseModel.create()`'s auto-`id` the canonical pattern and adding an assertion in `applyInsert` that every incoming row has an id we already know about (panic if not — helps catch silent drift).
+- **Assistant messages on auto-loop iterations 2+** — The server decides when to run iteration N+1 (evaluator feedback or auto-loop tick). The client has no optimistic row waiting, no FK to satisfy, no route to update. It observes the row via realtime on arrival. **Trigger to revisit:** if we ever add a UI that pre-provisions iteration slots (we don't today).
+- **Notice messages (merge / supervisor / verify-run)** — `role='notice'`, authored by scripted server flows. The client has no template for when a notice will fire. **Trigger to revisit:** if a client-initiated flow starts asking for a specific notice slot (unlikely).
+- **`service_instances`** — Id comes from the runtime registry via `upsert({ onConflict: "id" })`. This is functionally the same pattern — deterministic + idempotent — just with the id source being a server-side process instead of the browser. **Trigger to revisit:** a UI flow that spawns an instance directly (today: registry-spawned only, triggered by agent tool calls).
+- **`project_services`** — Primary natural key is `(project_id, name)`; the `id` column is incidental. Upsert on the natural key covers idempotency. **Trigger to revisit:** if anything ever links by `project_services.id` (today: nothing does; could drop the column in a future cleanup).
 
 ## Per-endpoint retrofit template
 
