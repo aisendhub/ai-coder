@@ -19,7 +19,16 @@ export function AnnotationAccordion({
   return (
     <div
       className={cn(
-        "rounded-md border bg-card text-card-foreground shadow-sm mx-3 my-1.5",
+        // Frosted glass: bg is semi-transparent so the code underneath stays
+        // legible through the accordion. backdrop-blur softens it without
+        // hiding context. Border softened to match.
+        "rounded-md border border-border/50 shadow-lg text-card-foreground my-1.5",
+        "bg-card/70 backdrop-blur-md backdrop-saturate-150",
+        // Left offset: 36px (ml-9) clears the blame rail (ends at 18px) with
+        // breathing room, so an open accordion on one line doesn't obscure
+        // the blame stripes on subsequent lines — user can click adjacent
+        // blame without closing. Right uses the original 12px.
+        "ml-9 mr-3",
         className
       )}
     >

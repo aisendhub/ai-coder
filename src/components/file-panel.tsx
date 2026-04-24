@@ -1035,9 +1035,10 @@ function BlameHoverCard({ info, top }: { info: BlameLine; top: number }) {
       )}
       // Offset far enough right that the tooltip clears the blame rail and
       // doesn't visually obscure adjacent stripes the user might want to
-      // click next. pointer-events: none keeps clicks pass-through anyway,
-      // but the visual gap matters.
-      style={{ top, left: 48 }}
+      // click next. Matches the BlameAccordion's left offset (36px) so a
+      // tooltip and an open accordion line up visually. pointer-events:
+      // none keeps clicks pass-through anyway, but the visual gap matters.
+      style={{ top, left: 36 }}
     >
       <div className="font-medium truncate">{info.summary}</div>
       <div className="text-muted-foreground flex items-center gap-1.5 mt-0.5">
