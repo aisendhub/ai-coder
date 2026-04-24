@@ -186,7 +186,7 @@ export class ServiceList extends BaseList<typeof Service> {
   async refresh(userId: string, opts: { silent?: boolean } = {}): Promise<void> {
     if (!opts.silent) this.setLoading(true)
     try {
-      const res = await fetch(
+      const res = await api(
         `/api/services?userId=${encodeURIComponent(userId)}`
       )
       if (!res.ok) {
@@ -211,7 +211,7 @@ export class ServiceList extends BaseList<typeof Service> {
 
   async refreshRailwayIntegration(userId: string): Promise<void> {
     try {
-      const res = await fetch(
+      const res = await api(
         `/api/integrations/railway?userId=${encodeURIComponent(userId)}`
       )
       if (!res.ok) return
@@ -249,7 +249,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async disconnectRailway(userId: string): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/integrations/railway?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )
@@ -333,7 +333,7 @@ export class ServiceList extends BaseList<typeof Service> {
 
   async remove(userId: string, id: string): Promise<void> {
     this.closeLogs(id)
-    const res = await fetch(
+    const res = await api(
       `/api/services/${id}?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )
@@ -435,7 +435,7 @@ export class ServiceList extends BaseList<typeof Service> {
     // built inside the worktree is invisible to the detector.
     const params = new URLSearchParams({ userId })
     if (conversationId) params.set("conversationId", conversationId)
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/manifest?${params.toString()}`
     )
     if (!res.ok) {
@@ -462,7 +462,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async clearProjectManifest(userId: string, projectId: string): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/manifest?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )
@@ -476,7 +476,7 @@ export class ServiceList extends BaseList<typeof Service> {
     userId: string,
     conversationId: string
   ): Promise<ConversationManifestView> {
-    const res = await fetch(
+    const res = await api(
       `/api/conversations/${conversationId}/manifest?userId=${encodeURIComponent(userId)}`
     )
     if (!res.ok) {
@@ -491,7 +491,7 @@ export class ServiceList extends BaseList<typeof Service> {
     conversationId: string,
     override: Partial<RunManifestDto>
   ): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/conversations/${conversationId}/manifest-override`,
       {
         method: "PUT",
@@ -509,7 +509,7 @@ export class ServiceList extends BaseList<typeof Service> {
     userId: string,
     conversationId: string
   ): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/conversations/${conversationId}/manifest-override?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )
@@ -529,7 +529,7 @@ export class ServiceList extends BaseList<typeof Service> {
     userId: string,
     projectId: string
   ): Promise<ProjectServiceDto[]> {
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/services?userId=${encodeURIComponent(userId)}`
     )
     if (!res.ok) {
@@ -563,7 +563,7 @@ export class ServiceList extends BaseList<typeof Service> {
     name: string,
     service: ProjectServiceWriteDto
   ): Promise<ProjectServiceDto> {
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/services/${encodeURIComponent(name)}`,
       {
         method: "PUT",
@@ -585,7 +585,7 @@ export class ServiceList extends BaseList<typeof Service> {
   ): Promise<{ cwd: string; candidates: DetectedServiceCandidate[] }> {
     const params = new URLSearchParams({ userId })
     if (conversationId) params.set("conversationId", conversationId)
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/services/detect?${params.toString()}`
     )
     if (!res.ok) {
@@ -620,7 +620,7 @@ export class ServiceList extends BaseList<typeof Service> {
     projectId: string,
     name: string
   ): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/services/${encodeURIComponent(name)}?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )
@@ -637,7 +637,7 @@ export class ServiceList extends BaseList<typeof Service> {
     conversationId: string,
     serviceName: string
   ): Promise<Partial<RunManifestDto> | null> {
-    const res = await fetch(
+    const res = await api(
       `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override?userId=${encodeURIComponent(userId)}`
     )
     if (!res.ok) {
@@ -654,7 +654,7 @@ export class ServiceList extends BaseList<typeof Service> {
     serviceName: string,
     override: Partial<RunManifestDto>
   ): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override`,
       {
         method: "PUT",
@@ -673,7 +673,7 @@ export class ServiceList extends BaseList<typeof Service> {
     conversationId: string,
     serviceName: string
   ): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )

@@ -255,7 +255,7 @@ export const FilePanel = observer(function FilePanel({
       return
     }
     try {
-      const res = await fetch(
+      const res = await api(
         `/api/blame?conversationId=${encodeURIComponent(conversationId)}&path=${encodeURIComponent(path)}`,
       )
       if (!res.ok) {
@@ -282,7 +282,7 @@ export const FilePanel = observer(function FilePanel({
       return
     }
     try {
-      const res = await fetch(
+      const res = await api(
         `/api/file-comments?projectId=${encodeURIComponent(projectId)}&filePath=${encodeURIComponent(path)}&conversationId=${encodeURIComponent(conversationId)}`,
       )
       if (!res.ok) {

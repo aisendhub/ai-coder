@@ -56,7 +56,7 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
     this.loading = true
     this.lastError = null
     try {
-      const res = await fetch(
+      const res = await api(
         `/api/projects/${projectId}/services?userId=${encodeURIComponent(userId)}`
       )
       const json = await unwrap<{ services: ProjectServiceDto[] }>(res)
@@ -99,7 +99,7 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
     name: string,
     write: ProjectServiceWriteDto
   ): Promise<ProjectService> {
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/services/${encodeURIComponent(name)}`,
       {
         method: "PUT",
@@ -113,7 +113,7 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
   }
 
   async remove(userId: string, projectId: string, name: string): Promise<void> {
-    const res = await fetch(
+    const res = await api(
       `/api/projects/${projectId}/services/${encodeURIComponent(name)}?userId=${encodeURIComponent(userId)}`,
       { method: "DELETE" }
     )
