@@ -40,6 +40,7 @@ Environment variables live in `.env` (gitignored) — copy from `.env.example`.
 - **One Supabase session per user, one Agent SDK session per conversation.** Session id lives in `conversations.session_id`.
 - **Projects own the cwd.** `projects.cwd` is an absolute path on the host; all conversations in a project inherit it. `PROJECTS_ROOT` env var (defaults to `dirname(process.cwd())`) sandboxes the directory browser.
 - **E2B / container isolation is postponed.** Schema keeps `conversations.sandbox_id` as a placeholder, unused at runtime. Don't wire sandbox code yet — host cwd only.
+- **Client generates primary-key UUIDs.** Every row the client creates (conversations, messages, comments, …) picks its id with `crypto.randomUUID()` and sends it to the server. The server persists with that same id; realtime upgrades the optimistic row by id match. No fuzzy find-by-text fallback for new code. See [docs/ARCHITECTURE-CLIENT-IDS.md](docs/ARCHITECTURE-CLIENT-IDS.md).
 
 ## Layout
 

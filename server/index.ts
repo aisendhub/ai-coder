@@ -1749,12 +1749,16 @@ app.post("/api/conversations", async (c) => {
     autoLoopGoal?: string | null
     maxIterations?: number
     maxCostUsd?: number
+    /** Client-generated UUID. See docs/ARCHITECTURE-CLIENT-IDS.md. Optional
+     *  for backwards compat — we generate one if missing. */
+    id?: string
   }>().catch(() => ({}))
   const { projectId } = body
   const userId = c.get("userId")
   const kind: "chat" | "task" = body.kind === "task" ? "task" : "chat"
   const fallbackTitle = kind === "task" ? "New task" : "New chat"
   const title = body.title ?? fallbackTitle
+  const id = body.id && /^[0-9a-f-]{36}$/i.test(body.id) ? body.id : crypto.randomUUID()
   if (!projectId) return c.json({ error: "projectId required" }, 400)
   // Tasks are drafts at creation: goal optional, no worktree, no worker fire.
   // The empty-state form in the UI collects the goal/caps and calls
@@ -1770,6 +1774,7 @@ app.post("/api/conversations", async (c) => {
   if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   const insertRow: Record<string, unknown> = {
+    id,
     user_id: userId,
     project_id: projectId,
     title,
@@ -1791,6 +1796,17 @@ app.post("/api/conversations", async (c) => {
     .select()
     .single()
   if (convErr || !conv) {
+    // 23505 is Postgres' unique_violation — most likely an idempotent retry
+    // of a create we already completed. Return the existing row so the
+    // client's optimistic insert gets confirmed.
+    if ((convErr as { code?: string })?.code === "23505") {
+      const { data: existing } = await sb
+        .from("conversations")
+        .select("*")
+        .eq("id", id)
+        .single()
+      if (existing) return c.json(existing)
+    }
     return c.json({ error: convErr?.message ?? "insert failed" }, 500)
   }
 

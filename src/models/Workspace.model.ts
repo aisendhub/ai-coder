@@ -6,6 +6,7 @@ import { Project } from "./Project.model"
 import { ServiceList } from "./ServiceList.model"
 import { ProjectServiceList } from "./ProjectServiceList.model"
 import { supabase } from "@/lib/supabase"
+import { api } from "@/lib/api"
 
 class ConversationList extends BaseList<typeof Conversation> {
   get ItemType() {
@@ -231,7 +232,7 @@ export class Workspace extends BaseModel {
     worktreeMode: "shared" | "per_conversation" = "shared"
   ): Promise<Project> {
     if (!this.userId) throw new Error("not signed in")
-    const res = await fetch("/api/projects", {
+    const res = await api("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId: this.userId, name, cwd, worktreeMode }),
@@ -263,32 +264,64 @@ export class Workspace extends BaseModel {
 
   /** Create a *draft* task. No worktree, no worker fire — the empty-state
    *  form in the chat pane collects the goal + caps and calls `armTask()`.
-   *  `initialGoal` pre-fills the form (used by Spin off from a chat). */
+   *  `initialGoal` pre-fills the form (used by Spin off from a chat).
+   *  Client generates the id (see docs/ARCHITECTURE-CLIENT-IDS.md) so the
+   *  conversation appears in the sidebar and the URL resolves before the
+   *  server round-trip completes. */
   async createTaskDraft(input: { initialGoal?: string; title?: string } = {}): Promise<Conversation> {
     if (!this.userId) throw new Error("not signed in")
     if (!this.activeProjectId) throw new Error("no active project")
-    const res = await fetch("/api/conversations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId: this.userId,
-        projectId: this.activeProjectId,
-        title: input.title,
-        kind: "task",
-        autoLoopGoal: input.initialGoal,
-      }),
-    })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${res.status}`)
-    }
-    const data = await res.json()
+    const userId = this.userId
+    const projectId = this.activeProjectId
+    const id = crypto.randomUUID()
+    const title = input.title ?? "New task"
     const c = Conversation.create()
-    c.setFromRow(data)
+    c.setFromRow({
+      id,
+      user_id: userId,
+      project_id: projectId,
+      title,
+      session_id: null,
+      sandbox_id: null,
+      repo_url: null,
+      kind: "task",
+      auto_loop_enabled: false,
+      auto_loop_goal: input.initialGoal ?? null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     runInAction(() => {
       this.conversations.addItem(c)
       this.setActive(c.id)
     })
+    try {
+      const res = await api("/api/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id,
+          userId,
+          projectId,
+          title,
+          kind: "task",
+          autoLoopGoal: input.initialGoal,
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      runInAction(() => c.setFromRow(data))
+    } catch (err) {
+      // Roll back the optimistic insert so the sidebar doesn't carry a
+      // ghost conversation after a server error.
+      runInAction(() => {
+        this.conversations.removeItem(id)
+        if (this.activeId === id) this.setActive(null)
+      })
+      throw err
+    }
     return c
   }
 
@@ -301,7 +334,7 @@ export class Workspace extends BaseModel {
     maxIterations?: number
     maxCostUsd?: number
   }): Promise<void> {
-    const res = await fetch(`/api/conversations/${id}/arm`, {
+    const res = await api(`/api/conversations/${id}/arm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -315,29 +348,55 @@ export class Workspace extends BaseModel {
   async createNew(): Promise<Conversation> {
     if (!this.userId) throw new Error("not signed in")
     if (!this.activeProjectId) throw new Error("no active project")
-    // Server-side create so the worktree can be provisioned alongside the row.
-    // Projects in "shared" mode get the row back with worktree_path = null and
-    // behavior is unchanged.
-    const res = await fetch("/api/conversations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        userId: this.userId,
-        projectId: this.activeProjectId,
-        title: "New chat",
-      }),
-    })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${res.status}`)
-    }
-    const data = await res.json()
+    const userId = this.userId
+    const projectId = this.activeProjectId
+    // Client-generated id: the conversation exists in the sidebar, the URL
+    // resolves, and the user can start typing immediately — all before the
+    // server responds. Server insert uses the same id; realtime never sees
+    // a different id to reconcile. See docs/ARCHITECTURE-CLIENT-IDS.md.
+    const id = crypto.randomUUID()
     const c = Conversation.create()
-    c.setFromRow(data)
+    c.setFromRow({
+      id,
+      user_id: userId,
+      project_id: projectId,
+      title: "New chat",
+      session_id: null,
+      sandbox_id: null,
+      repo_url: null,
+      kind: "chat",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     runInAction(() => {
       this.conversations.addItem(c)
       this.setActive(c.id)
     })
+    try {
+      const res = await api("/api/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id,
+          userId,
+          projectId,
+          title: "New chat",
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      runInAction(() => c.setFromRow(data))
+    } catch (err) {
+      // Roll back the optimistic insert on server failure.
+      runInAction(() => {
+        this.conversations.removeItem(id)
+        if (this.activeId === id) this.setActive(null)
+      })
+      throw err
+    }
     return c
   }
 
@@ -345,7 +404,7 @@ export class Workspace extends BaseModel {
     // Soft-trash via the server: flips deleted_at, preserves worktree + branch
     // so the user can restore within the grace window. The reaper hard-deletes
     // and tears down the worktree after 7 days.
-    const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" })
+    const res = await api(`/api/conversations/${id}`, { method: "DELETE" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
@@ -364,7 +423,7 @@ export class Workspace extends BaseModel {
    *  flipping (via the end-of-turn reconcile); conflicts become a normal chat
    *  back-and-forth. See docs/MERGE-FLOW.md. */
   async mergeConversation(id: string): Promise<void> {
-    const res = await fetch(`/api/conversations/${id}/merge`, { method: "POST" })
+    const res = await api(`/api/conversations/${id}/merge`, { method: "POST" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
@@ -376,7 +435,7 @@ export class Workspace extends BaseModel {
    *  can continue. Destructive — the agent refuses if the base branch moved
    *  past the shipped commit or if the commit was pushed. See docs/MERGE-FLOW.md. */
   async revertConversation(id: string): Promise<void> {
-    const res = await fetch(`/api/conversations/${id}/revert`, { method: "POST" })
+    const res = await api(`/api/conversations/${id}/revert`, { method: "POST" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
@@ -386,7 +445,7 @@ export class Workspace extends BaseModel {
   /** Pause a task: flips `auto_loop_enabled = false`. Current worker turn
    *  finishes, then the loop breaks cleanly at the next iteration boundary. */
   async pauseTask(id: string): Promise<void> {
-    const res = await fetch(`/api/conversations/${id}/pause`, { method: "POST" })
+    const res = await api(`/api/conversations/${id}/pause`, { method: "POST" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
@@ -396,7 +455,7 @@ export class Workspace extends BaseModel {
   /** Resume a paused task: flips the flag on and kicks a fresh worker turn
    *  so the evaluator can drive next steps without the user typing. */
   async resumeTask(id: string): Promise<void> {
-    const res = await fetch(`/api/conversations/${id}/resume`, { method: "POST" })
+    const res = await api(`/api/conversations/${id}/resume`, { method: "POST" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
@@ -412,7 +471,7 @@ export class Workspace extends BaseModel {
     if (target?.kind === "task" && target.autoLoopEnabled) {
       try { await this.pauseTask(id) } catch { /* ignore */ }
     }
-    await fetch("/api/chat/stop", {
+    await api("/api/chat/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversationId: id }),
@@ -420,7 +479,7 @@ export class Workspace extends BaseModel {
   }
 
   async restore(id: string) {
-    const res = await fetch(`/api/conversations/${id}/restore`, { method: "POST" })
+    const res = await api(`/api/conversations/${id}/restore`, { method: "POST" })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${res.status}`)
@@ -521,7 +580,7 @@ export class Workspace extends BaseModel {
   private startRunnersPoll() {
     const tick = async () => {
       try {
-        const res = await fetch("/api/runners")
+        const res = await api("/api/runners")
         if (!res.ok) return
         const json = (await res.json()) as { runners: string[] }
         runInAction(() => {
