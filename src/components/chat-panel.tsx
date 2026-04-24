@@ -11,6 +11,7 @@ import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Markdown } from "@/components/markdown"
+import { cn } from "@/lib/utils"
 import {
   extractFilePath,
   isEditingTool,
@@ -33,6 +34,28 @@ export const ChatPanel = observer(function ChatPanel() {
   const conversation = workspace.active
   const { recordFileTouch } = useChatState()
   const bottomRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
+
+  // "Show in chat" from the file-panel comment accordion → scroll to + briefly
+  // highlight the anchored chat message. Sticky across late-arriving rows.
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const id = (e as CustomEvent<{ messageId: string }>).detail?.messageId
+      if (id) setHighlightedMessageId(id)
+    }
+    window.addEventListener("ai-coder:focus-message", onFocus)
+    return () => window.removeEventListener("ai-coder:focus-message", onFocus)
+  }, [])
+  useEffect(() => {
+    if (!highlightedMessageId) return
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${highlightedMessageId}"]`,
+    )
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" })
+    const t = setTimeout(() => setHighlightedMessageId(null), 2000)
+    return () => clearTimeout(t)
+  }, [highlightedMessageId, conversation?.messages.items.length])
 
   // Auto-scroll instantly on conversation open, new messages, or streaming content.
   const activeId = conversation?.id
@@ -99,18 +122,24 @@ export const ChatPanel = observer(function ChatPanel() {
     <div className="flex flex-col h-full min-h-0">
       {conversation?.kind === "task" && <TaskHeader conversation={conversation} />}
       <ScrollArea className="flex-1 min-h-0">
-        <div className="mx-auto w-full max-w-243 px-10 py-6 flex flex-col gap-4">
+        <div ref={listRef} className="mx-auto w-full max-w-243 px-10 py-6 flex flex-col gap-4">
           <EmptyState />
           {conversation?.messages.items.map((m, i, all) => {
             const isLast = i === all.length - 1
             const isStreamingThis =
               conversation.streaming && isLast && m.role === "assistant"
+            const isHighlighted = highlightedMessageId === m.id
             return (
-              <MessageBubble
+              <div
                 key={m.id}
-                message={m}
-                isStreaming={isStreamingThis}
-              />
+                data-message-id={m.id}
+                className={cn(
+                  "flex flex-col transition-shadow rounded-2xl",
+                  isHighlighted && "ring-2 ring-primary/60 ring-offset-2 ring-offset-background"
+                )}
+              >
+                <MessageBubble message={m} isStreaming={isStreamingThis} />
+              </div>
             )
           })}
           {conversation?.queue.map((q, idx) => (

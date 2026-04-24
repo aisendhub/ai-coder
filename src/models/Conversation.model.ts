@@ -5,6 +5,7 @@ import { Message, type StreamEvent } from "./Message.model"
 import { supabase } from "@/lib/supabase"
 import type { Attachment, AttachmentMeta } from "@/lib/attachment"
 import { runAgentResponseHooks } from "@/lib/agent-response-hooks"
+import { api } from "@/lib/api"
 
 class MessageList extends BaseList<typeof Message> {
   get ItemType() {
@@ -181,11 +182,33 @@ export class Conversation extends BaseModel {
   }
 
   @action private applyInsert(row: MessageRow) {
-    if (this.messages.find(row.id)) return
     const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
     const attachments = Array.isArray(row.attachments) ? (row.attachments as AttachmentMeta[]) : []
-    // Try to upgrade an optimistic local row: same role, matching text (user)
-    // or any optimistic assistant (its text may already be populated via SSE).
+    // Deterministic-id fast path: if the incoming row's id matches one of our
+    // existing (optimistic) rows, upgrade it in-place. Callers that pre-generate
+    // the id — comment submission, and any future flow that wants a stable
+    // chat-message handle — rely on this so they can link to the message
+    // before the realtime echo arrives.
+    const byId = this.messages.find(row.id)
+    if (byId) {
+      if (byId.isOptimistic) {
+        byId.setProps({
+          role: row.role,
+          text: row.text,
+          events,
+          attachments,
+          deliveredAt: row.delivered_at ?? null,
+          isOptimistic: false,
+        })
+        this.fireResponseHooks(row, "")
+      }
+      // Already canonical → nothing to do (duplicate realtime event).
+      return
+    }
+    // Legacy path: optimistic rows created by older call sites that didn't
+    // provide a client id. Match by role + text so we still upgrade rather
+    // than duplicating. Safe to remove once all call sites use deterministic
+    // ids.
     const optimistic = this.messages.items.find(
       (m) =>
         m.isOptimistic &&
@@ -273,7 +296,7 @@ export class Conversation extends BaseModel {
         )
       })
       try {
-        const res = await fetch("/api/messages/nudge", {
+        const res = await api("/api/messages/nudge", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -297,10 +320,28 @@ export class Conversation extends BaseModel {
     void this.runTurn(prompt, attachments)
   }
 
+  /** Add an optimistic user row with a caller-provided id. Used by flows
+   *  that need to link back to the message by id before realtime confirms
+   *  it (e.g. file comments: `file_comments.message_id = <this id>`). The
+   *  server must insert with the same id; realtime upgrades the row via
+   *  id match in `applyInsert`. */
+  @action addOptimisticUserMessage(id: string, text: string) {
+    this.messages.addItem(
+      Message.fromProps({
+        id,
+        conversationId: this.id,
+        role: "user",
+        text,
+        events: [],
+        isOptimistic: true,
+      })
+    )
+  }
+
   @action cancel() {
     // Tell the server to abort the background runner — the client-side
     // abortController only closes our SSE read, not the AI turn.
-    void fetch("/api/chat/stop", {
+    void api("/api/chat/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversationId: this.id }),
@@ -367,7 +408,7 @@ export class Conversation extends BaseModel {
     this.abortController = controller
 
     try {
-      const res = await fetch("/api/chat", {
+      const res = await api("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

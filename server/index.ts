@@ -1397,13 +1397,19 @@ app.post("/api/file-comments", async (c) => {
     filePath?: string
     anchorStartLine?: number
     body?: string
+    /** Client-generated UUID used as the chat message row's id and as
+     *  file_comments.message_id. Enables deterministic optimistic→canonical
+     *  swap without waiting for a server round-trip. Generated server-side
+     *  if omitted. */
+    messageId?: string
   }>().catch(() => ({}))
-  const userId = body.userId
+  const userId = c.get("userId")
   const projectId = body.projectId
   const conversationId = body.conversationId
   const filePath = body.filePath
   const anchorStartLine = body.anchorStartLine
   const text = body.body?.trim()
+  const messageId = body.messageId ?? crypto.randomUUID()
   if (!userId || !projectId || !conversationId || !filePath || !anchorStartLine || !text) {
     return c.json(
       { error: "userId, projectId, conversationId, filePath, anchorStartLine, body required" },
@@ -1424,6 +1430,27 @@ app.post("/api/file-comments", async (c) => {
   const blockEnd = Math.min(lineCount, anchorStartLine + 1)
   const blockLength = blockEnd - blockStart + 1
 
+  // 1) Insert the chat message row with the client-provided id so the
+  //    file_comments FK below resolves AND the client's optimistic row
+  //    can be upgraded by id match. `delivered_at = null` while a runner
+  //    is active (canUseTool sweeps it); `now()` otherwise so the row
+  //    isn't stuck pending if we never start a runner.
+  const runner = runners.get(conversationId)
+  const runnerActive = runner && !runner.done
+  const anchoredLine = snapshot.split("\n")[anchorStartLine - 1] ?? ""
+  const chatText = `[comment on ${filePath}:${anchorStartLine}]\n> ${anchoredLine}\n\n${text}`
+  const { error: msgErr } = await sb.from("messages").insert({
+    id: messageId,
+    conversation_id: conversationId,
+    role: "user",
+    text: chatText,
+    events: [],
+    attachments: [],
+    delivered_at: runnerActive ? null : new Date().toISOString(),
+  })
+  if (msgErr) return c.json({ error: msgErr.message }, 500)
+
+  // 2) Insert the comment row now that the FK target exists.
   const { data, error } = await sb
     .from("file_comments")
     .insert({
@@ -1438,12 +1465,31 @@ app.post("/api/file-comments", async (c) => {
       resolved_at: new Date().toISOString(),
       resolved_confidence: "exact",
       conversation_id: conversationId,
+      message_id: messageId,
       created_by: userId,
     })
     .select()
     .single()
   if (error || !data) return c.json({ error: error?.message ?? "insert failed" }, 500)
-  return c.json({ comment: dtoFromRow(data as FileCommentRow) })
+
+  // 3) Kick off a runner when none is active. `skipFirstUserInsert` because
+  //    we already wrote the user message above. When a runner IS active, the
+  //    nudge sweep in canUseTool picks up our `delivered_at=null` row.
+  if (!runnerActive) {
+    const { data: conv } = await sb
+      .from("conversations")
+      .select("session_id")
+      .eq("id", conversationId)
+      .single()
+    void startRunner({
+      conversationId,
+      prompt: chatText,
+      resumeSessionId: conv?.session_id ?? undefined,
+      skipFirstUserInsert: true,
+    })
+  }
+
+  return c.json({ comment: dtoFromRow(data as FileCommentRow), messageId })
 })
 
 app.patch("/api/file-comments/:id", async (c) => {
@@ -1650,8 +1696,8 @@ app.post("/api/projects", async (c) => {
     cwd?: string
     worktreeMode?: "shared" | "per_conversation"
   }>().catch(() => ({}))
-  const { userId, name, cwd } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const { name, cwd } = body
+  const userId = c.get("userId")
   if (!name) return c.json({ error: "name required" }, 400)
   if (!cwd) return c.json({ error: "cwd required" }, 400)
 
@@ -1704,11 +1750,11 @@ app.post("/api/conversations", async (c) => {
     maxIterations?: number
     maxCostUsd?: number
   }>().catch(() => ({}))
-  const { userId, projectId } = body
+  const { projectId } = body
+  const userId = c.get("userId")
   const kind: "chat" | "task" = body.kind === "task" ? "task" : "chat"
   const fallbackTitle = kind === "task" ? "New task" : "New chat"
   const title = body.title ?? fallbackTitle
-  if (!userId) return c.json({ error: "userId required" }, 400)
   if (!projectId) return c.json({ error: "projectId required" }, 400)
   // Tasks are drafts at creation: goal optional, no worktree, no worker fire.
   // The empty-state form in the UI collects the goal/caps and calls
@@ -1962,8 +2008,7 @@ app.post("/api/conversations/:id/detect-services", async (c) => {
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
   const conversationId = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
-  const userId = body.userId
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
 
   const { data: conv } = await sb
     .from("conversations")
@@ -2064,10 +2109,9 @@ app.post("/api/conversations/:id/verify-run", async (c) => {
     serviceId?: string
     watchMs?: number
   }>().catch(() => ({}))
-  const userId = body.userId
+  const userId = c.get("userId")
   const serviceId = body.serviceId
   const watchMs = Math.min(Math.max(body.watchMs ?? 8000, 2000), 30_000)
-  if (!userId) return c.json({ error: "userId required" }, 400)
   if (!serviceId) return c.json({ error: "serviceId required" }, 400)
 
   const { data: conv } = await sb
@@ -3249,9 +3293,9 @@ app.post("/api/services/start", async (c) => {
     overrides?: ManifestOverride
     runnerId?: RunnerId
   }>().catch(() => ({}))
-  const { userId, projectId, conversationId } = body
+  const { projectId, conversationId } = body
+  const userId = c.get("userId")
   const serviceName = body.serviceName || "default"
-  if (!userId) return c.json({ error: "userId required" }, 400)
   if (!projectId) return c.json({ error: "projectId required" }, 400)
 
   const ctx = await loadManifestContext(userId, projectId, conversationId, serviceName)
@@ -3414,9 +3458,8 @@ app.post("/api/services/start", async (c) => {
 // anything the agent built inside the worktree.
 app.get("/api/projects/:id/manifest", async (c) => {
   const projectId = c.req.param("id")
-  const userId = c.req.query("userId")
+  const userId = c.get("userId")
   const conversationId = c.req.query("conversationId") || undefined
-  if (!userId) return c.json({ error: "userId required" }, 400)
 
   const ctx = await loadManifestContext(userId, projectId, conversationId)
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
@@ -3439,8 +3482,7 @@ app.get("/api/projects/:id/manifest", async (c) => {
 app.put("/api/projects/:id/manifest", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; manifest?: unknown }>().catch(() => ({}))
-  const { userId } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
 
   const manifest = sanitizeManifest(body.manifest)
@@ -3474,8 +3516,7 @@ app.put("/api/projects/:id/manifest", async (c) => {
 
 app.delete("/api/projects/:id/manifest", async (c) => {
   const projectId = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
 
   const { data: project } = await sb
@@ -3569,8 +3610,7 @@ function sanitizeServiceWrite(raw: unknown, fallbackName?: string): ProjectServi
 
 app.get("/api/projects/:id/services", async (c) => {
   const projectId = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
   const rows = await listProjectServices(sb!, projectId)
@@ -3580,8 +3620,7 @@ app.get("/api/projects/:id/services", async (c) => {
 app.post("/api/projects/:id/services", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
-  const { userId } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
@@ -3611,9 +3650,8 @@ app.post("/api/projects/:id/services", async (c) => {
 // /api/services/:id further down.
 app.get("/api/projects/:id/services/detect", async (c) => {
   const projectId = c.req.param("id")
-  const userId = c.req.query("userId")
+  const userId = c.get("userId")
   const conversationId = c.req.query("conversationId") || undefined
-  if (!userId) return c.json({ error: "userId required" }, 400)
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
@@ -3664,8 +3702,7 @@ app.get("/api/projects/:id/services/detect", async (c) => {
 app.post("/api/projects/:id/services/detect-llm", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; conversationId?: string }>().catch(() => ({}))
-  const { userId } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
@@ -3727,8 +3764,7 @@ app.post("/api/projects/:id/services/detect-llm", async (c) => {
 app.get("/api/projects/:id/services/:name", async (c) => {
   const projectId = c.req.param("id")
   const name = c.req.param("name")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
   const row = await getProjectService(sb!, projectId, name)
@@ -3740,8 +3776,7 @@ app.put("/api/projects/:id/services/:name", async (c) => {
   const projectId = c.req.param("id")
   const name = c.req.param("name")
   const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
-  const { userId } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
@@ -3778,8 +3813,7 @@ app.put("/api/projects/:id/services/:name", async (c) => {
 app.delete("/api/projects/:id/services/:name", async (c) => {
   const projectId = c.req.param("id")
   const name = c.req.param("name")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
@@ -3802,8 +3836,7 @@ app.delete("/api/projects/:id/services/:name", async (c) => {
 app.post("/api/projects/:id/manifest/detect-llm", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
-  const userId = body.userId
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
 
   const { data: project } = await sb
@@ -3842,8 +3875,7 @@ app.post("/api/projects/:id/manifest/detect-llm", async (c) => {
 
 app.get("/api/conversations/:id/manifest", async (c) => {
   const conversationId = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
 
   const { data: conv } = await sb
@@ -3882,8 +3914,7 @@ app.get("/api/conversations/:id/manifest", async (c) => {
 app.put("/api/conversations/:id/manifest-override", async (c) => {
   const conversationId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
-  const { userId } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
 
   const override = sanitizeOverride(body.override)
@@ -3907,8 +3938,7 @@ app.put("/api/conversations/:id/manifest-override", async (c) => {
 
 app.delete("/api/conversations/:id/manifest-override", async (c) => {
   const conversationId = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
 
   const { data: conv } = await sb
@@ -3950,8 +3980,7 @@ async function authorizeConversation(
 app.get("/api/conversations/:id/services/:name/override", async (c) => {
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeConversation(conversationId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
   const override = await getConversationServiceOverride(sb!, conversationId, serviceName)
@@ -3962,8 +3991,7 @@ app.put("/api/conversations/:id/services/:name/override", async (c) => {
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
   const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
-  const { userId } = body
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeConversation(conversationId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
@@ -3981,8 +4009,7 @@ app.put("/api/conversations/:id/services/:name/override", async (c) => {
 app.delete("/api/conversations/:id/services/:name/override", async (c) => {
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const auth = await authorizeConversation(conversationId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
   try {
@@ -3996,8 +4023,7 @@ app.delete("/api/conversations/:id/services/:name/override", async (c) => {
 app.post("/api/services/:id/stop", async (c) => {
   const id = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
-  const userId = body.userId
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   try {
     await stopService(id, userId)
     const snap = getService(id, userId)
@@ -4012,8 +4038,7 @@ app.post("/api/services/:id/stop", async (c) => {
 
 app.delete("/api/services/:id", async (c) => {
   const id = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const svc = getService(id, userId)
   if (!svc) return c.json({ error: "service not found" }, 404)
   if (svc.status === "running" || svc.status === "starting" || svc.status === "stopping") {
@@ -4042,8 +4067,7 @@ app.get("/api/services/runners", async (c) => {
 })
 
 app.get("/api/services", (c) => {
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const projectId = c.req.query("projectId") ?? undefined
   const serviceName = c.req.query("serviceName") ?? undefined
   // `worktreePath` is the authoritative scope discriminator. Accept:
@@ -4067,8 +4091,7 @@ app.get("/api/services", (c) => {
 
 app.get("/api/services/:id", (c) => {
   const id = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const snap = getService(id, userId)
   if (!snap) return c.json({ error: "service not found" }, 404)
   return c.json(snap)
@@ -4076,8 +4099,7 @@ app.get("/api/services/:id", (c) => {
 
 app.get("/api/services/:id/logs", (c) => {
   const id = c.req.param("id")
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const sub = subscribeLogs(id, userId)
   if (!sub) return c.json({ error: "service not found" }, 404)
 
@@ -4148,9 +4170,8 @@ async function loadIntegrationToken(
 app.post("/api/integrations/railway/connect", async (c) => {
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
   const body = await c.req.json<{ userId?: string; token?: string }>().catch(() => ({}))
-  const userId = body.userId
+  const userId = c.get("userId")
   const token = body.token?.trim()
-  if (!userId) return c.json({ error: "userId required" }, 400)
   if (!token) return c.json({ error: "token required" }, 400)
 
   let me
@@ -4199,8 +4220,7 @@ app.post("/api/integrations/railway/connect", async (c) => {
 
 app.get("/api/integrations/railway", async (c) => {
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const { data } = await sb
     .from("user_integrations")
     .select("provider, account, connected_at, updated_at")
@@ -4213,8 +4233,7 @@ app.get("/api/integrations/railway", async (c) => {
 
 app.delete("/api/integrations/railway", async (c) => {
   if (!sb) return c.json({ error: "persistence disabled" }, 503)
-  const userId = c.req.query("userId")
-  if (!userId) return c.json({ error: "userId required" }, 400)
+  const userId = c.get("userId")
   const { error } = await sb
     .from("user_integrations")
     .delete()
@@ -4387,8 +4406,24 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy()
     return
   }
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit("connection", ws, req)
+  // Gate WS upgrade on a valid Supabase JWT, delivered in ?access_token=
+  // (WebSocket has no way to set Authorization on the handshake request).
+  const token = url.searchParams.get("access_token") ?? ""
+  if (!token || !sb) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n")
+    socket.destroy()
+    return
+  }
+  void sb.auth.getUser(token).then(({ data, error }) => {
+    if (error || !data.user) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n")
+      socket.destroy()
+      return
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      ;(req as unknown as { userId?: string }).userId = data.user.id
+      wss.emit("connection", ws, req)
+    })
   })
 })
 

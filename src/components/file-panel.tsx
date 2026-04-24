@@ -10,7 +10,7 @@ import { workspace } from "@/models"
 import { Markdown } from "@/components/markdown"
 import { AnnotationAccordion } from "@/components/annotation-accordion"
 import { AnnotationChip, authorInitials, compactAge, shaToColor } from "@/components/annotation-chip"
-import { api } from "@/lib/api"
+import { api, sseUrl } from "@/lib/api"
 
 type BlameLine = {
   line: number
@@ -306,8 +306,16 @@ export const FilePanel = observer(function FilePanel({
   const submitComment = useCallback(
     async (line: number, body: string) => {
       if (!conversationId || !path || !projectId || !userId || !body.trim()) return
+      // Deterministic id: the same UUID lands on messages.id AND
+      // file_comments.message_id server-side. Optimistic chat row uses it
+      // immediately; realtime upgrades the row by id match when it arrives.
+      const messageId = crypto.randomUUID()
+      const anchoredLine = content ? content.split("\n")[line - 1] ?? "" : ""
+      const chatText = `[comment on ${path}:${line}]\n> ${anchoredLine}\n\n${body.trim()}`
       // Optimistically close the composer; re-fetch hydrates the list.
       setComposerLine(null)
+      const conv = workspace.active
+      if (conv) conv.addOptimisticUserMessage(messageId, chatText)
       try {
         const res = await api("/api/file-comments", {
           method: "POST",
@@ -319,19 +327,10 @@ export const FilePanel = observer(function FilePanel({
             filePath: path,
             anchorStartLine: line,
             body: body.trim(),
+            messageId,
           }),
         })
         if (!res.ok) return
-        const anchoredLine = content
-          ? content.split("\n")[line - 1] ?? ""
-          : ""
-        // Post the structured chat message via the conversation's own send()
-        // so it rides the nudge/new-turn logic uniformly with user messages.
-        const conv = workspace.active
-        if (conv) {
-          const text = `[comment on ${path}:${line}]\n> ${anchoredLine}\n\n${body.trim()}`
-          void conv.send(text)
-        }
         void fetchComments()
       } catch {
         // swallow — UI still closed; next fetch will reflect reality
@@ -372,14 +371,15 @@ export const FilePanel = observer(function FilePanel({
         }, 200)
       }
     })()
-    function connect() {
-      es = new EventSource(`/api/changes/stream?conversationId=${encodeURIComponent(conversationId!)}`)
+    async function connect() {
+      const url = await sseUrl(`/api/changes/stream?conversationId=${encodeURIComponent(conversationId!)}`)
+      es = new EventSource(url)
       es.addEventListener("changed", debounce)
       es.onerror = () => {
-        if (es?.readyState === EventSource.CLOSED) retry = setTimeout(connect, 5000)
+        if (es?.readyState === EventSource.CLOSED) retry = setTimeout(() => void connect(), 5000)
       }
     }
-    connect()
+    void connect()
     return () => {
       es?.close()
       if (retry) clearTimeout(retry)
@@ -1078,7 +1078,7 @@ function CommentAccordion({
             <span className="mx-1">·</span>
             {when}
           </div>
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-3 pt-1">
             {isResolved ? (
               <button
                 type="button"
@@ -1094,6 +1094,21 @@ function CommentAccordion({
                 className="text-[11px] text-primary hover:underline cursor-pointer"
               >
                 Resolve
+              </button>
+            )}
+            {comment.message_id && (
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent("ai-coder:focus-message", {
+                      detail: { messageId: comment.message_id },
+                    }),
+                  )
+                }
+                className="text-[11px] text-primary hover:underline cursor-pointer"
+              >
+                Show in chat →
               </button>
             )}
           </div>
