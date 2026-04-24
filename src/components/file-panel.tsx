@@ -656,7 +656,10 @@ function FilePanelBody({
 
   return (
     <div className="flex-1 min-h-0 flex">
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto scrollbar-hide relative">
+      <div
+        ref={scrollRef}
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide relative"
+      >
         {!loading && !error && content !== null && (
           <FileBody
             content={content}
@@ -687,9 +690,6 @@ function FilePanelBody({
           lineCount={lineCount}
           byLine={byLine}
           removedAfter={removedAfter}
-          commentsEnabled={commentsEnabled}
-          commentsByLine={commentsByLine}
-          onOpenCommentById={onOpenCommentById}
         />
       )}
     </div>
@@ -800,16 +800,18 @@ function FileBody({
     return Math.max(n, 1)
   }, [content])
 
+  // Don't clear hoveredLine when e.target isn't a .line — the comment rail
+  // (sibling absolute column) also sets hoveredLine via its own delegated
+  // handler, and clearing here would stomp it when the mouse moves from the
+  // code area to the rail (bubbling reaches this handler after the rail's).
+  // onMouseLeave on the root still clears when the mouse leaves the whole
+  // FileBody.
   const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!commentsEnabled) return
     const target = (e.target as HTMLElement).closest<HTMLElement>(".line")
-    if (!target) {
-      setHoveredLine(null)
-      return
-    }
+    if (!target) return
     const n = parseInt(target.dataset.lineNo ?? "", 10)
-    if (!Number.isFinite(n)) return
-    setHoveredLine(n)
+    if (Number.isFinite(n) && n !== hoveredLine) setHoveredLine(n)
   }
   const onMouseLeave = () => setHoveredLine(null)
 
@@ -921,15 +923,17 @@ function FileBody({
           />
         )}
 
-      {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the gutter
-          and leave room for the blame rail (even when it's not currently
-          rendered, so toggling blame doesn't shift layout).
-          Lines soft-wrap so long edits are readable without horizontal
-          scrolling; the gutter's per-line heights adapt via `lineHeights`.
-          `file-code` enables the CSS-counter line numbers (see index.css). */}
+      {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the diff
+          stripe (6px), blame rail (8–18px), and comment rail (22–32px) —
+          pl-9 (36px) gives a 4px gap before pre starts. Fixed width whether
+          the rails are currently rendered or not, so toggling them doesn't
+          shift layout. `file-code` enables the CSS-counter line numbers,
+          which live inside pre's pl-10 (see index.css).
+          Lines soft-wrap so long edits stay readable without horizontal
+          scrolling; the gutter's per-line heights adapt via `lineHeights`. */}
       <div
         ref={codeRef}
-        className="file-code pl-5 [&_pre]:bg-transparent! [&_pre]:py-3 [&_pre]:pr-3 [&_pre]:pl-10 [&_pre]:overflow-x-hidden [&_.shiki]:whitespace-normal [&_.shiki>code]:whitespace-normal [&_.line]:block [&_.line]:whitespace-pre-wrap [&_.line]:wrap-break-word"
+        className="file-code pl-9 [&_pre]:bg-transparent! [&_pre]:py-3 [&_pre]:pr-3 [&_pre]:pl-10 [&_pre]:overflow-x-hidden [&_.shiki]:whitespace-normal [&_.shiki>code]:whitespace-normal [&_.line]:block [&_.line]:whitespace-pre-wrap [&_.line]:wrap-break-word"
       >
         {html ? (
           <div dangerouslySetInnerHTML={{ __html: html }} />
@@ -938,31 +942,66 @@ function FileBody({
         )}
       </div>
 
-      {/* Comment composer hover trigger — a faint "+" at the right edge of
-          the hovered line. Only visible when comments are on, no existing
-          comment on that line, and no other composer/accordion is active. */}
-      {commentsEnabled &&
-        hoveredLine !== null &&
-        !commentsByLine.get(hoveredLine) &&
-        composerLine !== hoveredLine &&
-        lineOffsets &&
-        lineHeights &&
-        hoveredLine <= lineOffsets.length && (
-          <button
-            type="button"
-            className="absolute right-1 z-20 flex size-4 items-center justify-center rounded-sm bg-primary text-primary-foreground text-[11px] leading-none shadow-sm opacity-80 hover:opacity-100 cursor-pointer"
-            style={{
-              top:
-                lineOffsets[hoveredLine - 1] +
-                (lineHeights[hoveredLine - 1] ?? 0) / 2 -
-                8,
-            }}
-            aria-label={`Comment on line ${hoveredLine}`}
-            onClick={() => onOpenComposer(hoveredLine)}
-          >
-            +
-          </button>
-        )}
+      {/* Comment rail: 10px column between the blame rail and the line-
+          number zone. Shows a solid pin per line with open comments (count
+          badge when > 1). On hover of an un-commented line, shows a faint
+          "+" as the composer trigger. One delegated mousemove handler
+          keeps this O(1) regardless of line count. */}
+      {commentsEnabled && lineMetrics && (
+        <div
+          className="absolute top-0 pointer-events-auto"
+          style={{ left: 22, width: 10, paddingTop: lineMetrics.top }}
+          aria-label="Comment rail"
+          onMouseMove={(e) => {
+            const row = (e.target as HTMLElement).closest<HTMLElement>(
+              "[data-comment-line]",
+            )
+            if (!row) return
+            const n = parseInt(row.dataset.commentLine ?? "", 10)
+            if (Number.isFinite(n) && n !== hoveredLine) setHoveredLine(n)
+          }}
+        >
+          {Array.from({ length: lineCount }, (_, i) => {
+            const lineNo = i + 1
+            const list = commentsByLine.get(lineNo)
+            const h = lineHeights?.[i] ?? lineMetrics.height
+            const hasComment = list && list.length > 0
+            const showPlus =
+              !hasComment &&
+              hoveredLine === lineNo &&
+              composerLine !== lineNo &&
+              openBlameLine !== lineNo
+            return (
+              <div
+                key={i}
+                data-comment-line={lineNo}
+                style={{ height: h }}
+                className="flex items-center justify-center"
+              >
+                {hasComment ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenCommentById(list![0].id)}
+                    aria-label={`Open comment on line ${lineNo}`}
+                    className="flex size-3 items-center justify-center rounded-full bg-primary shadow-sm cursor-pointer text-[8px] font-bold text-primary-foreground"
+                  >
+                    {list!.length > 1 ? list!.length : ""}
+                  </button>
+                ) : showPlus ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenComposer(lineNo)}
+                    aria-label={`Comment on line ${lineNo}`}
+                    className="flex size-4 items-center justify-center rounded-sm bg-primary text-primary-foreground text-[11px] leading-none shadow-sm opacity-80 hover:opacity-100 cursor-pointer"
+                  >
+                    +
+                  </button>
+                ) : null}
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* Annotation accordion — absolute-positioned below the anchored line.
           Overlays the lines beneath; close to reveal them again. One open at
@@ -1428,17 +1467,11 @@ function Minimap({
   lineCount,
   byLine,
   removedAfter,
-  commentsEnabled,
-  commentsByLine,
-  onOpenCommentById,
 }: {
   scrollRef: React.RefObject<HTMLDivElement | null>
   lineCount: number
   byLine: Map<number, LineStatus>
   removedAfter: Set<number>
-  commentsEnabled: boolean
-  commentsByLine: Map<number, FileComment[]>
-  onOpenCommentById: (id: string | null) => void
 }) {
   const trackRef = useRef<HTMLDivElement>(null)
   const [scrollState, setScrollState] = useState({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 })
@@ -1579,34 +1612,6 @@ function Minimap({
           style={{ top: indicator.top, height: indicator.height }}
         />
       )}
-      {/* Comment pins (merged into the minimap column). Pin precedence: a
-          pin overlaps + visually replaces any diff heatmap slice at the same
-          line, since commented lines matter more than change density. The
-          button stops pointer propagation so a click opens the accordion
-          instead of triggering the scroll-to-click behavior. */}
-      {commentsEnabled &&
-        Array.from(commentsByLine.entries()).map(([line, list]) => {
-          if (list.length === 0) return null
-          const top = Math.max(0, (line - 1) * linePx - 2)
-          const first = list[0]
-          const count = list.length
-          return (
-            <button
-              key={`c-${line}`}
-              type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation()
-                onOpenCommentById(first.id)
-              }}
-              aria-label={`Open comment on line ${line}`}
-              className="absolute -left-0.5 size-3 rounded-full bg-primary ring-1 ring-background shadow-sm cursor-pointer flex items-center justify-center text-[8px] font-bold text-primary-foreground"
-              style={{ top }}
-            >
-              {count > 1 ? count : ""}
-            </button>
-          )
-        })}
     </div>
   )
 }
