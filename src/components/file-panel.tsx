@@ -739,6 +739,11 @@ function FileBody({
   // fallback keeps the uniform `lineMetrics.height` below.
   const [lineHeights, setLineHeights] = useState<number[] | null>(null)
   const [hoveredLine, setHoveredLine] = useState<number | null>(null)
+  // Separate state for the blame rail: any line with a blame entry
+  // (different from `hoveredLine` which drives the composer + affordance
+  // over the code area itself). One shared delegated listener on the rail
+  // keeps this cheap regardless of line count.
+  const [hoveredBlameLine, setHoveredBlameLine] = useState<number | null>(null)
   // Cumulative top offsets — offsets[i] is the top of line i+1 in FileBody
   // coord space. Used to position the annotation accordion below a line.
   const lineOffsets = useMemo(() => {
@@ -849,12 +854,28 @@ function FileBody({
 
       {/* Blame rail: 10px clickable column sitting between the gutter stripe
           and the wrapper padding. Each row is an <AnnotationChip> with a
-          stripe color hashed from the commit SHA. */}
+          stripe color hashed from the commit SHA. Hover popover is driven
+          by ONE delegated mousemove handler on the rail — no per-row
+          listeners, constant cost regardless of line count. */}
       {blameEnabled && blame && lineMetrics && (
         <div
           className="absolute top-0 pointer-events-auto"
           style={{ left: 8, width: 10, paddingTop: lineMetrics.top }}
           aria-label="Blame rail"
+          onMouseMove={(e) => {
+            const row = (e.target as HTMLElement).closest<HTMLElement>(
+              "[data-blame-line]",
+            )
+            if (!row) {
+              if (hoveredBlameLine !== null) setHoveredBlameLine(null)
+              return
+            }
+            const n = parseInt(row.dataset.blameLine ?? "", 10)
+            if (Number.isFinite(n) && n !== hoveredBlameLine) {
+              setHoveredBlameLine(n)
+            }
+          }}
+          onMouseLeave={() => setHoveredBlameLine(null)}
         >
           {Array.from({ length: lineCount }, (_, i) => {
             const lineNo = i + 1
@@ -865,7 +886,7 @@ function FileBody({
               ? "hsl(0 0% 55%)"
               : shaToColor(info.sha)
             return (
-              <div key={i} style={{ height: h }}>
+              <div key={i} data-blame-line={lineNo} style={{ height: h }}>
                 <AnnotationChip
                   color={color}
                   faded
@@ -873,13 +894,32 @@ function FileBody({
                   onClick={() =>
                     onOpenBlameLine(openBlameLine === lineNo ? null : lineNo)
                   }
-                  title={`${info.author} — ${info.summary}`}
                 />
               </div>
             )
           })}
         </div>
       )}
+
+      {/* Shared delegated blame hover popover. Single DOM node, positioned
+          by `hoveredBlameLine`. Opens instantly (no Radix show/close delay)
+          and unmounts on mouseleave. */}
+      {blameEnabled &&
+        blame &&
+        hoveredBlameLine !== null &&
+        lineOffsets &&
+        lineHeights &&
+        hoveredBlameLine <= lineOffsets.length &&
+        openBlameLine !== hoveredBlameLine &&
+        blame.lines[hoveredBlameLine - 1] && (
+          <BlameHoverCard
+            info={blame.lines[hoveredBlameLine - 1]}
+            top={
+              lineOffsets[hoveredBlameLine - 1] +
+              (lineHeights[hoveredBlameLine - 1] ?? 0)
+            }
+          />
+        )}
 
       {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the gutter
           and leave room for the blame rail (even when it's not currently
@@ -974,6 +1014,31 @@ function FileBody({
             onSubmit={(body) => onSubmitComment(composerLine, body)}
           />
         )}
+    </div>
+  )
+}
+
+/** Shared delegated hover popover for the blame rail. Pure function of
+ *  the hovered line's info — mounts/unmounts via the parent's state, no
+ *  timers or Radix show/hide delay. Styled like shadcn's Tooltip. */
+function BlameHoverCard({ info, top }: { info: BlameLine; top: number }) {
+  return (
+    <div
+      className="pointer-events-none absolute z-20 rounded-md border bg-popover text-popover-foreground shadow-md px-3 py-1.5 text-xs max-w-xs"
+      style={{ top, left: 24 }}
+    >
+      <div className="font-medium truncate">{info.summary}</div>
+      <div className="text-muted-foreground flex items-center gap-1.5 mt-0.5">
+        <span className="truncate">{info.author}</span>
+        {!info.isUncommitted && (
+          <>
+            <span>·</span>
+            <span className="shrink-0">{compactAge(info.committerTime)} ago</span>
+            <span>·</span>
+            <span className="shrink-0 font-mono">{info.shortSha}</span>
+          </>
+        )}
+      </div>
     </div>
   )
 }
