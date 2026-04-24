@@ -232,22 +232,45 @@ export class Workspace extends BaseModel {
     worktreeMode: "shared" | "per_conversation" = "shared"
   ): Promise<Project> {
     if (!this.userId) throw new Error("not signed in")
-    const res = await api("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: this.userId, name, cwd, worktreeMode }),
-    })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${res.status}`)
-    }
-    const data = await res.json()
+    // Deterministic id: sidebar + activeProjectId flip before the server
+    // round-trip (see docs/ARCHITECTURE-CLIENT-IDS.md).
+    const id = crypto.randomUUID()
     const p = Project.create()
-    p.setFromRow(data)
+    p.setFromRow({
+      id,
+      user_id: this.userId,
+      name,
+      cwd,
+      worktree_mode: worktreeMode,
+      default_base_ref: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     runInAction(() => {
       this.projects.addItem(p)
       this.setActiveProject(p.id)
     })
+    try {
+      const res = await api("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, userId: this.userId, name, cwd, worktreeMode }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      runInAction(() => p.setFromRow(data))
+    } catch (err) {
+      runInAction(() => {
+        this.projects.removeItem(id)
+        if (this.activeProjectId === id) {
+          this.setActiveProject(this.projects.items[0]?.id ?? null)
+        }
+      })
+      throw err
+    }
     return p
   }
 

@@ -184,11 +184,11 @@ export class Conversation extends BaseModel {
   @action private applyInsert(row: MessageRow) {
     const events = Array.isArray(row.events) ? (row.events as StreamEvent[]) : []
     const attachments = Array.isArray(row.attachments) ? (row.attachments as AttachmentMeta[]) : []
-    // Deterministic-id fast path: if the incoming row's id matches one of our
-    // existing (optimistic) rows, upgrade it in-place. Callers that pre-generate
-    // the id — comment submission, and any future flow that wants a stable
-    // chat-message handle — rely on this so they can link to the message
-    // before the realtime echo arrives.
+    // Deterministic-id upgrade: every client-created optimistic row carries
+    // the same UUID the server will insert with (see
+    // docs/ARCHITECTURE-CLIENT-IDS.md). If we find a row with this id, flip
+    // it to canonical; if not, this is a new row (auto-loop iteration,
+    // another tab, or a first-time load).
     const byId = this.messages.find(row.id)
     if (byId) {
       if (byId.isOptimistic) {
@@ -203,27 +203,6 @@ export class Conversation extends BaseModel {
         this.fireResponseHooks(row, "")
       }
       // Already canonical → nothing to do (duplicate realtime event).
-      return
-    }
-    // Legacy path: optimistic rows created by older call sites that didn't
-    // provide a client id. Match by role + text so we still upgrade rather
-    // than duplicating. Safe to remove once all call sites use deterministic
-    // ids.
-    const optimistic = this.messages.items.find(
-      (m) =>
-        m.isOptimistic &&
-        m.role === row.role &&
-        (row.role === "assistant" || m.text === row.text)
-    )
-    if (optimistic) {
-      optimistic.setProps({
-        id: row.id,
-        events,
-        attachments,
-        deliveredAt: row.delivered_at ?? null,
-        isOptimistic: false,
-      })
-      this.fireResponseHooks(row, "")
       return
     }
     this.messages.addItem(
@@ -275,12 +254,13 @@ export class Conversation extends BaseModel {
    *  starts a fresh turn. No client-side queue. */
   send = async (prompt: string, attachments?: Attachment[]) => {
     if (this.streaming) {
-      // Optimistic local row so the UI renders immediately. Realtime will
-      // replace it with the canonical server row (including its real id and
-      // delivered_at, which starts null until canUseTool flushes it).
+      // Deterministic id for the optimistic row + the server insert — see
+      // docs/ARCHITECTURE-CLIENT-IDS.md.
+      const messageId = crypto.randomUUID()
       runInAction(() => {
         this.messages.addItem(
           Message.fromProps({
+            id: messageId,
             conversationId: this.id,
             role: "user",
             text: prompt,
@@ -303,6 +283,7 @@ export class Conversation extends BaseModel {
             conversationId: this.id,
             text: prompt,
             attachments: attachments?.length ? attachments : undefined,
+            messageId,
           }),
         })
         if (!res.ok) {
@@ -359,13 +340,18 @@ export class Conversation extends BaseModel {
       sizeBytes: a.sizeBytes,
     }))
 
+    // Deterministic ids for both optimistic rows — the server uses these
+    // when it inserts, and applyInsert upgrades by id match. See
+    // docs/ARCHITECTURE-CLIENT-IDS.md.
+    const userMessageId = crypto.randomUUID()
+    const assistantMessageId = crypto.randomUUID()
+
     runInAction(() => {
       this.streaming = true
       this.lastError = null
-      // Optimistic placeholders — server inserts canonical rows, realtime
-      // swaps the optimistic ids when they arrive.
       this.messages.addItem(
         Message.fromProps({
+          id: userMessageId,
           conversationId: this.id,
           role: "user",
           text: prompt,
@@ -376,6 +362,7 @@ export class Conversation extends BaseModel {
       )
       this.messages.addItem(
         Message.fromProps({
+          id: assistantMessageId,
           conversationId: this.id,
           role: "assistant",
           text: "",
@@ -416,6 +403,8 @@ export class Conversation extends BaseModel {
           prompt,
           attachments: attachments?.length ? attachments : undefined,
           sessionId: this.sessionId ?? undefined,
+          userMessageId,
+          assistantMessageId,
         }),
         signal: controller.signal,
       })

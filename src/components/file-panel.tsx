@@ -310,6 +310,7 @@ export const FilePanel = observer(function FilePanel({
       // file_comments.message_id server-side. Optimistic chat row uses it
       // immediately; realtime upgrades the row by id match when it arrives.
       const messageId = crypto.randomUUID()
+      const commentId = crypto.randomUUID()
       const anchoredLine = content ? content.split("\n")[line - 1] ?? "" : ""
       const chatText = `[comment on ${path}:${line}]\n> ${anchoredLine}\n\n${body.trim()}`
       // Optimistically close the composer; re-fetch hydrates the list.
@@ -328,6 +329,7 @@ export const FilePanel = observer(function FilePanel({
             anchorStartLine: line,
             body: body.trim(),
             messageId,
+            commentId,
           }),
         })
         if (!res.ok) return
