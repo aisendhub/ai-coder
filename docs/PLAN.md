@@ -2,6 +2,10 @@
 
 What we're building, why, and the shape of the thing.
 
+Related strategy docs:
+- [NAMING.md](NAMING.md) — three-product family (Worktrees, Hangar, Windtunnel) and launch order.
+- [MARKET.md](MARKET.md) — competitor valuations, consumer vs developer market, and penetrability analysis that backs the launch order.
+
 ---
 
 ## The product
