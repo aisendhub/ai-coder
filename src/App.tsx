@@ -87,8 +87,6 @@ function DesktopLayout() {
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [fileTreeOpen, setFileTreeOpen] = usePersistentState("ai-coder:panels:fileTreeOpen", false)
-  const [blameEnabled, setBlameEnabled] = usePersistentState("ai-coder:panels:blameEnabled", false)
-  const [commentsEnabled, setCommentsEnabled] = usePersistentState("ai-coder:panels:commentsEnabled", true)
   // When the agent's reply drops a <run-services> block, open the services
   // panel automatically so the user sees the pick-list without hunting for
   // it. The panel itself listens for the same event to open the picker +
@@ -193,10 +191,6 @@ function DesktopLayout() {
                 onServicesOpenChange={setServicesOpen}
                 fileTreeOpen={fileTreeOpen}
                 onFileTreeOpenChange={setFileTreeOpen}
-                blameEnabled={blameEnabled}
-                onBlameEnabledChange={setBlameEnabled}
-                commentsEnabled={commentsEnabled}
-                onCommentsEnabledChange={setCommentsEnabled}
               />
               <div className="flex-1 min-h-0 overflow-hidden">
                 <ChatPanel />
@@ -310,7 +304,7 @@ function DesktopLayout() {
               </ResizablePanel>
             </>
           )}
-          <FilePanelSlot blameEnabled={blameEnabled} commentsEnabled={commentsEnabled} />
+          <FilePanelSlot />
         </ResizablePanelGroup>
         {gitLogFullscreen && (
           <FullscreenOverlay onExit={() => setGitLogFullscreen(false)}>
@@ -369,10 +363,6 @@ function MobileLayout() {
             onServicesOpenChange={setServicesOpen}
             fileTreeOpen={fileTreeOpen}
             onFileTreeOpenChange={setFileTreeOpen}
-            blameEnabled={false}
-            onBlameEnabledChange={() => {}}
-            commentsEnabled={false}
-            onCommentsEnabledChange={() => {}}
           />
           <div className="flex-1 min-h-0 overflow-hidden">
             <ChatPanel />

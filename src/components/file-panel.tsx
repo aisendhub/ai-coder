@@ -10,6 +10,7 @@ import { workspace } from "@/models"
 import { Markdown } from "@/components/markdown"
 import { AnnotationAccordion } from "@/components/annotation-accordion"
 import { AnnotationChip, authorInitials, compactAge, shaToColor } from "@/components/annotation-chip"
+import { useProjectScopedState } from "@/hooks/use-project-scoped-state"
 import { api, sseUrl } from "@/lib/api"
 
 type BlameLine = {
@@ -60,9 +61,10 @@ type FileResponse = {
   sizeBytes: number
 }
 
-/** Top-bar icon button that toggles the blame rail in the file panel. Only
- *  meaningful when a file is open — caller decides whether to render it. */
-export function BlameTrigger({
+/** Header button that toggles the blame rail in the file panel. Placed in
+ *  the file-panel header so it appears only when a file is open and lives
+ *  next to the other per-file actions (download, reload, close). */
+function BlameTrigger({
   open,
   onOpenChange,
 }: {
@@ -75,7 +77,7 @@ export function BlameTrigger({
         render={
           <Button
             variant="ghost"
-            size="icon"
+            size="sm"
             onClick={() => onOpenChange(!open)}
             aria-label={open ? "Hide blame" : "Show blame"}
             aria-pressed={open}
@@ -83,15 +85,15 @@ export function BlameTrigger({
           />
         }
       >
-        <GitCommit className="size-5" />
+        <GitCommit className="size-3.5" />
       </TooltipTrigger>
       <TooltipContent>{open ? "Hide blame" : "Show blame"}</TooltipContent>
     </Tooltip>
   )
 }
 
-/** Top-bar icon button that toggles the comment rail + pins in the file panel. */
-export function CommentsTrigger({
+/** Header button that toggles the comment rail + pins in the file panel. */
+function CommentsTrigger({
   open,
   onOpenChange,
 }: {
@@ -104,7 +106,7 @@ export function CommentsTrigger({
         render={
           <Button
             variant="ghost"
-            size="icon"
+            size="sm"
             onClick={() => onOpenChange(!open)}
             aria-label={open ? "Hide comments" : "Show comments"}
             aria-pressed={open}
@@ -112,7 +114,7 @@ export function CommentsTrigger({
           />
         }
       >
-        <MessageSquare className="size-5" />
+        <MessageSquare className="size-3.5" />
       </TooltipTrigger>
       <TooltipContent>{open ? "Hide comments" : "Show comments"}</TooltipContent>
     </Tooltip>
@@ -121,33 +123,21 @@ export function CommentsTrigger({
 
 /** ResizablePanel slot for the file panel — drops nothing into the layout
  *  when no file is open. Lives next to other ResizablePanels in App.tsx. */
-export const FilePanelSlot = observer(function FilePanelSlot({
-  blameEnabled,
-  commentsEnabled,
-}: {
-  blameEnabled: boolean
-  commentsEnabled: boolean
-}) {
+export const FilePanelSlot = observer(function FilePanelSlot() {
   if (!workspace.openFilePath) return null
   return (
     <>
       <ResizableHandle />
       <ResizablePanel id="file" order={9} defaultSize={36} minSize={20} maxSize={70}>
         <div className="h-full min-h-0 overflow-hidden border-l">
-          <FilePanel blameEnabled={blameEnabled} commentsEnabled={commentsEnabled} />
+          <FilePanel />
         </div>
       </ResizablePanel>
     </>
   )
 })
 
-export const FilePanel = observer(function FilePanel({
-  blameEnabled,
-  commentsEnabled,
-}: {
-  blameEnabled: boolean
-  commentsEnabled: boolean
-}) {
+export const FilePanel = observer(function FilePanel() {
   const conversationId = workspace.active?.id ?? null
   const path = workspace.openFilePath
   const [content, setContent] = useState<string | null>(null)
@@ -168,6 +158,20 @@ export const FilePanel = observer(function FilePanel({
   const [composerLine, setComposerLine] = useState<number | null>(null)
   const projectId = workspace.active?.projectId ?? null
   const userId = workspace.userId
+  // Annotation toggles live here (not the top bar) and persist per project —
+  // opening a file in another project starts from that project's saved state.
+  // Both default to `true`: comments + blame are useful enough on first open
+  // that the user shouldn't have to go hunting for the toggle.
+  const [blameEnabled, setBlameEnabled] = useProjectScopedState(
+    projectId,
+    "blameEnabled",
+    true,
+  )
+  const [commentsEnabled, setCommentsEnabled] = useProjectScopedState(
+    projectId,
+    "commentsEnabled",
+    true,
+  )
   // Only one annotation accordion open at a time, across types.
   const openBlame = (line: number | null) => {
     setOpenBlameLine(line)
@@ -451,6 +455,14 @@ export const FilePanel = observer(function FilePanel({
             </span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            <CommentsTrigger
+              open={commentsEnabled}
+              onOpenChange={setCommentsEnabled}
+            />
+            <BlameTrigger
+              open={blameEnabled}
+              onOpenChange={setBlameEnabled}
+            />
             {isMarkdown && (
               <Tooltip>
                 <TooltipTrigger>

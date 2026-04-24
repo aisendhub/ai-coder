@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ChangesTrigger, TerminalTrigger, FileTreeTrigger } from "@/components/right-panel"
 import { ServicesTrigger } from "@/components/services-panel"
-import { BlameTrigger, CommentsTrigger } from "@/components/file-panel"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { showOsNotification } from "@/hooks/use-turn-notifications"
 import { workspace } from "@/models"
@@ -22,10 +21,6 @@ type Props = {
   onServicesOpenChange: (open: boolean) => void
   fileTreeOpen: boolean
   onFileTreeOpenChange: (open: boolean) => void
-  blameEnabled: boolean
-  onBlameEnabledChange: (enabled: boolean) => void
-  commentsEnabled: boolean
-  onCommentsEnabledChange: (enabled: boolean) => void
 }
 
 export const TopBar = observer(function TopBar({
@@ -37,16 +32,11 @@ export const TopBar = observer(function TopBar({
   onServicesOpenChange,
   fileTreeOpen,
   onFileTreeOpenChange,
-  blameEnabled,
-  onBlameEnabledChange,
-  commentsEnabled,
-  onCommentsEnabledChange,
 }: Props) {
   const active = workspace.active
   const title = active?.title ?? "New chat"
   const branch = active?.branch ?? null
   const isMobile = useIsMobile()
-  const hasOpenFile = workspace.openFilePath !== null
   // Spin-off only makes sense on a regular chat that already has user input
   // worth carrying over. Tasks already are tasks.
   const userMessageCount = active?.messages.items.filter((m) => m.role === "user").length ?? 0
@@ -106,12 +96,6 @@ export const TopBar = observer(function TopBar({
           </Tooltip>
         )}
         <NotificationsTrigger />
-        {hasOpenFile && !isMobile && (
-          <>
-            <CommentsTrigger open={commentsEnabled} onOpenChange={onCommentsEnabledChange} />
-            <BlameTrigger open={blameEnabled} onOpenChange={onBlameEnabledChange} />
-          </>
-        )}
         <ServicesTrigger open={servicesOpen} onOpenChange={onServicesOpenChange} />
         <FileTreeTrigger open={fileTreeOpen} onOpenChange={onFileTreeOpenChange} />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />
