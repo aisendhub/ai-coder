@@ -1024,8 +1024,20 @@ function FileBody({
 function BlameHoverCard({ info, top }: { info: BlameLine; top: number }) {
   return (
     <div
-      className="pointer-events-none absolute z-20 rounded-md border bg-popover text-popover-foreground shadow-md px-3 py-1.5 text-xs max-w-xs"
-      style={{ top, left: 24 }}
+      className={cn(
+        "pointer-events-none absolute z-20 rounded-md px-3 py-1.5 text-xs max-w-xs text-popover-foreground",
+        // Frosted-glass / liquid-glass — semi-transparent background layered
+        // over a backdrop blur so the code underneath stays readable. `bg-clip`
+        // keeps the blur clean on supporting browsers; graceful fallback to
+        // a solid-ish translucent fill elsewhere.
+        "bg-popover/70 backdrop-blur-md backdrop-saturate-150",
+        "border border-border/50 shadow-lg",
+      )}
+      // Offset far enough right that the tooltip clears the blame rail and
+      // doesn't visually obscure adjacent stripes the user might want to
+      // click next. pointer-events: none keeps clicks pass-through anyway,
+      // but the visual gap matters.
+      style={{ top, left: 48 }}
     >
       <div className="font-medium truncate">{info.summary}</div>
       <div className="text-muted-foreground flex items-center gap-1.5 mt-0.5">
