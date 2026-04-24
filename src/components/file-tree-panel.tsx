@@ -3,8 +3,8 @@ import { observer } from "mobx-react-lite"
 import {
   ChevronDown,
   ChevronRight,
-  ChevronsDownUp,
-  ChevronsUpDown,
+  ChevronsDown,
+  ChevronsUp,
   FolderTree,
   Folder,
   FolderOpen,
@@ -152,6 +152,10 @@ export const FileTreePanel = observer(function FileTreePanel({
     setExpanded(new Set([""]))
   }, [])
 
+  // True if any folder beyond the root is expanded. Drives the single
+  // toggle button: any open → click collapses; otherwise click expands.
+  const anyExpanded = expanded.size > 1
+
   const rootState = dirs.get("")
   const rootName = useMemo(() => cwd.split("/").filter(Boolean).pop() ?? "/", [cwd])
 
@@ -230,22 +234,23 @@ export const FileTreePanel = observer(function FileTreePanel({
           <Tooltip>
             <TooltipTrigger
               render={
-                <Button size="sm" variant="ghost" onClick={expandAll} aria-label="Expand all" />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={anyExpanded ? collapseAll : expandAll}
+                  aria-label={anyExpanded ? "Collapse all" : "Expand all"}
+                />
               }
             >
-              <ChevronsUpDown className="size-3.5" />
+              {anyExpanded ? (
+                <ChevronsUp className="size-3.5" />
+              ) : (
+                <ChevronsDown className="size-3.5" />
+              )}
             </TooltipTrigger>
-            <TooltipContent>Expand all loaded folders</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button size="sm" variant="ghost" onClick={collapseAll} aria-label="Collapse all" />
-              }
-            >
-              <ChevronsDownUp className="size-3.5" />
-            </TooltipTrigger>
-            <TooltipContent>Collapse all</TooltipContent>
+            <TooltipContent>
+              {anyExpanded ? "Collapse all" : "Expand all loaded folders"}
+            </TooltipContent>
           </Tooltip>
         </div>
       </div>
