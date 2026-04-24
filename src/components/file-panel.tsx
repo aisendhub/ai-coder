@@ -33,7 +33,7 @@ export const FilePanelSlot = observer(function FilePanelSlot() {
   return (
     <>
       <ResizableHandle />
-      <ResizablePanel id="file" defaultSize={36} minSize={20} maxSize={70}>
+      <ResizablePanel id="file" order={9} defaultSize={36} minSize={20} maxSize={70}>
         <div className="h-full min-h-0 overflow-hidden border-l">
           <FilePanel />
         </div>
