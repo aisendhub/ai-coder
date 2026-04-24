@@ -1,6 +1,7 @@
 import { useCallback } from "react"
 import { useConfirm } from "@/lib/confirm"
 import { workspace } from "@/models"
+import { api } from "@/lib/api"
 
 // Shared delete-with-confirm helper — used by the nav panel and by any
 // section that can delete a conversation (e.g. ChatsSection when promoted).
@@ -27,7 +28,7 @@ export function useDeleteConversation() {
       }
       let warning = ""
       try {
-        const res = await fetch(`/api/conversations/${id}/discard-status`)
+        const res = await api(`/api/conversations/${id}/discard-status`)
         if (res.ok) {
           const s = (await res.json()) as {
             uncommittedFiles: number

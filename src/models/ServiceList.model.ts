@@ -1,6 +1,7 @@
 import { action, observable, runInAction } from "mobx"
 import { BaseList } from "./BaseList.model"
 import { Service, type ServiceDto, type LogLine } from "./Service.model"
+import { api, sseUrl } from "@/lib/api"
 
 type StartArgs = {
   userId: string
@@ -222,7 +223,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async connectRailway(userId: string, token: string): Promise<void> {
-    const res = await fetch("/api/integrations/railway/connect", {
+    const res = await api("/api/integrations/railway/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, token }),
@@ -261,7 +262,7 @@ export class ServiceList extends BaseList<typeof Service> {
 
   async refreshRunners(): Promise<void> {
     try {
-      const res = await fetch("/api/services/runners")
+      const res = await api("/api/services/runners")
       if (!res.ok) return
       const json = (await res.json()) as { runners: RunnerInfo[] }
       runInAction(() => { this.runners = json.runners })
@@ -271,7 +272,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async start(args: StartArgs): Promise<Service> {
-    const res = await fetch("/api/services/start", {
+    const res = await api("/api/services/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -296,7 +297,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async stop(userId: string, id: string): Promise<void> {
-    const res = await fetch(`/api/services/${id}/stop`, {
+    const res = await api(`/api/services/${id}/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId }),
@@ -319,7 +320,7 @@ export class ServiceList extends BaseList<typeof Service> {
     serviceId: string,
     opts: { watchMs?: number } = {}
   ): Promise<void> {
-    const res = await fetch(`/api/conversations/${conversationId}/verify-run`, {
+    const res = await api(`/api/conversations/${conversationId}/verify-run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, serviceId, watchMs: opts.watchMs }),
@@ -350,38 +351,47 @@ export class ServiceList extends BaseList<typeof Service> {
     onStatus?: (dto: ServiceDto) => void
   ): () => void {
     this.closeLogs(id)
-    const es = new EventSource(
-      `/api/services/${id}/logs?userId=${encodeURIComponent(userId)}`
-    )
-    this.logStreams.set(id, es)
+    // Async URL resolve (need to inject JWT), but keep the public signature
+    // sync so callers get an immediate cleanup function. If cancelled before
+    // the EventSource is constructed, the abort flag short-circuits setup.
+    let aborted = false
+    void (async () => {
+      const url = await sseUrl(`/api/services/${id}/logs?userId=${encodeURIComponent(userId)}`)
+      if (aborted) return
+      const es = new EventSource(url)
+      this.logStreams.set(id, es)
 
-    es.addEventListener("log", (ev) => {
-      const msg = ev as MessageEvent<string>
-      try {
-        onLine(JSON.parse(msg.data) as LogLine)
-      } catch {
-        /* ignore malformed */
+      es.addEventListener("log", (ev) => {
+        const msg = ev as MessageEvent<string>
+        try {
+          onLine(JSON.parse(msg.data) as LogLine)
+        } catch {
+          /* ignore malformed */
+        }
+      })
+      es.addEventListener("status", (ev) => {
+        const msg = ev as MessageEvent<string>
+        try {
+          const dto = JSON.parse(msg.data) as ServiceDto
+          runInAction(() => this.upsertDto(dto))
+          onStatus?.(dto)
+        } catch {
+          /* ignore */
+        }
+      })
+      es.addEventListener("end", () => {
+        this.closeLogs(id)
+      })
+      es.onerror = () => {
+        // Browser will auto-reconnect while the service exists; on close, the
+        // "end" event (above) will have already torn us down. Nothing to do.
       }
-    })
-    es.addEventListener("status", (ev) => {
-      const msg = ev as MessageEvent<string>
-      try {
-        const dto = JSON.parse(msg.data) as ServiceDto
-        runInAction(() => this.upsertDto(dto))
-        onStatus?.(dto)
-      } catch {
-        /* ignore */
-      }
-    })
-    es.addEventListener("end", () => {
+    })()
+
+    return () => {
+      aborted = true
       this.closeLogs(id)
-    })
-    es.onerror = () => {
-      // Browser will auto-reconnect while the service exists; on close, the
-      // "end" event (above) will have already torn us down. Nothing to do.
     }
-
-    return () => this.closeLogs(id)
   }
 
   closeLogs(id: string): void {
@@ -403,7 +413,7 @@ export class ServiceList extends BaseList<typeof Service> {
     userId: string,
     projectId: string
   ): Promise<LlmManifestDetection> {
-    const res = await fetch(`/api/projects/${projectId}/manifest/detect-llm`, {
+    const res = await api(`/api/projects/${projectId}/manifest/detect-llm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId }),
@@ -440,7 +450,7 @@ export class ServiceList extends BaseList<typeof Service> {
     projectId: string,
     manifest: RunManifestDto
   ): Promise<void> {
-    const res = await fetch(`/api/projects/${projectId}/manifest`, {
+    const res = await api(`/api/projects/${projectId}/manifest`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, manifest }),
@@ -535,7 +545,7 @@ export class ServiceList extends BaseList<typeof Service> {
     projectId: string,
     service: ProjectServiceWriteDto
   ): Promise<ProjectServiceDto> {
-    const res = await fetch(`/api/projects/${projectId}/services`, {
+    const res = await api(`/api/projects/${projectId}/services`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, service }),
@@ -590,7 +600,7 @@ export class ServiceList extends BaseList<typeof Service> {
     projectId: string,
     conversationId?: string | null
   ): Promise<LlmServicesDetectionView> {
-    const res = await fetch(`/api/projects/${projectId}/services/detect-llm`, {
+    const res = await api(`/api/projects/${projectId}/services/detect-llm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

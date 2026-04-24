@@ -36,7 +36,11 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · 🚫 blocked
 - ⬜ Wire conversations sidebar to live Supabase data
 - ⬜ Persist user + assistant messages per conversation
 - ⬜ Restore conversation history on page reload
-- ⬜ Backend: verify Supabase JWT on `/api/chat` and look up `conversation_id`
+- ✅ Backend: verify Supabase JWT on every `/api/*` route (middleware); JWT also validated on `/api/terminal` WebSocket upgrade
+- ✅ Client: `api()` + `sseUrl()` helpers in [src/lib/api.ts](../src/lib/api.ts) — fetch sends `Authorization: Bearer`, EventSource/WebSocket carry `?access_token=`
+- ✅ All server routes read `userId` from `c.get("userId")` (JWT claim), not request body — body-spoofing attacks closed
+- ✅ **RLS is the ACL layer.** Per-request user-scoped Supabase client (`c.get("sb")`) forwards the caller's JWT so `auth.uid() = user_id` policies evaluate on every query. Service-role client (`sbSystem`) reserved for deliberate cross-user work: agent message persistence mid-turn, boot reconcile, reaper, lifecycle logs. Routes no longer hand-roll `user_id !== userId` checks.
+- ✅ `/api/terminal` WebSocket accepts a `conversationId` (not a client-supplied `cwd`). Server verifies the conversation belongs to the authed user and derives cwd via `cwdForConversation()` — no more breakout to arbitrary host paths.
 - ⬜ Backend: capture GitHub `provider_token` on sign-in, store for repo cloning
 - ⬜ Generate TypeScript types from schema (`supabase gen types`)
 

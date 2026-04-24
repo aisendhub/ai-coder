@@ -8,6 +8,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils"
 import { workspace } from "@/models"
 import { SectionMenu } from "@/components/section-menu"
+import { api } from "@/lib/api"
 
 type Commit = {
   sha: string
@@ -70,7 +71,7 @@ export const GitLogSection = observer(function GitLogSection({
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/git/log?conversationId=${encodeURIComponent(conversationId)}&limit=100`)
+      const res = await api(`/api/git/log?conversationId=${encodeURIComponent(conversationId)}&limit=100`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = (await res.json()) as LogResponse
       setCommits(json.commits ?? [])

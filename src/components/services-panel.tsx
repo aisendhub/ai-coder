@@ -21,6 +21,7 @@ import {
   ArrowDownToLine,
   Plus,
 } from "lucide-react"
+import { api } from "@/lib/api"
 
 import {
   Sheet,
@@ -448,7 +449,7 @@ export const ServicesPanel = observer(function ServicesPanel({
     }
     setConfigurePhase("posting")
     try {
-      const res = await fetch(`/api/conversations/${active.id}/detect-services`, {
+      const res = await api(`/api/conversations/${active.id}/detect-services`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),

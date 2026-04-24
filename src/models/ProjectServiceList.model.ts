@@ -3,6 +3,7 @@ import { action, observable, runInAction } from "mobx"
 import { BaseList } from "./BaseList.model"
 import { ProjectService } from "./ProjectService.model"
 import type { ProjectServiceDto, ProjectServiceWriteDto } from "./ServiceList.model"
+import { api } from "@/lib/api"
 
 async function unwrap<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -82,7 +83,7 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
     projectId: string,
     write: ProjectServiceWriteDto
   ): Promise<ProjectService> {
-    const res = await fetch(`/api/projects/${projectId}/services`, {
+    const res = await api(`/api/projects/${projectId}/services`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, service: write }),

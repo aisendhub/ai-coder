@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ArrowLeft, Folder, GitBranch, Loader2 } from "lucide-react"
 import { workspace } from "@/models"
+import { api } from "@/lib/api"
 
 type DirEntry = { name: string; path: string }
 type BrowseResponse = {
@@ -43,7 +44,7 @@ export function NewProjectDialog({ open, onClose }: Props) {
       return
     }
     let cancelled = false
-    fetch(`/api/fs/git-info?path=${encodeURIComponent(listing.path)}`)
+    api(`/api/fs/git-info?path=${encodeURIComponent(listing.path)}`)
       .then((r) => r.json())
       .then((info: GitInfo) => { if (!cancelled) setGitInfo(info) })
       .catch(() => { if (!cancelled) setGitInfo({ isGitRepo: false, defaultBaseRef: null }) })
@@ -55,7 +56,7 @@ export function NewProjectDialog({ open, onClose }: Props) {
     setError(null)
     try {
       const q = path ? `?path=${encodeURIComponent(path)}` : ""
-      const res = await fetch(`/api/fs/list${q}`)
+      const res = await api(`/api/fs/list${q}`)
       const json = await res.json()
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`)
       setListing(json as BrowseResponse)

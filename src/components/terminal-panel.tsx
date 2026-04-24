@@ -6,12 +6,20 @@ import { TerminalIcon, RefreshCw, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { workspace } from "@/models"
+import { sseUrl } from "@/lib/api"
 import "@xterm/xterm/css/xterm.css"
 
 export const TerminalPanel = observer(function TerminalPanel({
   onClose,
 }: { onClose?: () => void } = {}) {
-  const cwd = workspace.activeProject?.cwd ?? ""
+  // Terminal is scoped to the active chat/task — cwd is derived server-side
+  // from the conversation (worktree for tasks, project cwd for chats) so an
+  // authed user can only open terminals inside their own workspace.
+  const conversationId = workspace.active?.id ?? null
+  // Cosmetic label below the header. Project cwd is a close-enough hint when
+  // the conversation is a chat; tasks run in a worktree but the project cwd
+  // still reads as "this project's terminal."
+  const cwdLabel = workspace.activeProject?.cwd ?? ""
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -19,7 +27,7 @@ export const TerminalPanel = observer(function TerminalPanel({
   const [reconnectKey, setReconnectKey] = useState(0)
 
   useEffect(() => {
-    if (!containerRef.current || !cwd) return
+    if (!containerRef.current || !conversationId) return
     let cancelled = false
 
     const term = new XTerm({
@@ -41,57 +49,61 @@ export const TerminalPanel = observer(function TerminalPanel({
     termRef.current = term
     fitRef.current = fit
 
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-    const url = `${proto}//${window.location.host}/api/terminal?cwd=${encodeURIComponent(cwd)}&cols=${term.cols}&rows=${term.rows}`
-    const ws = new WebSocket(url)
-    wsRef.current = ws
-
-    ws.onmessage = (e) => {
-      // Server sends raw pty bytes as strings (utf-8) or Blob if binary.
-      if (typeof e.data === "string") term.write(e.data)
-      else if (e.data instanceof Blob) e.data.text().then((t) => term.write(t))
-    }
-    ws.onclose = () => {
-      if (!cancelled) term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n")
-    }
-    ws.onerror = () => {
-      if (!cancelled) term.write("\r\n\x1b[31m[websocket error]\x1b[0m\r\n")
-    }
-
+    // Listeners attach before the socket exists; they no-op until ws is ready.
+    let ws: WebSocket | null = null
     const inputDisp = term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data)
+      if (ws?.readyState === WebSocket.OPEN) ws.send(data)
     })
-
     const resizeDisp = term.onResize(({ cols, rows }) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "resize", cols, rows }))
       }
     })
-
     const ro = new ResizeObserver(() => {
       try { fit.fit() } catch { /* ignore */ }
     })
     ro.observe(containerRef.current)
+
+    // Resolve URL (with JWT token) async, then open. Cleanup below tolerates
+    // the case where unmount happens before the socket exists.
+    void (async () => {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+      const path = await sseUrl(`/api/terminal?conversationId=${encodeURIComponent(conversationId)}&cols=${term.cols}&rows=${term.rows}`)
+      if (cancelled) return
+      ws = new WebSocket(`${proto}//${window.location.host}${path}`)
+      wsRef.current = ws
+
+      ws.onmessage = (e) => {
+        if (typeof e.data === "string") term.write(e.data)
+        else if (e.data instanceof Blob) e.data.text().then((t) => term.write(t))
+      }
+      ws.onclose = () => {
+        if (!cancelled) term.write("\r\n\x1b[2m[connection closed]\x1b[0m\r\n")
+      }
+      ws.onerror = () => {
+        if (!cancelled) term.write("\r\n\x1b[31m[websocket error]\x1b[0m\r\n")
+      }
+    })()
 
     return () => {
       cancelled = true
       inputDisp.dispose()
       resizeDisp.dispose()
       ro.disconnect()
-      ws.close()
+      ws?.close()
       term.dispose()
       termRef.current = null
       fitRef.current = null
       wsRef.current = null
     }
-  }, [cwd, reconnectKey])
+  }, [conversationId, reconnectKey])
 
   const reconnect = () => setReconnectKey((k) => k + 1)
 
-  if (!cwd) {
+  if (!conversationId) {
     return (
       <div className="flex h-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
-        Select a project to open a terminal.
+        Select a chat or task to open a terminal.
       </div>
     )
   }
@@ -125,7 +137,7 @@ export const TerminalPanel = observer(function TerminalPanel({
             )}
           </div>
         </div>
-        <div className="px-3 pb-2 text-xs text-muted-foreground truncate font-mono">{cwd}</div>
+        <div className="px-3 pb-2 text-xs text-muted-foreground truncate font-mono">{cwdLabel}</div>
       </div>
       <div className="flex-1 min-h-0 bg-background p-2">
         <div ref={containerRef} className="h-full w-full" />

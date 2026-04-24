@@ -15,6 +15,7 @@ import {
   Eye,
   EyeOff,
 } from "lucide-react"
+import { api } from "@/lib/api"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -63,7 +64,7 @@ export const FileTreePanel = observer(function FileTreePanel({
           path,
           ...(showHidden ? { hidden: "1" } : {}),
         })
-        const res = await fetch(`/api/tree?${qs.toString()}`)
+        const res = await api(`/api/tree?${qs.toString()}`)
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const json = (await res.json()) as TreeResponse
         setDirs((prev) => {

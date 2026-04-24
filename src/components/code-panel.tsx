@@ -16,6 +16,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable"
+import { api, sseUrl } from "@/lib/api"
 
 // CodePanel is the right-side panel wrapper. It hosts two sections stacked
 // vertically — Changes on top, Git log on bottom — with a drag-resizable
@@ -234,7 +235,7 @@ const ChangesSection = observer(function ChangesSection({
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`)
+      const res = await api(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = (await res.json()) as ChangesResponse
       setData(json)
@@ -275,22 +276,24 @@ const ChangesSection = observer(function ChangesSection({
     fetchChanges()
 
     if (!conversationId) return
+    const convId = conversationId
 
     let es: EventSource | null = null
     let esRetry: ReturnType<typeof setTimeout> | null = null
 
-    function connectSSE() {
-      es = new EventSource(`/api/changes/stream?conversationId=${encodeURIComponent(conversationId)}`)
+    async function connectSSE() {
+      const url = await sseUrl(`/api/changes/stream?conversationId=${encodeURIComponent(convId)}`)
+      es = new EventSource(url)
       es.addEventListener("ready", debouncedRefetch)
       es.addEventListener("changed", debouncedRefetch)
       es.onerror = () => {
         // If the EventSource gave up (CLOSED), reconnect after a delay
         if (es?.readyState === EventSource.CLOSED) {
-          esRetry = setTimeout(connectSSE, 5000)
+          esRetry = setTimeout(() => void connectSSE(), 5000)
         }
       }
     }
-    connectSSE()
+    void connectSSE()
 
     const onTurnDone = () => fetchChanges()
     window.addEventListener("ai-coder:turn-done", onTurnDone)

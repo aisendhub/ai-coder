@@ -1369,14 +1369,14 @@ async function readFileForConversation(
 }
 
 app.get("/api/file-comments", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const projectId = c.req.query("projectId")
   const filePath = c.req.query("filePath")
   const conversationId = c.req.query("conversationId")
   if (!projectId || !filePath || !conversationId) {
     return c.json({ error: "projectId, filePath, conversationId required" }, 400)
   }
-  const { data: rows, error } = await sbSystem
+  const { data: rows, error } = await sb
     .from("file_comments")
     .select("*")
     .eq("project_id", projectId)
@@ -1426,7 +1426,7 @@ app.get("/api/file-comments", async (c) => {
   if (statusUpdates.length > 0) {
     void (async () => {
       for (const u of statusUpdates) {
-        await sbSystem!
+        await sb
           .from("file_comments")
           .update({
             status: u.status,
@@ -1442,7 +1442,7 @@ app.get("/api/file-comments", async (c) => {
 })
 
 app.post("/api/file-comments", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const body = await c.req.json<{
     userId?: string
     projectId?: string
@@ -1453,10 +1453,8 @@ app.post("/api/file-comments", async (c) => {
     /** Client-generated UUID used as the chat message row's id and as
      *  file_comments.message_id. Enables deterministic optimistic→canonical
      *  swap without waiting for a server round-trip. Generated server-side
-     *  if omitted. See docs/ARCHITECTURE-CLIENT-IDS.md. */
+     *  if omitted. */
     messageId?: string
-    /** Client-generated id for the file_comments row itself. Optional. */
-    commentId?: string
   }>().catch(() => ({}))
   const userId = c.get("userId")
   const projectId = body.projectId
@@ -1464,11 +1462,7 @@ app.post("/api/file-comments", async (c) => {
   const filePath = body.filePath
   const anchorStartLine = body.anchorStartLine
   const text = body.body?.trim()
-  const uuidRe = /^[0-9a-f-]{36}$/i
-  const messageId =
-    body.messageId && uuidRe.test(body.messageId) ? body.messageId : crypto.randomUUID()
-  const commentId =
-    body.commentId && uuidRe.test(body.commentId) ? body.commentId : crypto.randomUUID()
+  const messageId = body.messageId ?? crypto.randomUUID()
   if (!userId || !projectId || !conversationId || !filePath || !anchorStartLine || !text) {
     return c.json(
       { error: "userId, projectId, conversationId, filePath, anchorStartLine, body required" },
@@ -1498,7 +1492,7 @@ app.post("/api/file-comments", async (c) => {
   const runnerActive = runner && !runner.done
   const anchoredLine = snapshot.split("\n")[anchorStartLine - 1] ?? ""
   const chatText = `[comment on ${filePath}:${anchorStartLine}]\n> ${anchoredLine}\n\n${text}`
-  const { error: msgErr } = await sbSystem.from("messages").insert({
+  const { error: msgErr } = await sb.from("messages").insert({
     id: messageId,
     conversation_id: conversationId,
     role: "user",
@@ -1507,19 +1501,12 @@ app.post("/api/file-comments", async (c) => {
     attachments: [],
     delivered_at: runnerActive ? null : new Date().toISOString(),
   })
-  if (msgErr) {
-    // Idempotent retry on the message row — fine to continue, the id is
-    // already ours.
-    if ((msgErr as { code?: string }).code !== "23505") {
-      return c.json({ error: msgErr.message }, 500)
-    }
-  }
+  if (msgErr) return c.json({ error: msgErr.message }, 500)
 
   // 2) Insert the comment row now that the FK target exists.
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("file_comments")
     .insert({
-      id: commentId,
       project_id: projectId,
       file_path: filePath,
       body: text,
@@ -1536,24 +1523,13 @@ app.post("/api/file-comments", async (c) => {
     })
     .select()
     .single()
-  if (error) {
-    if ((error as { code?: string }).code === "23505") {
-      const { data: existing } = await sbSystem
-        .from("file_comments")
-        .select()
-        .eq("id", commentId)
-        .single()
-      if (existing) return c.json({ comment: dtoFromRow(existing as FileCommentRow), messageId })
-    }
-    return c.json({ error: error.message ?? "insert failed" }, 500)
-  }
-  if (!data) return c.json({ error: "insert failed" }, 500)
+  if (error || !data) return c.json({ error: error?.message ?? "insert failed" }, 500)
 
   // 3) Kick off a runner when none is active. `skipFirstUserInsert` because
   //    we already wrote the user message above. When a runner IS active, the
   //    nudge sweep in canUseTool picks up our `delivered_at=null` row.
   if (!runnerActive) {
-    const { data: conv } = await sbSystem
+    const { data: conv } = await sb
       .from("conversations")
       .select("session_id")
       .eq("id", conversationId)
@@ -1570,7 +1546,7 @@ app.post("/api/file-comments", async (c) => {
 })
 
 app.patch("/api/file-comments/:id", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const id = c.req.param("id")
   if (!id) return c.json({ error: "id required" }, 400)
   const body = await c.req.json<{ status?: string; body?: string }>().catch(() => ({}))
@@ -1583,7 +1559,7 @@ app.patch("/api/file-comments/:id", async (c) => {
   }
   if (typeof body.body === "string") patch.body = body.body.trim()
   if (Object.keys(patch).length === 0) return c.json({ error: "nothing to update" }, 400)
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("file_comments")
     .update(patch)
     .eq("id", id)
@@ -1766,7 +1742,7 @@ async function fileDiff(cwd: string, f: ChangedFile, baseRef: string | null = nu
 // git repo, which is used later as the base for per-conversation worktrees.
 // Falls back to worktree_mode = "shared" automatically for non-git dirs.
 app.post("/api/projects", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const body = await c.req.json<{
     userId?: string
     name?: string
@@ -1786,7 +1762,7 @@ app.post("/api/projects", async (c) => {
     : "shared"
   const defaultBaseRef = git ? await detectDefaultBaseRef(absCwd) : null
 
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("projects")
     .insert({
       user_id: userId,
@@ -1817,7 +1793,7 @@ app.get("/api/fs/git-info", async (c) => {
 // Falls back to shared mode (no worktree) if the project isn't a git repo or
 // if worktree creation fails — the conversation is always usable.
 app.post("/api/conversations", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const body = await c.req.json<{
     userId?: string
     projectId?: string
@@ -1842,13 +1818,12 @@ app.post("/api/conversations", async (c) => {
   // POST /api/conversations/:id/arm to provision the worktree and kick off
   // the first worker turn.
 
-  const { data: project, error: projErr } = await sbSystem
+  const { data: project, error: projErr } = await sb
     .from("projects")
     .select("id, user_id, cwd, worktree_mode, default_base_ref")
     .eq("id", projectId)
     .single()
   if (projErr || !project) return c.json({ error: "project not found" }, 404)
-  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   const insertRow: Record<string, unknown> = {
     id,
@@ -1867,7 +1842,7 @@ app.post("/api/conversations", async (c) => {
     if (typeof body.maxCostUsd === "number") insertRow.max_cost_usd = body.maxCostUsd
   }
 
-  const { data: conv, error: convErr } = await sbSystem
+  const { data: conv, error: convErr } = await sb
     .from("conversations")
     .insert(insertRow)
     .select()
@@ -1877,7 +1852,7 @@ app.post("/api/conversations", async (c) => {
     // of a create we already completed. Return the existing row so the
     // client's optimistic insert gets confirmed.
     if ((convErr as { code?: string })?.code === "23505") {
-      const { data: existing } = await sbSystem
+      const { data: existing } = await sb
         .from("conversations")
         .select("*")
         .eq("id", id)
@@ -1896,7 +1871,7 @@ app.post("/api/conversations", async (c) => {
 // kick off the first worker turn. Called by the fresh-task empty-state form
 // once the user types a goal and hits Start.
 app.post("/api/conversations/:id/arm", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const body = await c.req.json<{
     goal?: string
@@ -1906,7 +1881,7 @@ app.post("/api/conversations/:id/arm", async (c) => {
   const goal = body.goal?.trim()
   if (!goal) return c.json({ error: "goal required" }, 400)
 
-  const { data: conv, error: convErr } = await sbSystem
+  const { data: conv, error: convErr } = await sb
     .from("conversations")
     .select("id, kind, project_id, title, worktree_path")
     .eq("id", conversationId)
@@ -1914,7 +1889,7 @@ app.post("/api/conversations/:id/arm", async (c) => {
   if (convErr || !conv) return c.json({ error: "conversation not found" }, 404)
   if (conv.kind !== "task") return c.json({ error: "only tasks can be armed" }, 400)
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("cwd, worktree_mode, default_base_ref")
     .eq("id", conv.project_id)
@@ -1969,7 +1944,7 @@ app.post("/api/conversations/:id/arm", async (c) => {
     }
   }
 
-  const { data: updated, error: updErr } = await sbSystem
+  const { data: updated, error: updErr } = await sb
     .from("conversations")
     .update(updates)
     .eq("id", conversationId)
@@ -1998,10 +1973,10 @@ app.post("/api/conversations/:id/arm", async (c) => {
 // conversation becomes a normal back-and-forth until the user resolves it.
 // See docs/MERGE-FLOW.md.
 app.post("/api/conversations/:id/merge", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
 
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, title, kind, project_id, worktree_path, branch, base_ref, auto_loop_goal, session_id")
     .eq("id", conversationId)
@@ -2014,7 +1989,7 @@ app.post("/api/conversations/:id/merge", async (c) => {
     return c.json({ error: "conversation has no worktree to merge" }, 400)
   }
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("cwd")
     .eq("id", conv.project_id)
@@ -2034,7 +2009,7 @@ app.post("/api/conversations/:id/merge", async (c) => {
   // Record intent first so the UI can reflect the pending state even if the
   // runner takes a moment to start. shipped_at flipping is still what marks
   // success — merge_requested_at just means "we asked".
-  await sbSystem
+  await sb
     .from("conversations")
     .update({
       merge_requested_at: new Date().toISOString(),
@@ -2098,20 +2073,19 @@ app.post("/api/conversations/:id/merge", async (c) => {
 // with a <run-manifest>{…}</run-manifest> block that the post-turn reconcile
 // parses and saves to projects.run_manifest. See docs/RUNTIME-PROGRESS.md.
 app.post("/api/conversations/:id/detect-services", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
   const userId = c.get("userId")
 
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, user_id, project_id, session_id, worktree_path")
     .eq("id", conversationId)
     .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
-  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("cwd, run_manifest")
     .eq("id", conv.project_id)
@@ -2141,7 +2115,7 @@ app.post("/api/conversations/:id/detect-services", async (c) => {
     enabled?: boolean
   }> | null = null
   try {
-    const rows = await listProjectServices(sbSystem, conv.project_id as string)
+    const rows = await listProjectServices(sb, conv.project_id as string)
     if (rows.length > 0) {
       existingServices = rows.map((r) => ({
         name: r.name,
@@ -2195,7 +2169,7 @@ app.post("/api/conversations/:id/detect-services", async (c) => {
 // exit early on crash), snapshots logs + status, and injects a scripted
 // oneShot `role: "notice"` turn. Same pattern as /merge and /detect-services.
 app.post("/api/conversations/:id/verify-run", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const body = await c.req.json<{
     userId?: string
@@ -2207,13 +2181,12 @@ app.post("/api/conversations/:id/verify-run", async (c) => {
   const watchMs = Math.min(Math.max(body.watchMs ?? 8000, 2000), 30_000)
   if (!serviceId) return c.json({ error: "serviceId required" }, 400)
 
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, user_id, session_id")
     .eq("id", conversationId)
     .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
-  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   const initial = getService(serviceId, userId)
   if (!initial) return c.json({ error: "service not found" }, 404)
@@ -2315,9 +2288,9 @@ function buildMergeSystemPrompt(input: {
 // the agent refuses if the base HEAD has moved past the shipped commit or if
 // the shipped commit has been pushed. See docs/MERGE-FLOW.md § Revert.
 app.post("/api/conversations/:id/revert", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, title, kind, project_id, branch, base_ref, shipped_at, shipped_commit_sha, worktree_path")
     .eq("id", conversationId)
@@ -2327,7 +2300,7 @@ app.post("/api/conversations/:id/revert", async (c) => {
   if (!conv.shipped_at) return c.json({ error: "task is not shipped" }, 400)
   if (conv.worktree_path) return c.json({ error: "task still has a worktree — not in a revertible state" }, 400)
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("cwd, default_base_ref")
     .eq("id", conv.project_id)
@@ -2389,7 +2362,7 @@ app.post("/api/conversations/:id/revert", async (c) => {
   // worktree at these values. If the agent refuses (unsafe state), the row
   // stays in this "worktree back, not shipped" shape and the user can see
   // the refusal in chat.
-  await sbSystem
+  await sb
     .from("conversations")
     .update({
       shipped_at: null,
@@ -2541,9 +2514,9 @@ function shq(value: string): string {
 // a task whose worktree has uncommitted changes or whose branch has commits
 // the remote doesn't know about. Worktree-less rows return all-zero.
 app.get("/api/conversations/:id/discard-status", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("worktree_path, branch")
     .eq("id", conversationId)
@@ -2577,7 +2550,7 @@ app.get("/api/conversations/:id/discard-status", async (c) => {
     // since base_ref as "unpushed" so the user is warned before discard.
     hasUpstream = false
     try {
-      const { data: convFull } = await sbSystem
+      const { data: convFull } = await sb
         .from("conversations")
         .select("base_ref")
         .eq("id", conversationId)
@@ -2606,9 +2579,9 @@ app.get("/api/conversations/:id/discard-status", async (c) => {
 // the grace window expires. DELETE on the row itself is reserved for the
 // reaper's hard cleanup.
 app.delete("/api/conversations/:id", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("conversations")
     .update({ deleted_at: new Date().toISOString() })
     .eq("id", conversationId)
@@ -2621,9 +2594,9 @@ app.delete("/api/conversations/:id", async (c) => {
 // Pause a task: flip auto_loop_enabled off. The loop checks this at each
 // iteration boundary and will break cleanly after the current worker turn.
 app.post("/api/conversations/:id/pause", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("conversations")
     .update({ auto_loop_enabled: false })
     .eq("id", conversationId)
@@ -2637,9 +2610,9 @@ app.post("/api/conversations/:id/pause", async (c) => {
 // turn with a generic "continue" prompt so the evaluator drives next steps.
 // Worker session resumes via conversations.session_id, so context is intact.
 app.post("/api/conversations/:id/resume", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
-  const { data: conv, error } = await sbSystem
+  const { data: conv, error } = await sb
     .from("conversations")
     .update({ auto_loop_enabled: true })
     .eq("id", conversationId)
@@ -2663,9 +2636,9 @@ app.post("/api/conversations/:id/resume", async (c) => {
 })
 
 app.post("/api/conversations/:id/restore", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("conversations")
     .update({ deleted_at: null })
     .eq("id", conversationId)
@@ -2684,7 +2657,7 @@ app.post("/api/conversations/:id/restore", async (c) => {
 // inserted as immediately-delivered and a fresh runner is started — this
 // covers the race where a user "nudges" right as the previous turn ended.
 app.post("/api/messages/nudge", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const body = await c.req.json<{
     conversationId?: string
     text?: string
@@ -2709,7 +2682,7 @@ app.post("/api/messages/nudge", async (c) => {
     sizeBytes: a.sizeBytes,
   }))
 
-  const { data, error } = await sbSystem
+  const { data, error } = await sb
     .from("messages")
     .insert({
       id: messageId,
@@ -2729,7 +2702,7 @@ app.post("/api/messages/nudge", async (c) => {
     // Idempotent retry — return the existing row so the client's optimistic
     // row gets confirmed instead of orphaned.
     if ((error as { code?: string }).code === "23505") {
-      const { data: existing } = await sbSystem
+      const { data: existing } = await sb
         .from("messages")
         .select()
         .eq("id", messageId)
@@ -2742,7 +2715,7 @@ app.post("/api/messages/nudge", async (c) => {
 
   if (!runnerActive) {
     // No turn in flight — promote to a normal turn.
-    const { data: conv } = await sbSystem
+    const { data: conv } = await sb
       .from("conversations")
       .select("session_id")
       .eq("id", conversationId)
@@ -3409,6 +3382,7 @@ function sanitizeOverride(raw: unknown): ManifestOverride | null {
 }
 
 app.post("/api/services/start", async (c) => {
+  const sb = c.get("sb")
   const body = await c.req.json<{
     userId?: string
     projectId?: string
@@ -3525,17 +3499,17 @@ app.post("/api/services/start", async (c) => {
     // Persist assigned_port so localhost:<port> stays stable across restarts.
     // Write to the service row (forward path); also mirror to conversations
     // for one release so existing readers of conv.assigned_port don't regress.
-    if (sbSystem && snap.port && ctx.serviceRow && ctx.serviceRow.assigned_port !== snap.port) {
+    if (sb && snap.port && ctx.serviceRow && ctx.serviceRow.assigned_port !== snap.port) {
       try {
-        await patchProjectService(sbSystem, projectId, serviceName, {
+        await patchProjectService(sb, projectId, serviceName, {
           assigned_port: snap.port,
         })
       } catch (err) {
         console.warn("[services.start] failed to persist assigned_port on service row:", err)
       }
     }
-    if (conversationId && sbSystem && ctx.assignedPort !== snap.port) {
-      await sbSystem
+    if (conversationId && sb && ctx.assignedPort !== snap.port) {
+      await sb
         .from("conversations")
         .update({ assigned_port: snap.port })
         .eq("id", conversationId)
@@ -3605,21 +3579,20 @@ app.get("/api/projects/:id/manifest", async (c) => {
 })
 
 app.put("/api/projects/:id/manifest", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; manifest?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
   const manifest = sanitizeManifest(body.manifest)
   if (!manifest) return c.json({ error: "invalid manifest — need at least { start: string }" }, 400)
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("id, user_id")
     .eq("id", projectId)
     .single()
   if (!project) return c.json({ error: "project not found" }, 404)
-  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   const toStore: Record<string, unknown> = { ...manifest }
   delete toStore.cwd // never store cwd; always derived at run time
@@ -3627,11 +3600,11 @@ app.put("/api/projects/:id/manifest", async (c) => {
   // Forward path: write to project_services[default]. Mirror to the legacy
   // projects.run_manifest column for one release so rollback is safe.
   try {
-    await upsertProjectService(sbSystem, projectId, writeFromManifest("default", manifest))
+    await upsertProjectService(sb, projectId, writeFromManifest("default", manifest))
   } catch (err) {
     return c.json({ error: `failed to save service: ${(err as Error).message}` }, 500)
   }
-  const { error } = await sbSystem
+  const { error } = await sb
     .from("projects")
     .update({ run_manifest: toStore })
     .eq("id", projectId)
@@ -3640,25 +3613,24 @@ app.put("/api/projects/:id/manifest", async (c) => {
 })
 
 app.delete("/api/projects/:id/manifest", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const userId = c.get("userId")
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("id, user_id")
     .eq("id", projectId)
     .single()
   if (!project) return c.json({ error: "project not found" }, 404)
-  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   // Delete the default service row and clear the legacy column together.
   try {
-    await deleteProjectService(sbSystem, projectId, "default")
+    await deleteProjectService(sb, projectId, "default")
   } catch (err) {
     console.warn("[manifest] delete default service row failed:", err)
   }
-  const { error } = await sbSystem
+  const { error } = await sb
     .from("projects")
     .update({ run_manifest: null })
     .eq("id", projectId)
@@ -3734,15 +3706,17 @@ function sanitizeServiceWrite(raw: unknown, fallbackName?: string): ProjectServi
 }
 
 app.get("/api/projects/:id/services", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
-  const rows = await listProjectServices(sbSystem!, projectId)
+  const rows = await listProjectServices(sb, projectId)
   return c.json({ services: rows })
 })
 
 app.post("/api/projects/:id/services", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
@@ -3753,10 +3727,10 @@ app.post("/api/projects/:id/services", async (c) => {
   if (!write) return c.json({ error: "invalid service — need at least { name, start }" }, 400)
 
   // Reject collisions — POST is strictly create; use PUT to update.
-  const existing = await getProjectService(sbSystem!, projectId, write.name)
+  const existing = await getProjectService(sb, projectId, write.name)
   if (existing) return c.json({ error: `service '${write.name}' already exists` }, 409)
   try {
-    const row = await upsertProjectService(sbSystem!, projectId, write)
+    const row = await upsertProjectService(sb, projectId, write)
     return c.json(row)
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500)
@@ -3774,6 +3748,7 @@ app.post("/api/projects/:id/services", async (c) => {
 // "service not found". Same reason /api/services/runners sits before
 // /api/services/:id further down.
 app.get("/api/projects/:id/services/detect", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const userId = c.get("userId")
   const conversationId = c.req.query("conversationId") || undefined
@@ -3782,7 +3757,7 @@ app.get("/api/projects/:id/services/detect", async (c) => {
 
   // Resolve cwd: prefer the conversation's worktree when present so a task's
   // monorepo view shows what the user has actually built in it.
-  const { data: project } = await sbSystem!
+  const { data: project } = await sb
     .from("projects")
     .select("cwd")
     .eq("id", projectId)
@@ -3790,7 +3765,7 @@ app.get("/api/projects/:id/services/detect", async (c) => {
   if (!project) return c.json({ error: "project not found" }, 404)
   let cwd = resolveProjectCwd(project.cwd)
   if (conversationId) {
-    const { data: conv } = await sbSystem!
+    const { data: conv } = await sb
       .from("conversations")
       .select("worktree_path, project_id")
       .eq("id", conversationId)
@@ -3802,7 +3777,7 @@ app.get("/api/projects/:id/services/detect", async (c) => {
 
   const [candidates, existing] = await Promise.all([
     detectAllServices(cwd).catch(() => [] as Awaited<ReturnType<typeof detectAllServices>>),
-    listProjectServices(sbSystem!, projectId).catch(() => [] as ProjectServiceRow[]),
+    listProjectServices(sb, projectId).catch(() => [] as ProjectServiceRow[]),
   ])
   const existingByName = new Set(existing.map((r) => r.name))
 
@@ -3825,13 +3800,14 @@ app.get("/api/projects/:id/services/detect", async (c) => {
 // POST /api/conversations/:id/detect-services — that one runs inside the
 // chat's runner and reconcile auto-saves after the turn.
 app.post("/api/projects/:id/services/detect-llm", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; conversationId?: string }>().catch(() => ({}))
   const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
-  const { data: project } = await sbSystem!
+  const { data: project } = await sb
     .from("projects")
     .select("cwd")
     .eq("id", projectId)
@@ -3839,7 +3815,7 @@ app.post("/api/projects/:id/services/detect-llm", async (c) => {
   if (!project) return c.json({ error: "project not found" }, 404)
   let cwd = resolveProjectCwd(project.cwd)
   if (body.conversationId) {
-    const { data: conv } = await sbSystem!
+    const { data: conv } = await sb
       .from("conversations")
       .select("worktree_path, project_id")
       .eq("id", body.conversationId)
@@ -3853,7 +3829,7 @@ app.post("/api/projects/:id/services/detect-llm", async (c) => {
   // rather than duplicates. Empty list = first-time setup.
   let existing: Array<{ name: string; stack: string; start: string; port?: number | null }> = []
   try {
-    const rows = await listProjectServices(sbSystem!, projectId)
+    const rows = await listProjectServices(sb, projectId)
     existing = rows.map((r) => ({
       name: r.name,
       stack: r.stack,
@@ -3887,17 +3863,19 @@ app.post("/api/projects/:id/services/detect-llm", async (c) => {
 })
 
 app.get("/api/projects/:id/services/:name", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const name = c.req.param("name")
   const userId = c.get("userId")
   const auth = await authorizeProject(projectId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
-  const row = await getProjectService(sbSystem!, projectId, name)
+  const row = await getProjectService(sb, projectId, name)
   if (!row) return c.json({ error: "service not found" }, 404)
   return c.json(row)
 })
 
 app.put("/api/projects/:id/services/:name", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const name = c.req.param("name")
   const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
@@ -3911,7 +3889,7 @@ app.put("/api/projects/:id/services/:name", async (c) => {
   write.name = name
 
   try {
-    const row = await upsertProjectService(sbSystem!, projectId, write)
+    const row = await upsertProjectService(sb, projectId, write)
     // Keep legacy column mirrored for the default service during rollout so
     // downstream readers we haven't migrated yet see the same data.
     if (name === "default") {
@@ -3924,7 +3902,7 @@ app.put("/api/projects/:id/services/:name", async (c) => {
       if (row.port != null) manifestShape.port = row.port
       if (row.dockerfile) manifestShape.dockerfile = row.dockerfile
       if (row.healthcheck) manifestShape.healthcheck = row.healthcheck
-      await sbSystem!
+      await sb
         .from("projects")
         .update({ run_manifest: manifestShape })
         .eq("id", projectId)
@@ -3936,6 +3914,7 @@ app.put("/api/projects/:id/services/:name", async (c) => {
 })
 
 app.delete("/api/projects/:id/services/:name", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const name = c.req.param("name")
   const userId = c.get("userId")
@@ -3943,9 +3922,9 @@ app.delete("/api/projects/:id/services/:name", async (c) => {
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
 
   try {
-    await deleteProjectService(sbSystem!, projectId, name)
+    await deleteProjectService(sb, projectId, name)
     if (name === "default") {
-      await sbSystem!.from("projects").update({ run_manifest: null }).eq("id", projectId)
+      await sb.from("projects").update({ run_manifest: null }).eq("id", projectId)
     }
     return c.json({ ok: true })
   } catch (err) {
@@ -3959,18 +3938,17 @@ app.delete("/api/projects/:id/services/:name", async (c) => {
 // framework conventions, etc.). Does NOT persist — caller saves via PUT after
 // the user confirms.
 app.post("/api/projects/:id/manifest/detect-llm", async (c) => {
+  const sb = c.get("sb")
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))
   const userId = c.get("userId")
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
-  const { data: project } = await sbSystem
+  const { data: project } = await sb
     .from("projects")
     .select("id, user_id, cwd")
     .eq("id", projectId)
     .single()
   if (!project) return c.json({ error: "project not found" }, 404)
-  if (project.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   const cwd = resolveProjectCwd(project.cwd)
 
@@ -3999,17 +3977,16 @@ app.post("/api/projects/:id/manifest/detect-llm", async (c) => {
 })
 
 app.get("/api/conversations/:id/manifest", async (c) => {
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const userId = c.get("userId")
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, user_id, project_id, worktree_path, run_manifest_override, assigned_port")
     .eq("id", conversationId)
     .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
-  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
   const ctx = await loadManifestContext(userId, conv.project_id as string, conversationId)
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
@@ -4037,23 +4014,22 @@ app.get("/api/conversations/:id/manifest", async (c) => {
 })
 
 app.put("/api/conversations/:id/manifest-override", async (c) => {
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
   const override = sanitizeOverride(body.override)
   if (!override) return c.json({ error: "invalid override — need at least one manifest field" }, 400)
 
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, user_id")
     .eq("id", conversationId)
     .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
-  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
-  const { error } = await sbSystem
+  const { error } = await sb
     .from("conversations")
     .update({ run_manifest_override: override })
     .eq("id", conversationId)
@@ -4062,19 +4038,18 @@ app.put("/api/conversations/:id/manifest-override", async (c) => {
 })
 
 app.delete("/api/conversations/:id/manifest-override", async (c) => {
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const userId = c.get("userId")
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
-  const { data: conv } = await sbSystem
+  const { data: conv } = await sb
     .from("conversations")
     .select("id, user_id")
     .eq("id", conversationId)
     .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
-  if (conv.user_id !== userId) return c.json({ error: "forbidden" }, 403)
 
-  const { error } = await sbSystem
+  const { error } = await sb
     .from("conversations")
     .update({ run_manifest_override: null })
     .eq("id", conversationId)
@@ -4103,16 +4078,18 @@ async function authorizeConversation(
 }
 
 app.get("/api/conversations/:id/services/:name/override", async (c) => {
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
   const userId = c.get("userId")
   const auth = await authorizeConversation(conversationId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
-  const override = await getConversationServiceOverride(sbSystem!, conversationId, serviceName)
+  const override = await getConversationServiceOverride(sb, conversationId, serviceName)
   return c.json({ override })
 })
 
 app.put("/api/conversations/:id/services/:name/override", async (c) => {
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
   const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
@@ -4124,7 +4101,7 @@ app.put("/api/conversations/:id/services/:name/override", async (c) => {
   if (!override) return c.json({ error: "invalid override — need at least one manifest field" }, 400)
 
   try {
-    await setConversationServiceOverride(sbSystem!, conversationId, serviceName, override)
+    await setConversationServiceOverride(sb, conversationId, serviceName, override)
     return c.json({ ok: true, override })
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500)
@@ -4132,13 +4109,14 @@ app.put("/api/conversations/:id/services/:name/override", async (c) => {
 })
 
 app.delete("/api/conversations/:id/services/:name/override", async (c) => {
+  const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
   const userId = c.get("userId")
   const auth = await authorizeConversation(conversationId, userId)
   if (!auth.ok) return c.json({ error: auth.error }, auth.status)
   try {
-    await setConversationServiceOverride(sbSystem!, conversationId, serviceName, null)
+    await setConversationServiceOverride(sb, conversationId, serviceName, null)
     return c.json({ ok: true })
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500)
@@ -4293,7 +4271,7 @@ async function loadIntegrationToken(
 }
 
 app.post("/api/integrations/railway/connect", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const body = await c.req.json<{ userId?: string; token?: string }>().catch(() => ({}))
   const userId = c.get("userId")
   const token = body.token?.trim()
@@ -4322,7 +4300,7 @@ app.post("/api/integrations/railway/connect", async (c) => {
     email: me.email,
     name: me.name,
   }
-  const { error } = await sbSystem
+  const { error } = await sb
     .from("user_integrations")
     .upsert(
       {
@@ -4344,9 +4322,9 @@ app.post("/api/integrations/railway/connect", async (c) => {
 })
 
 app.get("/api/integrations/railway", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const userId = c.get("userId")
-  const { data } = await sbSystem
+  const { data } = await sb
     .from("user_integrations")
     .select("provider, account, connected_at, updated_at")
     .eq("user_id", userId)
@@ -4357,9 +4335,9 @@ app.get("/api/integrations/railway", async (c) => {
 })
 
 app.delete("/api/integrations/railway", async (c) => {
-  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+  const sb = c.get("sb")
   const userId = c.get("userId")
-  const { error } = await sbSystem
+  const { error } = await sb
     .from("user_integrations")
     .delete()
     .eq("user_id", userId)
