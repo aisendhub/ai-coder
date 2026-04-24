@@ -927,7 +927,9 @@ async function reconcileMergeIfCompleted(conversationId: string): Promise<void> 
 // HTTP
 // ─────────────────────────────────────────────────────────────────────────────
 
-const app = new Hono()
+type AuthEnv = { Variables: { userId: string } }
+
+const app = new Hono<AuthEnv>()
 
 app.get("/api/health", (c) =>
   c.json({
@@ -937,6 +939,29 @@ app.get("/api/health", (c) =>
     runners: runners.size,
   })
 )
+
+// Require a valid Supabase JWT on every /api/* route except /api/health.
+// Token can arrive as Authorization: Bearer <jwt> (preferred) or as
+// ?access_token=<jwt> in the query string — the latter is the standard
+// workaround for EventSource, which can't set request headers.
+// JWT-in-URL leaks to access logs and browser history; Supabase access
+// tokens are ~1h TTL so blast radius is small, but anything more sensitive
+// should move to fetch-based SSE so it can use the header path.
+app.use("/api/*", async (c, next) => {
+  if (c.req.path === "/api/health") return next()
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+
+  const auth = c.req.header("Authorization") ?? ""
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : ""
+  const token = bearer || c.req.query("access_token") || ""
+  if (!token) return c.json({ error: "unauthorized" }, 401)
+
+  const { data, error } = await sb.auth.getUser(token)
+  if (error || !data.user) return c.json({ error: "unauthorized" }, 401)
+
+  c.set("userId", data.user.id)
+  await next()
+})
 
 // SSE for git changes — scoped to a conversation's project cwd.
 app.get("/api/changes/stream", (c) => {
@@ -1234,6 +1259,215 @@ app.get("/api/blame", async (c) => {
     }
     return c.json({ error: msg }, 500)
   }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File comments — line-anchored, per-project, snapshot+diff re-anchored.
+// Scope: comments are owned by `projects.id`, but reads/writes both need a
+// conversationId so we can read current file content from the conversation's
+// cwd (task worktrees have their own content). See docs/FILE-ANNOTATIONS.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type FileCommentRow = {
+  id: string
+  project_id: string
+  file_path: string
+  body: string
+  status: "open" | "resolved" | "outdated"
+  anchor_start_line: number
+  anchor_block_length: number
+  anchor_snapshot: string
+  resolved_line: number | null
+  resolved_at: string | null
+  resolved_confidence: "exact" | "shifted" | "outdated" | null
+  conversation_id: string | null
+  message_id: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+/** Shape returned to the client — omits `anchor_snapshot` (large, server-only). */
+type FileCommentDTO = Omit<FileCommentRow, "anchor_snapshot"> & {
+  anchor_preview: string // the snapshot line at anchor_start_line, for the drawer
+}
+
+function dtoFromRow(row: FileCommentRow): FileCommentDTO {
+  const lines = row.anchor_snapshot.split("\n")
+  const preview = lines[row.anchor_start_line - 1] ?? ""
+  const { anchor_snapshot: _snapshot, ...rest } = row
+  return { ...rest, anchor_preview: preview }
+}
+
+// Capture file content at insert + re-resolve on every GET. Read uses
+// `cwdForConversation` so task-worktree-scoped reads work out of the box.
+async function readFileForConversation(
+  conversationId: string,
+  relPath: string,
+): Promise<string | null> {
+  try {
+    const cwd = await cwdForConversation(conversationId)
+    const abs = resolve(cwd, relPath)
+    if (!abs.startsWith(cwd + "/") && abs !== cwd) return null
+    return await fsp.readFile(abs, "utf8")
+  } catch {
+    return null
+  }
+}
+
+app.get("/api/file-comments", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const projectId = c.req.query("projectId")
+  const filePath = c.req.query("filePath")
+  const conversationId = c.req.query("conversationId")
+  if (!projectId || !filePath || !conversationId) {
+    return c.json({ error: "projectId, filePath, conversationId required" }, 400)
+  }
+  const { data: rows, error } = await sb
+    .from("file_comments")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("file_path", filePath)
+    .order("created_at", { ascending: true })
+  if (error) return c.json({ error: error.message }, 500)
+  const current = (await readFileForConversation(conversationId, filePath)) ?? ""
+
+  const { resolveAnchor } = await import("./file-comments-resolver.ts")
+  const dtos: FileCommentDTO[] = []
+  const statusUpdates: { id: string; status: FileCommentRow["status"]; line: number | null; conf: string | null }[] = []
+  for (const r of (rows ?? []) as FileCommentRow[]) {
+    const res = resolveAnchor(
+      r.anchor_snapshot,
+      current,
+      r.anchor_start_line,
+      r.anchor_block_length,
+    )
+    // New status: auto-shift open<->outdated based on resolution. Keep
+    // `resolved` sticky — user already marked it handled.
+    let nextStatus: FileCommentRow["status"] = r.status
+    if (r.status !== "resolved") {
+      nextStatus = res.confidence === "outdated" ? "outdated" : "open"
+    }
+    const next: FileCommentRow = {
+      ...r,
+      resolved_line: res.resolvedLine,
+      resolved_confidence: res.confidence,
+      status: nextStatus,
+    }
+    dtos.push(dtoFromRow(next))
+    if (
+      r.resolved_line !== res.resolvedLine ||
+      r.resolved_confidence !== res.confidence ||
+      r.status !== nextStatus
+    ) {
+      statusUpdates.push({
+        id: r.id,
+        status: nextStatus,
+        line: res.resolvedLine,
+        conf: res.confidence,
+      })
+    }
+  }
+  // Fire-and-forget cache update of resolved_* fields. Not awaited — the
+  // returned DTOs already have the fresh values.
+  if (statusUpdates.length > 0) {
+    void (async () => {
+      for (const u of statusUpdates) {
+        await sb!
+          .from("file_comments")
+          .update({
+            status: u.status,
+            resolved_line: u.line,
+            resolved_confidence: u.conf,
+            resolved_at: new Date().toISOString(),
+          })
+          .eq("id", u.id)
+      }
+    })()
+  }
+  return c.json({ comments: dtos })
+})
+
+app.post("/api/file-comments", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const body = await c.req.json<{
+    userId?: string
+    projectId?: string
+    conversationId?: string
+    filePath?: string
+    anchorStartLine?: number
+    body?: string
+  }>().catch(() => ({}))
+  const userId = body.userId
+  const projectId = body.projectId
+  const conversationId = body.conversationId
+  const filePath = body.filePath
+  const anchorStartLine = body.anchorStartLine
+  const text = body.body?.trim()
+  if (!userId || !projectId || !conversationId || !filePath || !anchorStartLine || !text) {
+    return c.json(
+      { error: "userId, projectId, conversationId, filePath, anchorStartLine, body required" },
+      400,
+    )
+  }
+
+  const { normalizeContent } = await import("./file-comments-resolver.ts")
+  const fileContent = await readFileForConversation(conversationId, filePath)
+  if (fileContent === null) return c.json({ error: "file not readable" }, 404)
+  const snapshot = normalizeContent(fileContent)
+  const lineCount = snapshot.split("\n").length
+  if (anchorStartLine < 1 || anchorStartLine > lineCount) {
+    return c.json({ error: "anchorStartLine out of range" }, 400)
+  }
+  // Block = target + up to 1 line before + 1 line after, clamped to file bounds.
+  const blockStart = Math.max(1, anchorStartLine - 1)
+  const blockEnd = Math.min(lineCount, anchorStartLine + 1)
+  const blockLength = blockEnd - blockStart + 1
+
+  const { data, error } = await sb
+    .from("file_comments")
+    .insert({
+      project_id: projectId,
+      file_path: filePath,
+      body: text,
+      status: "open",
+      anchor_start_line: blockStart,
+      anchor_block_length: blockLength,
+      anchor_snapshot: snapshot,
+      resolved_line: anchorStartLine,
+      resolved_at: new Date().toISOString(),
+      resolved_confidence: "exact",
+      conversation_id: conversationId,
+      created_by: userId,
+    })
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "insert failed" }, 500)
+  return c.json({ comment: dtoFromRow(data as FileCommentRow) })
+})
+
+app.patch("/api/file-comments/:id", async (c) => {
+  if (!sb) return c.json({ error: "persistence disabled" }, 503)
+  const id = c.req.param("id")
+  if (!id) return c.json({ error: "id required" }, 400)
+  const body = await c.req.json<{ status?: string; body?: string }>().catch(() => ({}))
+  const patch: { status?: string; body?: string } = {}
+  if (body.status) {
+    if (!["open", "resolved", "outdated"].includes(body.status)) {
+      return c.json({ error: "invalid status" }, 400)
+    }
+    patch.status = body.status
+  }
+  if (typeof body.body === "string") patch.body = body.body.trim()
+  if (Object.keys(patch).length === 0) return c.json({ error: "nothing to update" }, 400)
+  const { data, error } = await sb
+    .from("file_comments")
+    .update(patch)
+    .eq("id", id)
+    .select()
+    .single()
+  if (error || !data) return c.json({ error: error?.message ?? "update failed" }, 500)
+  return c.json({ comment: dtoFromRow(data as FileCommentRow) })
 })
 
 // Directory listing scoped to the conversation's cwd. Used by the file-tree
