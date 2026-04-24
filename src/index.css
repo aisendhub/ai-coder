@@ -182,11 +182,12 @@
     background: transparent;
 }
 
-/* Shiki dual-theme: pick light vars by default, dark vars under .dark */
+/* Shiki dual-theme: pick light vars by default, dark vars under .dark.
+ * Token foreground only — the container inherits the panel's own bg so the
+ * code area matches the surrounding chrome instead of the theme's bg color. */
 .shiki,
 .shiki span {
     color: var(--shiki-light);
-    background-color: var(--shiki-light-bg);
     font-style: var(--shiki-light-font-style);
     font-weight: var(--shiki-light-font-weight);
     text-decoration: var(--shiki-light-text-decoration);
@@ -194,8 +195,37 @@
 .dark .shiki,
 .dark .shiki span {
     color: var(--shiki-dark);
-    background-color: var(--shiki-dark-bg);
     font-style: var(--shiki-dark-font-style);
     font-weight: var(--shiki-dark-font-weight);
     text-decoration: var(--shiki-dark-text-decoration);
+}
+
+/* File panel line numbers: faint counter rendered via ::before on each
+ * Shiki .line span. Hovered line brightens via pure CSS. Relies on the
+ * wrapping <pre> carrying enough left padding to fit the number column
+ * (~2.5rem in the current file-panel layout). */
+.file-code .shiki {
+    counter-reset: line;
+}
+.file-code .line {
+    counter-increment: line;
+    position: relative;
+}
+.file-code .line::before {
+    content: counter(line);
+    position: absolute;
+    right: 100%;
+    margin-right: 0.5rem;
+    top: 0;
+    width: 2rem;
+    text-align: right;
+    color: var(--muted-foreground);
+    opacity: 0.35;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    transition: opacity 120ms, color 120ms;
+}
+.file-code .line:hover::before {
+    opacity: 1;
+    color: var(--foreground);
 }

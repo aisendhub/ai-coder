@@ -1,3 +1,5 @@
+// test change — verify file-panel gutter shows "modified" (amber) not all-added (green)
+// test change — second line to confirm adjacent-line modified detection
 import { useEffect, useRef, useState } from "react"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
@@ -85,6 +87,7 @@ function DesktopLayout() {
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [fileTreeOpen, setFileTreeOpen] = usePersistentState("ai-coder:panels:fileTreeOpen", false)
+  const [blameEnabled, setBlameEnabled] = usePersistentState("ai-coder:panels:blameEnabled", false)
   // When the agent's reply drops a <run-services> block, open the services
   // panel automatically so the user sees the pick-list without hunting for
   // it. The panel itself listens for the same event to open the picker +
@@ -94,6 +97,13 @@ function DesktopLayout() {
     window.addEventListener("ai-coder:services-proposed", onProposed)
     return () => window.removeEventListener("ai-coder:services-proposed", onProposed)
   }, [setServicesOpen])
+  // "Open in git log" (fired from the file-panel blame accordion) auto-opens
+  // the right/changes panel so the git-log section is actually mounted.
+  useEffect(() => {
+    const onOpen = () => setRightOpen(true)
+    window.addEventListener("ai-coder:open-git-log", onOpen)
+    return () => window.removeEventListener("ai-coder:open-git-log", onOpen)
+  }, [setRightOpen])
   // Section promotion: when promoted, a section lives in its own dockable
   // side panel instead of inside its parent accordion. Fullscreen is a
   // separate axis — a promoted section can also be fullscreened and returns
@@ -182,6 +192,8 @@ function DesktopLayout() {
                 onServicesOpenChange={setServicesOpen}
                 fileTreeOpen={fileTreeOpen}
                 onFileTreeOpenChange={setFileTreeOpen}
+                blameEnabled={blameEnabled}
+                onBlameEnabledChange={setBlameEnabled}
               />
               <div className="flex-1 min-h-0 overflow-hidden">
                 <ChatPanel />
@@ -295,7 +307,7 @@ function DesktopLayout() {
               </ResizablePanel>
             </>
           )}
-          <FilePanelSlot />
+          <FilePanelSlot blameEnabled={blameEnabled} />
         </ResizablePanelGroup>
         {gitLogFullscreen && (
           <FullscreenOverlay onExit={() => setGitLogFullscreen(false)}>
@@ -354,6 +366,8 @@ function MobileLayout() {
             onServicesOpenChange={setServicesOpen}
             fileTreeOpen={fileTreeOpen}
             onFileTreeOpenChange={setFileTreeOpen}
+            blameEnabled={false}
+            onBlameEnabledChange={() => {}}
           />
           <div className="flex-1 min-h-0 overflow-hidden">
             <ChatPanel />

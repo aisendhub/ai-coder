@@ -100,6 +100,29 @@ export const GitLogSection = observer(function GitLogSection({
     return () => window.removeEventListener("ai-coder:turn-done", onTurnDone)
   }, [expanded, fetchLog])
 
+  // Incoming "focus this commit" request (from the file-panel blame accordion).
+  // Sticky — if the list isn't loaded yet, we keep the sha and scroll once
+  // the row renders.
+  const listRef = useRef<HTMLDivElement>(null)
+  const [highlightedSha, setHighlightedSha] = useState<string | null>(null)
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const sha = (e as CustomEvent<{ sha: string }>).detail?.sha
+      if (sha) setHighlightedSha(sha)
+    }
+    window.addEventListener("ai-coder:focus-commit", onFocus)
+    return () => window.removeEventListener("ai-coder:focus-commit", onFocus)
+  }, [])
+  useEffect(() => {
+    if (!highlightedSha || !expanded) return
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-sha="${highlightedSha}"]`
+    )
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" })
+    const timer = setTimeout(() => setHighlightedSha(null), 2000)
+    return () => clearTimeout(timer)
+  }, [highlightedSha, expanded, commits])
+
   // Ghost mode: this section has been promoted elsewhere; show only a stub
   // in its original spot so the user can find their way back.
   if (ghost) {
@@ -216,9 +239,13 @@ export const GitLogSection = observer(function GitLogSection({
               No commits yet.
             </div>
           )}
-          <div className="flex flex-col">
+          <div ref={listRef} className="flex flex-col">
             {commits.map((c) => (
-              <CommitRow key={c.sha} commit={c} />
+              <CommitRow
+                key={c.sha}
+                commit={c}
+                highlighted={highlightedSha === c.sha}
+              />
             ))}
           </div>
         </ScrollArea>
@@ -227,7 +254,13 @@ export const GitLogSection = observer(function GitLogSection({
   )
 })
 
-function CommitRow({ commit }: { commit: Commit }) {
+function CommitRow({
+  commit,
+  highlighted,
+}: {
+  commit: Commit
+  highlighted?: boolean
+}) {
   const copy = async (e: React.MouseEvent) => {
     e.stopPropagation()
     try {
@@ -239,7 +272,13 @@ function CommitRow({ commit }: { commit: Commit }) {
   }
 
   return (
-    <div className="group/commit flex items-start gap-2 px-3 py-2 border-b border-border/40 hover:bg-accent/30">
+    <div
+      data-sha={commit.sha}
+      className={cn(
+        "group/commit flex items-start gap-2 px-3 py-2 border-b border-border/40 hover:bg-accent/30 transition-colors",
+        highlighted && "bg-accent/50 ring-1 ring-primary/60"
+      )}
+    >
       <div className="shrink-0 flex flex-col items-center pt-0.5">
         <code className="text-[10px] font-mono text-muted-foreground">{commit.shortSha}</code>
       </div>

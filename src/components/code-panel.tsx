@@ -57,6 +57,15 @@ export const CodePanel = observer(function CodePanel({
   const toggleChanges = () => setChangesOpen((v) => !v)
   const toggleGitLog = () => setGitLogOpen((v) => !v)
 
+  // External "focus this commit" request (from the blame accordion) implies
+  // the git log section should be open. App.tsx handles opening the outer
+  // right panel; we handle expanding this section.
+  useEffect(() => {
+    const onOpen = () => setGitLogOpen(true)
+    window.addEventListener("ai-coder:open-git-log", onOpen)
+    return () => window.removeEventListener("ai-coder:open-git-log", onOpen)
+  }, [setGitLogOpen])
+
   if (collapsed) {
     // Narrow rail — accordions don't make sense. Show just the Changes rail.
     return <ChangesSection collapsed onClose={onClose} />

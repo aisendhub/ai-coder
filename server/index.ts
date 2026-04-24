@@ -1101,6 +1101,141 @@ app.get("/api/git/log", async (c) => {
   }
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// `git blame` per-line authorship for the file panel's blame rail.
+// Scoped to a conversation's cwd (worktree-aware via cwdForConversation).
+// Response is cached in-memory keyed by (cwd, path); the chokidar watcher
+// invalidates cache entries when the file changes. Uncommitted lines get
+// isUncommitted=true (git reports all-zero SHA for working-tree changes).
+// ─────────────────────────────────────────────────────────────────────────────
+
+type BlameLine = {
+  line: number
+  sha: string
+  shortSha: string
+  author: string
+  authorMail: string
+  committerTime: number // ms since epoch
+  summary: string
+  isUncommitted: boolean
+}
+type BlameResult = { cwd: string; path: string; lines: BlameLine[] }
+
+const BLAME_CACHE_MAX = 200
+const blameCache = new Map<string, BlameResult>()
+const blameWatchedCwds = new Set<string>()
+
+function blameCacheKey(cwd: string, path: string): string {
+  return `${cwd}\0${path}`
+}
+
+function invalidateBlameForCwd(cwd: string, relPath: string) {
+  blameCache.delete(blameCacheKey(cwd, relPath))
+}
+
+// Subscribe the per-cwd watcher bus once, so "changed" events clear blame cache
+// entries for the matching file. Idempotent — safe to call on every request.
+function ensureBlameWatcher(cwd: string) {
+  if (blameWatchedCwds.has(cwd)) return
+  const { bus } = getWatcher(cwd)
+  bus.on("changed", ({ path: changedPath }: { path: string; at: number }) => {
+    // chokidar emits absolute paths; blame is keyed by path relative to cwd.
+    const rel = changedPath.startsWith(cwd + "/") ? changedPath.slice(cwd.length + 1) : changedPath
+    invalidateBlameForCwd(cwd, rel)
+  })
+  blameWatchedCwds.add(cwd)
+}
+
+function parseBlamePorcelain(stdout: string): BlameLine[] {
+  // Porcelain format: each line produces a block starting with
+  //   `<sha> <origLine> <finalLine> [<groupSize>]`
+  // followed by optional header lines (author, author-mail, committer-time,
+  // summary, etc.) and a final `\t<code content>` line. Subsequent blocks
+  // from the same commit omit the header lines.
+  const out: BlameLine[] = []
+  const commits = new Map<
+    string,
+    { author: string; authorMail: string; committerTime: number; summary: string }
+  >()
+  const lines = stdout.split("\n")
+  let i = 0
+  while (i < lines.length) {
+    const header = lines[i]
+    if (!/^[0-9a-f]{40} /.test(header)) {
+      i++
+      continue
+    }
+    const [sha, , finalStr] = header.split(" ")
+    const finalLine = parseInt(finalStr, 10)
+    const isUncommitted = /^0{40}$/.test(sha)
+    let author = commits.get(sha)?.author ?? ""
+    let authorMail = commits.get(sha)?.authorMail ?? ""
+    let committerTime = commits.get(sha)?.committerTime ?? 0
+    let summary = commits.get(sha)?.summary ?? ""
+    i++
+    while (i < lines.length && !lines[i].startsWith("\t")) {
+      const line = lines[i]
+      if (line.startsWith("author ")) author = line.slice(7)
+      else if (line.startsWith("author-mail ")) authorMail = line.slice(12).replace(/^<|>$/g, "")
+      else if (line.startsWith("committer-time ")) committerTime = parseInt(line.slice(15), 10) * 1000
+      else if (line.startsWith("summary ")) summary = line.slice(8)
+      i++
+    }
+    // Skip the `\t<content>` line — we don't need content here.
+    if (i < lines.length && lines[i].startsWith("\t")) i++
+    if (!commits.has(sha) && !isUncommitted) {
+      commits.set(sha, { author, authorMail, committerTime, summary })
+    }
+    out.push({
+      line: finalLine,
+      sha,
+      shortSha: sha.slice(0, 7),
+      author: isUncommitted ? "Not committed" : author,
+      authorMail,
+      committerTime,
+      summary: isUncommitted ? "(uncommitted working tree)" : summary,
+      isUncommitted,
+    })
+  }
+  return out
+}
+
+app.get("/api/blame", async (c) => {
+  try {
+    const conversationId = c.req.query("conversationId")
+    const path = c.req.query("path")
+    if (!conversationId || !path) {
+      return c.json({ error: "conversationId and path required" }, 400)
+    }
+    const cwd = await cwdForConversation(conversationId)
+    ensureBlameWatcher(cwd)
+    const key = blameCacheKey(cwd, path)
+    const cached = blameCache.get(key)
+    if (cached) return c.json(cached)
+
+    const { stdout } = await execFileP(
+      "git",
+      ["blame", "--porcelain", "--", path],
+      { cwd, maxBuffer: 20 * 1024 * 1024 }
+    )
+    const result: BlameResult = { cwd, path, lines: parseBlamePorcelain(stdout) }
+    // Simple cap — delete oldest insertion when full (Map keeps insertion order).
+    if (blameCache.size >= BLAME_CACHE_MAX) {
+      const first = blameCache.keys().next().value
+      if (first) blameCache.delete(first)
+    }
+    blameCache.set(key, result)
+    return c.json(result)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // git blame fails for untracked/new files or non-git cwds — return empty.
+    if (/not in a git repository|no such path|does not have any commits yet/i.test(msg)) {
+      return c.json({ cwd: "", path: c.req.query("path") ?? "", lines: [] })
+    }
+    return c.json({ error: msg }, 500)
+  }
+})
+
 // Directory listing scoped to the conversation's cwd. Used by the file-tree
 // panel. Hides the usual heavyweights (.git, node_modules) and skips dotfiles
 // behind a flag so the default view isn't noisy.

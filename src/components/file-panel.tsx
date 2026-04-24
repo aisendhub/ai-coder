@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { X, FileText, RefreshCw, Code, Eye, Download } from "lucide-react"
+import { X, FileText, RefreshCw, Code, Eye, Download, GitCommit } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable"
@@ -8,6 +8,20 @@ import { cn } from "@/lib/utils"
 import { highlightCode, languageForPath } from "@/lib/highlight"
 import { workspace } from "@/models"
 import { Markdown } from "@/components/markdown"
+import { AnnotationAccordion } from "@/components/annotation-accordion"
+import { AnnotationChip, authorInitials, compactAge, shaToColor } from "@/components/annotation-chip"
+
+type BlameLine = {
+  line: number
+  sha: string
+  shortSha: string
+  author: string
+  authorMail: string
+  committerTime: number
+  summary: string
+  isUncommitted: boolean
+}
+type BlameResult = { cwd: string; path: string; lines: BlameLine[] }
 
 /** Files we auto-preview on open. Tiny allow-list — other formats show
  *  syntax-highlighted source as before. */
@@ -26,23 +40,61 @@ type FileResponse = {
   sizeBytes: number
 }
 
+/** Top-bar icon button that toggles the blame rail in the file panel. Only
+ *  meaningful when a file is open — caller decides whether to render it. */
+export function BlameTrigger({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenChange(!open)}
+            aria-label={open ? "Hide blame" : "Show blame"}
+            aria-pressed={open}
+            className={cn(open && "bg-accent text-accent-foreground")}
+          />
+        }
+      >
+        <GitCommit className="size-5" />
+      </TooltipTrigger>
+      <TooltipContent>{open ? "Hide blame" : "Show blame"}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 /** ResizablePanel slot for the file panel — drops nothing into the layout
  *  when no file is open. Lives next to other ResizablePanels in App.tsx. */
-export const FilePanelSlot = observer(function FilePanelSlot() {
+export const FilePanelSlot = observer(function FilePanelSlot({
+  blameEnabled,
+}: {
+  blameEnabled: boolean
+}) {
   if (!workspace.openFilePath) return null
   return (
     <>
       <ResizableHandle />
       <ResizablePanel id="file" order={9} defaultSize={36} minSize={20} maxSize={70}>
         <div className="h-full min-h-0 overflow-hidden border-l">
-          <FilePanel />
+          <FilePanel blameEnabled={blameEnabled} />
         </div>
       </ResizablePanel>
     </>
   )
 })
 
-export const FilePanel = observer(function FilePanel() {
+export const FilePanel = observer(function FilePanel({
+  blameEnabled,
+}: {
+  blameEnabled: boolean
+}) {
   const conversationId = workspace.active?.id ?? null
   const path = workspace.openFilePath
   const [content, setContent] = useState<string | null>(null)
@@ -51,6 +103,13 @@ export const FilePanel = observer(function FilePanel() {
   const [loading, setLoading] = useState(false)
   const [html, setHtml] = useState<string | null>(null)
   const [diff, setDiff] = useState<string>("")
+  // `null` = file isn't in the conversation's changes list (clean/unchanged).
+  // Anything else is the git status reported by /api/changes.
+  const [changeStatus, setChangeStatus] = useState<
+    "added" | "modified" | "deleted" | "renamed" | "untracked" | null
+  >(null)
+  const [blame, setBlame] = useState<BlameResult | null>(null)
+  const [openBlameLine, setOpenBlameLine] = useState<number | null>(null)
   // Markdown files open in preview. `</>`  toggles to raw source; Eye toggles
   // back. Reset whenever the user opens a different file so each open lands
   // in its own default view.
@@ -78,11 +137,15 @@ export const FilePanel = observer(function FilePanel() {
       setContent(fileJson.content)
       setTruncated(fileJson.truncated)
       if (changesRes.ok) {
-        const cj = (await changesRes.json()) as { files: { path: string; diff: string; status: string }[] }
+        const cj = (await changesRes.json()) as {
+          files: { path: string; diff: string; status: typeof changeStatus }[]
+        }
         const match = cj.files.find((f) => f.path === path)
         setDiff(match?.diff ?? "")
+        setChangeStatus(match?.status ?? null)
       } else {
         setDiff("")
+        setChangeStatus(null)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -98,9 +161,38 @@ export const FilePanel = observer(function FilePanel() {
     setHtml(null)
     setContent(null)
     setDiff("")
+    setChangeStatus(null)
     setError(null)
+    setOpenBlameLine(null)
     if (path) fetchFile()
   }, [path, fetchFile])
+
+  // Blame fetch — only when enabled. Re-runs on path/conv change and on
+  // file-watcher SSE (wired alongside the file-content watcher below).
+  const fetchBlame = useCallback(async () => {
+    if (!conversationId || !path || !blameEnabled) {
+      setBlame(null)
+      return
+    }
+    try {
+      const res = await fetch(
+        `/api/blame?conversationId=${encodeURIComponent(conversationId)}&path=${encodeURIComponent(path)}`,
+      )
+      if (!res.ok) {
+        setBlame(null)
+        return
+      }
+      setBlame((await res.json()) as BlameResult)
+    } catch {
+      setBlame(null)
+    }
+  }, [conversationId, path, blameEnabled])
+
+  useEffect(() => {
+    setBlame(null)
+    setOpenBlameLine(null)
+    if (blameEnabled) void fetchBlame()
+  }, [blameEnabled, path, fetchBlame])
 
   // Live refresh on file-system change.
   useEffect(() => {
@@ -111,7 +203,10 @@ export const FilePanel = observer(function FilePanel() {
       let t: ReturnType<typeof setTimeout> | null = null
       return () => {
         if (t) clearTimeout(t)
-        t = setTimeout(() => fetchFile(), 200)
+        t = setTimeout(() => {
+          void fetchFile()
+          if (blameEnabled) void fetchBlame()
+        }, 200)
       }
     })()
     function connect() {
@@ -126,7 +221,7 @@ export const FilePanel = observer(function FilePanel() {
       es?.close()
       if (retry) clearTimeout(retry)
     }
-  }, [conversationId, path, fetchFile])
+  }, [conversationId, path, fetchFile, fetchBlame, blameEnabled])
 
   // Highlight when content changes.
   useEffect(() => {
@@ -148,8 +243,8 @@ export const FilePanel = observer(function FilePanel() {
 
   const lineStatuses = useMemo(() => {
     if (!content) return { byLine: new Map<number, LineStatus>(), removedAfter: new Set<number>() }
-    return computeLineStatuses(content, diff)
-  }, [content, diff])
+    return computeLineStatuses(content, diff, changeStatus)
+  }, [content, diff, changeStatus])
 
   if (!path) return null
 
@@ -262,6 +357,10 @@ export const FilePanel = observer(function FilePanel() {
           html={language ? html : null}
           byLine={lineStatuses.byLine}
           removedAfter={lineStatuses.removedAfter}
+          blameEnabled={blameEnabled}
+          blame={blame}
+          openBlameLine={openBlameLine}
+          onOpenBlameLine={setOpenBlameLine}
         />
       )}
     </div>
@@ -300,6 +399,10 @@ function FilePanelBody({
   html,
   byLine,
   removedAfter,
+  blameEnabled,
+  blame,
+  openBlameLine,
+  onOpenBlameLine,
 }: {
   loading: boolean
   error: string | null
@@ -307,6 +410,10 @@ function FilePanelBody({
   html: string | null
   byLine: Map<number, LineStatus>
   removedAfter: Set<number>
+  blameEnabled: boolean
+  blame: BlameResult | null
+  openBlameLine: number | null
+  onOpenBlameLine: (line: number | null) => void
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -327,6 +434,10 @@ function FilePanelBody({
             html={html}
             byLine={byLine}
             removedAfter={removedAfter}
+            blameEnabled={blameEnabled}
+            blame={blame}
+            openBlameLine={openBlameLine}
+            onOpenBlameLine={onOpenBlameLine}
           />
         )}
         {loading && content === null && (
@@ -350,11 +461,19 @@ function FileBody({
   html,
   byLine,
   removedAfter,
+  blameEnabled,
+  blame,
+  openBlameLine,
+  onOpenBlameLine,
 }: {
   content: string
   html: string | null
   byLine: Map<number, LineStatus>
   removedAfter: Set<number>
+  blameEnabled: boolean
+  blame: BlameResult | null
+  openBlameLine: number | null
+  onOpenBlameLine: (line: number | null) => void
 }) {
   const codeRef = useRef<HTMLDivElement>(null)
   const [lineMetrics, setLineMetrics] = useState<{ height: number; top: number } | null>(null)
@@ -363,6 +482,16 @@ function FileBody({
   // path (where each source line is its own `.line` span); the plain-<pre>
   // fallback keeps the uniform `lineMetrics.height` below.
   const [lineHeights, setLineHeights] = useState<number[] | null>(null)
+  // Cumulative top offsets — offsets[i] is the top of line i+1 in FileBody
+  // coord space. Used to position the annotation accordion below a line.
+  const lineOffsets = useMemo(() => {
+    if (!lineHeights || !lineMetrics) return null
+    const offsets: number[] = [lineMetrics.top]
+    for (let i = 0; i < lineHeights.length - 1; i++) {
+      offsets.push(offsets[i] + lineHeights[i])
+    }
+    return offsets
+  }, [lineHeights, lineMetrics])
 
   // Measure where the rendered code's first line sits and how tall a line is,
   // so the gutter strip aligns 1:1 with the code lines whether we use Shiki HTML
@@ -442,12 +571,49 @@ function FileBody({
         </div>
       )}
 
-      {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the gutter.
+      {/* Blame rail: 10px clickable column sitting between the gutter stripe
+          and the wrapper padding. Each row is an <AnnotationChip> with a
+          stripe color hashed from the commit SHA. */}
+      {blameEnabled && blame && lineMetrics && (
+        <div
+          className="absolute top-0 pointer-events-auto"
+          style={{ left: 8, width: 10, paddingTop: lineMetrics.top }}
+          aria-label="Blame rail"
+        >
+          {Array.from({ length: lineCount }, (_, i) => {
+            const lineNo = i + 1
+            const info = blame.lines[i]
+            const h = lineHeights?.[i] ?? lineMetrics.height
+            if (!info) return <div key={i} style={{ height: h }} />
+            const color = info.isUncommitted
+              ? "hsl(0 0% 55%)"
+              : shaToColor(info.sha)
+            return (
+              <div key={i} style={{ height: h }}>
+                <AnnotationChip
+                  color={color}
+                  faded
+                  isOpen={openBlameLine === lineNo}
+                  onClick={() =>
+                    onOpenBlameLine(openBlameLine === lineNo ? null : lineNo)
+                  }
+                  title={`${info.author} — ${info.summary}`}
+                />
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Code (Shiki HTML or plain <pre>) — left-padded to clear the gutter
+          and leave room for the blame rail (even when it's not currently
+          rendered, so toggling blame doesn't shift layout).
           Lines soft-wrap so long edits are readable without horizontal
-          scrolling; the gutter's per-line heights adapt via `lineHeights`. */}
+          scrolling; the gutter's per-line heights adapt via `lineHeights`.
+          `file-code` enables the CSS-counter line numbers (see index.css). */}
       <div
         ref={codeRef}
-        className="pl-3 [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:whitespace-pre-wrap [&_pre]:wrap-break-word [&_pre]:overflow-x-hidden [&_.line]:block"
+        className="file-code pl-5 [&_pre]:bg-transparent! [&_pre]:py-3 [&_pre]:pr-3 [&_pre]:pl-10 [&_pre]:overflow-x-hidden [&_.shiki]:whitespace-normal [&_.shiki>code]:whitespace-normal [&_.line]:block [&_.line]:whitespace-pre-wrap [&_.line]:wrap-break-word"
       >
         {html ? (
           <div dangerouslySetInnerHTML={{ __html: html }} />
@@ -455,6 +621,98 @@ function FileBody({
           <pre className="whitespace-pre-wrap wrap-break-word">{content}</pre>
         )}
       </div>
+
+      {/* Annotation accordion — absolute-positioned below the anchored line.
+          Overlays the lines beneath; close to reveal them again. One open at
+          a time (per annotation type) for now. */}
+      {blameEnabled &&
+        blame &&
+        openBlameLine !== null &&
+        lineOffsets &&
+        lineHeights &&
+        openBlameLine >= 1 &&
+        openBlameLine <= lineOffsets.length && (
+          <BlameAccordion
+            info={blame.lines[openBlameLine - 1]}
+            top={lineOffsets[openBlameLine - 1] + (lineHeights[openBlameLine - 1] ?? 0)}
+            onClose={() => onOpenBlameLine(null)}
+          />
+        )}
+    </div>
+  )
+}
+
+function BlameAccordion({
+  info,
+  top,
+  onClose,
+}: {
+  info: BlameLine | undefined
+  top: number
+  onClose: () => void
+}) {
+  if (!info) return null
+  const when = info.committerTime
+    ? new Date(info.committerTime).toLocaleString()
+    : "—"
+  const openInGitLog = () => {
+    window.dispatchEvent(new CustomEvent("ai-coder:open-git-log"))
+    // Fire focus after a tick so App/code-panel listeners have a chance to
+    // open the section before git-log-panel tries to scroll to the row.
+    setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("ai-coder:focus-commit", { detail: { sha: info.sha } })
+      )
+    }, 50)
+  }
+  return (
+    <div className="absolute inset-x-0 z-10" style={{ top }}>
+      <AnnotationAccordion
+        onClose={onClose}
+        header={
+          <div className="flex items-center gap-2 min-w-0">
+            <GitCommit className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="font-semibold truncate">{info.summary}</span>
+            {!info.isUncommitted && (
+              <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                {info.shortSha}
+              </span>
+            )}
+          </div>
+        }
+      >
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center justify-center size-5 rounded-full bg-muted text-[9px] font-medium">
+              {authorInitials(info.author)}
+            </span>
+            <span className="font-medium">{info.author}</span>
+            {info.authorMail && (
+              <span className="text-muted-foreground truncate">{info.authorMail}</span>
+            )}
+          </div>
+          <div className="text-muted-foreground">
+            {info.isUncommitted ? (
+              "Uncommitted — working tree"
+            ) : (
+              <>
+                {compactAge(info.committerTime)} ago <span className="mx-1">·</span> {when}
+              </>
+            )}
+          </div>
+          {!info.isUncommitted && (
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={openInGitLog}
+                className="text-[11px] text-primary hover:underline cursor-pointer"
+              >
+                Open in git log →
+              </button>
+            </div>
+          )}
+        </div>
+      </AnnotationAccordion>
     </div>
   )
 }
@@ -465,18 +723,34 @@ function FileBody({
  * the same hunk position, in which case both are "modified". A `-` line not
  * paired with a `+` becomes a removed marker on the next visible new line.
  *
- * For untracked files (no hunks), every line is "added".
+ * `changeStatus` comes from /api/changes. `null` means the file isn't in the
+ * changes list at all (clean/unchanged) — we render no gutter markers. Only
+ * explicitly untracked/added files with no hunks get the all-green treatment.
  */
-function computeLineStatuses(content: string, diff: string): {
+function computeLineStatuses(
+  content: string,
+  diff: string,
+  changeStatus:
+    | "added"
+    | "modified"
+    | "deleted"
+    | "renamed"
+    | "untracked"
+    | null,
+): {
   byLine: Map<number, LineStatus>
   removedAfter: Set<number>
 } {
   const byLine = new Map<number, LineStatus>()
   const removedAfter = new Set<number>()
 
+  // File not in the changes list → nothing changed, no markers.
+  if (changeStatus === null) return { byLine, removedAfter }
+
   const lineCount = content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0)
 
-  // No diff or only-cat output (untracked): mark all as added
+  // Untracked/newly-added file (diff is empty or a raw cat-style dump with no
+  // hunks): mark every line as added.
   if (!diff || !/^@@ /m.test(diff)) {
     for (let i = 1; i <= Math.max(lineCount, 1); i++) byLine.set(i, "added")
     return { byLine, removedAfter }
