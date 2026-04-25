@@ -11,7 +11,12 @@ import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import { getLlmProvider, type AgentUserMessage as SDKUserMessage } from "./llm/index.ts"
+import {
+  buildSystemPromptAppend,
+  composeSystemPromptAppend,
+  loadProjectAddendum,
+} from "./llm/system-prompt.ts"
 import type { MessageParam } from "@anthropic-ai/sdk/resources"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
@@ -314,43 +319,6 @@ type AttachmentPayload = {
 
 const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
-/** Builds text appended to Claude Code's default system prompt so the worker
- *  knows where it's running. Critical for tasks: without it, Claude
- *  occasionally guesses placeholder paths like /Users/user/ when asked to
- *  create a file with a bare name, hits EACCES, then recovers via `pwd`. */
-function buildSystemPromptAppend(input: {
-  cwd: string
-  kind: string | null
-  branch: string | null
-  baseRef: string | null
-  worktreePath: string | null
-}): string {
-  const isTaskWorktree = input.kind === "task" && !!input.worktreePath
-  if (!isTaskWorktree) {
-    // Chats: one short line to prevent placeholder-path hallucinations.
-    return [
-      `You are working in: ${input.cwd}`,
-      `Use relative paths (e.g. "./src/foo.ts") or absolute paths inside the cwd. Never invent placeholder absolute paths like "/Users/user/...".`,
-    ].join("\n")
-  }
-  const lines = [
-    "You are running an autonomous task in an isolated git worktree.",
-    "",
-    `- Working directory (cwd): ${input.cwd}`,
-    `- Branch: ${input.branch ?? "(unknown)"}`,
-    `- Base ref: ${input.baseRef ?? "(unknown)"}`,
-    "",
-    "Rules for file paths:",
-    `- ALWAYS write files inside the cwd above. Use relative paths (e.g. "./test.txt") or absolute paths starting with "${input.cwd}".`,
-    `- NEVER invent placeholder absolute paths like "/Users/user/" or "/home/user/" — they will fail with permission errors. If unsure, run "pwd" first.`,
-    "",
-    "Rules for git:",
-    "- You're on a dedicated branch. Commit freely; the orchestrator will merge or open a PR when the user ships the task.",
-    "- Do not switch branches or run `git worktree` commands — this worktree is managed by the host.",
-  ]
-  return lines.join("\n")
-}
-
 async function startRunner(args: {
   conversationId: string
   prompt: string
@@ -427,13 +395,18 @@ async function startRunner(args: {
         .single()
       if (data) convMeta = data as typeof convMeta
     }
-    const systemPromptAppend = args.systemPromptOverride ?? buildSystemPromptAppend({
+    const hostAppend = args.systemPromptOverride ?? buildSystemPromptAppend({
       cwd,
       kind: convMeta.kind,
       branch: convMeta.branch,
       baseRef: convMeta.base_ref,
       worktreePath: convMeta.worktree_path,
     })
+    // Layer per-project instructions from `<cwd>/.ai-coder/instructions.md`
+    // after the host append so they can refine (or override) generic rules.
+    // See docs/SYSTEM-PROMPT.md for the layering model.
+    const projectAddendum = await loadProjectAddendum(cwd)
+    const systemPromptAppend = composeSystemPromptAppend(hostAppend, projectAddendum)
 
     log("turn.start", { prompt: prompt.slice(0, 80), resume: resumeSessionId, cwd })
 
@@ -621,37 +594,37 @@ async function startRunner(args: {
             queryPrompt = singleMessage()
           }
 
-          const messages = query({
+          const messages = getLlmProvider().runAgent({
             prompt: queryPrompt,
-            options: {
-              resume: currentResume,
-              cwd,
-              permissionMode: "bypassPermissions",
-              settingSources: [],
-              includePartialMessages: false,
-              abortController: abort,
-              systemPrompt: {
-                type: "preset",
-                preset: "claude_code",
-                append: systemPromptAppend,
-              },
-              // Earliest natural injection boundary. Before each tool runs we
-              // sweep any pending nudges; if there are any, deny the tool and
-              // interrupt the turn so we can re-enter with the nudge as the
-              // next prompt. See docs/WORKTREES.md § Mid-turn nudges.
-              canUseTool: async () => {
-                const flushed = await flushPendingNudges(conversationId)
-                if (flushed) {
-                  nudgeInterruptText = flushed
-                  emit("nudge_flushed", { iteration: iterationIndex })
-                  return {
-                    behavior: "deny",
-                    message: "User nudged the agent — re-entering with new instructions.",
-                    interrupt: true,
-                  }
+            resumeSessionId: currentResume,
+            cwd,
+            permissionMode: "bypassPermissions",
+            // Load the user's project CLAUDE.md, skills, and `.claude/`
+            // settings. Headless flows (evaluator, commit-msg,
+            // detect-services) intentionally pass `[]` and stay isolated.
+            // See docs/SYSTEM-PROMPT.md.
+            settingSources: ["project"],
+            abortController: abort,
+            systemPrompt: {
+              preset: "claude_code",
+              append: systemPromptAppend,
+            },
+            // Earliest natural injection boundary. Before each tool runs we
+            // sweep any pending nudges; if there are any, deny the tool and
+            // interrupt the turn so we can re-enter with the nudge as the
+            // next prompt. See docs/WORKTREES.md § Mid-turn nudges.
+            canUseTool: async () => {
+              const flushed = await flushPendingNudges(conversationId)
+              if (flushed) {
+                nudgeInterruptText = flushed
+                emit("nudge_flushed", { iteration: iterationIndex })
+                return {
+                  behavior: "deny",
+                  message: "User nudged the agent — re-entering with new instructions.",
+                  interrupt: true,
                 }
-                return { behavior: "allow" }
-              },
+              }
+              return { behavior: "allow" }
             },
           })
 

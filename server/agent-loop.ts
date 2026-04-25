@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk"
+import { getLlmProvider } from "./llm/index.ts"
 import { createHash } from "node:crypto"
 
 // ─── Evaluator-optimizer loop helpers ────────────────────────────────────────
@@ -69,17 +69,14 @@ export async function runEvaluator({
   let costUsd = 0
 
   try {
-    const messages = query({
+    const messages = getLlmProvider().runAgent({
       prompt: userMessage,
-      options: {
-        cwd,
-        permissionMode: "default",
-        systemPrompt: SYSTEM_PROMPT,
-        allowedTools: ["Read", "Glob", "Grep"],
-        settingSources: [],
-        includePartialMessages: false,
-        abortController: abort,
-      },
+      cwd,
+      permissionMode: "default",
+      systemPrompt: SYSTEM_PROMPT,
+      allowedTools: ["Read", "Glob", "Grep"],
+      settingSources: [],
+      abortController: abort,
     })
     for await (const msg of messages) {
       if (msg.type === "assistant") {
@@ -196,20 +193,17 @@ export async function generateCommitMessage({
 
   let finalText = ""
   try {
-    const messages = query({
+    const messages = getLlmProvider().runAgent({
       prompt: userMessage,
-      options: {
-        cwd,
-        permissionMode: "default",
-        systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
-        // Bash is allowed but restricted to git-read operations via the prompt;
-        // the agent SDK enforces permissions, we rely on the model following
-        // the rubric. Read/Glob/Grep give it a fallback if Bash is blocked.
-        allowedTools: ["Bash", "Read", "Glob", "Grep"],
-        settingSources: [],
-        includePartialMessages: false,
-        abortController: abort,
-      },
+      cwd,
+      permissionMode: "default",
+      systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
+      // Bash is allowed but restricted to git-read operations via the prompt;
+      // the agent SDK enforces permissions, we rely on the model following
+      // the rubric. Read/Glob/Grep give it a fallback if Bash is blocked.
+      allowedTools: ["Bash", "Read", "Glob", "Grep"],
+      settingSources: [],
+      abortController: abort,
     })
     for await (const msg of messages) {
       if (msg.type === "assistant") {
@@ -329,20 +323,17 @@ export async function detectManifestWithLLM({
   let finalText = ""
   let costUsd = 0
   try {
-    const messages = query({
+    const messages = getLlmProvider().runAgent({
       prompt: userMessage,
-      options: {
-        cwd,
-        // Server-side flow with no interactive prompt surface — use
-        // bypassPermissions so Bash/Read/etc. don't hang on an approval
-        // prompt nobody can answer. Tool surface is already restricted.
-        permissionMode: "bypassPermissions",
-        systemPrompt: RUN_DETECT_SYSTEM_PROMPT,
-        allowedTools: ["Read", "Glob", "Grep", "Bash"],
-        settingSources: [],
-        includePartialMessages: false,
-        abortController: abort,
-      },
+      cwd,
+      // Server-side flow with no interactive prompt surface — use
+      // bypassPermissions so Bash/Read/etc. don't hang on an approval
+      // prompt nobody can answer. Tool surface is already restricted.
+      permissionMode: "bypassPermissions",
+      systemPrompt: RUN_DETECT_SYSTEM_PROMPT,
+      allowedTools: ["Read", "Glob", "Grep", "Bash"],
+      settingSources: [],
+      abortController: abort,
     })
     for await (const msg of messages) {
       if (msg.type === "assistant") {
@@ -629,17 +620,14 @@ export async function detectServicesWithLLM({
   let finalText = ""
   let costUsd = 0
   try {
-    const messages = query({
+    const messages = getLlmProvider().runAgent({
       prompt: userMessage,
-      options: {
-        cwd,
-        permissionMode: "bypassPermissions",
-        systemPrompt: RUN_DETECT_SERVICES_SYSTEM_PROMPT,
-        allowedTools: ["Read", "Glob", "Grep", "Bash"],
-        settingSources: [],
-        includePartialMessages: false,
-        abortController: abort,
-      },
+      cwd,
+      permissionMode: "bypassPermissions",
+      systemPrompt: RUN_DETECT_SERVICES_SYSTEM_PROMPT,
+      allowedTools: ["Read", "Glob", "Grep", "Bash"],
+      settingSources: [],
+      abortController: abort,
     })
     for await (const msg of messages) {
       if (msg.type === "assistant") {

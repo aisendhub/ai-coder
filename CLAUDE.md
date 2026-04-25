@@ -14,6 +14,8 @@ Docs:
 - [docs/PLAN.md](docs/PLAN.md) — what we're building and why
 - [docs/PROGRESS.md](docs/PROGRESS.md) — live checklist of what's done and next
 - [docs/STACK.md](docs/STACK.md) — architecture, migrations, deployment, secrets
+- [docs/LLM-PROVIDER.md](docs/LLM-PROVIDER.md) — provider interface (`server/llm/`); swap point for non-Claude SDKs
+- [docs/SYSTEM-PROMPT.md](docs/SYSTEM-PROMPT.md) — system-prompt composition, `settingSources`, `<cwd>/.ai-coder/instructions.md` addendum
 
 ## Quick links
 
