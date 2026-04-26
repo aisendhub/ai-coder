@@ -4602,6 +4602,150 @@ app.delete("/api/conversations/:id/services/:name/override", async (c) => {
   }
 })
 
+// ─── Env vars: project + conversation layers ────────────────────────────────
+// See docs/ENV-AND-SERVICES.md. Three persisted layers in resolution order:
+//   1. project_env_vars       — shared across all chats and tasks in a project
+//   2. conversation_env_vars  — per-task overrides; FK CASCADE on conversation delete
+//   3. project_services.env   — per-service overrides (already covered by services CRUD)
+// Plus runtime layers (system metadata, auto-injected service-discovery
+// vars, framework-specific PORT aliases) — populated at process spawn,
+// not editable here.
+
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+type EnvVarBody = {
+  key?: string
+  value?: string
+  is_secret?: boolean
+  description?: string | null
+}
+
+function maskSecret(v: { value: string; is_secret: boolean }): { value: string; is_secret: boolean } {
+  return v.is_secret ? { value: "", is_secret: true } : { value: v.value, is_secret: false }
+}
+
+// Project-shared env. Ownership flows via projects.user_id under RLS.
+app.get("/api/projects/:id/env", async (c) => {
+  const sb = c.get("sb")
+  const projectId = c.req.param("id")
+  const { data, error } = await sb
+    .from("project_env_vars")
+    .select("id, key, value, is_secret, description, updated_at")
+    .eq("project_id", projectId)
+    .order("key", { ascending: true })
+  if (error) return c.json({ error: error.message }, 500)
+  // Mask secret values on the wire — once saved, they're never re-emitted.
+  const rows = (data ?? []).map((r) => ({
+    ...r,
+    ...maskSecret({ value: r.value as string, is_secret: !!r.is_secret }),
+  }))
+  return c.json({ env: rows })
+})
+
+app.put("/api/projects/:id/env/:key", async (c) => {
+  const sb = c.get("sb")
+  const projectId = c.req.param("id")
+  const key = c.req.param("key")
+  if (!ENV_KEY_RE.test(key)) {
+    return c.json({ error: "invalid env var name (POSIX: letters/digits/underscore, no leading digit)" }, 400)
+  }
+  const body = await c.req.json<EnvVarBody>().catch(() => ({}))
+  if (typeof body.value !== "string") return c.json({ error: "value required" }, 400)
+  const isSecret = !!body.is_secret
+  // Encrypt at rest if secret. For non-secrets we still pass the raw string;
+  // RLS + service-role split prevents leakage to other users.
+  const storedValue = isSecret ? encryptToken(body.value) : body.value
+  const { data, error } = await sb
+    .from("project_env_vars")
+    .upsert(
+      {
+        project_id: projectId,
+        key,
+        value: storedValue,
+        is_secret: isSecret,
+        description: body.description ?? null,
+      },
+      { onConflict: "project_id,key" }
+    )
+    .select("id, key, is_secret, description, updated_at")
+    .single()
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ env: data })
+})
+
+app.delete("/api/projects/:id/env/:key", async (c) => {
+  const sb = c.get("sb")
+  const projectId = c.req.param("id")
+  const key = c.req.param("key")
+  const { error } = await sb
+    .from("project_env_vars")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("key", key)
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true })
+})
+
+// Per-conversation (worktree) env overrides. Same shape, scoped to a
+// conversation. RLS ownership flows via conversations.user_id.
+app.get("/api/conversations/:id/env", async (c) => {
+  const sb = c.get("sb")
+  const conversationId = c.req.param("id")
+  const { data, error } = await sb
+    .from("conversation_env_vars")
+    .select("id, key, value, is_secret, description, updated_at")
+    .eq("conversation_id", conversationId)
+    .order("key", { ascending: true })
+  if (error) return c.json({ error: error.message }, 500)
+  const rows = (data ?? []).map((r) => ({
+    ...r,
+    ...maskSecret({ value: r.value as string, is_secret: !!r.is_secret }),
+  }))
+  return c.json({ env: rows })
+})
+
+app.put("/api/conversations/:id/env/:key", async (c) => {
+  const sb = c.get("sb")
+  const conversationId = c.req.param("id")
+  const key = c.req.param("key")
+  if (!ENV_KEY_RE.test(key)) {
+    return c.json({ error: "invalid env var name" }, 400)
+  }
+  const body = await c.req.json<EnvVarBody>().catch(() => ({}))
+  if (typeof body.value !== "string") return c.json({ error: "value required" }, 400)
+  const isSecret = !!body.is_secret
+  const storedValue = isSecret ? encryptToken(body.value) : body.value
+  const { data, error } = await sb
+    .from("conversation_env_vars")
+    .upsert(
+      {
+        conversation_id: conversationId,
+        key,
+        value: storedValue,
+        is_secret: isSecret,
+        description: body.description ?? null,
+      },
+      { onConflict: "conversation_id,key" }
+    )
+    .select("id, key, is_secret, description, updated_at")
+    .single()
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ env: data })
+})
+
+app.delete("/api/conversations/:id/env/:key", async (c) => {
+  const sb = c.get("sb")
+  const conversationId = c.req.param("id")
+  const key = c.req.param("key")
+  const { error } = await sb
+    .from("conversation_env_vars")
+    .delete()
+    .eq("conversation_id", conversationId)
+    .eq("key", key)
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ ok: true })
+})
+
 app.post("/api/services/:id/stop", async (c) => {
   const id = c.req.param("id")
   const body = await c.req.json<{ userId?: string }>().catch(() => ({}))

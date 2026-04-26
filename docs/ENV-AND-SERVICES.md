@@ -117,6 +117,36 @@ Bindings are beautiful for code that runs *inside* the platform runtime. Worktre
 
 Tempting (`${{api.HOST}}` could resolve to `api.worktrees.local` and survive port changes), but requires either a DNS shim or `/etc/hosts` writes — both surprise the user. Defer to v2; auto-injected URLs cover the same ergonomic surface for v1.
 
+## Port semantics + framework aliases
+
+Two preference shapes drive port selection:
+
+| Source | Semantics |
+|---|---|
+| **Strict port** — user explicitly set `manifest.port` (or per-task override) | Try that exact port. If taken, fail with `port_in_use` (HTTP 409). **No silent substitution.** Users who hardcode 3000 want 3000 (or to know it's busy), not magic. |
+| **Sticky port** — last-used `assigned_port` from a previous run | Try first so `localhost:<port>` URLs stay stable across restarts; fall back to auto-allocate if taken. |
+| Neither | Auto-allocate from `RUNTIME_PORT_RANGE` (default `4100-4999`). |
+
+This matches Railway / Heroku / Render / Cloud Run convention (auto-allocate, inject as `PORT`) while letting users opt into strict binding when they need it (e.g., webhook expecting `localhost:3000`).
+
+**At spawn time, the registry injects PORT-related env on top of the resolved env block** (user-set values win when keys collide):
+
+| Key | Always set | Notes |
+|---|---|---|
+| `PORT` | yes | The bound port. Universal convention. |
+| `HOST` | yes | `localhost`. |
+| `VITE_PORT` | when stack ~= "vite" | Many users write `vite.config.ts` reading `process.env.VITE_PORT`. |
+| `NUXT_PORT`, `NUXT_PUBLIC_PORT` | when stack ~= "nuxt" | Nuxt convention. |
+| `ASTRO_PORT` | when stack ~= "astro" | Astro convention. |
+| `NEXT_PUBLIC_PORT` | when stack ~= "next" | Useful for client-side reads. |
+| `SVELTEKIT_PORT` | when stack ~= "svelte" | SvelteKit convention. |
+| `REMIX_PORT` | when stack ~= "remix" | Remix convention. |
+| `DJANGO_PORT`, `RAILS_PORT`, `FLASK_RUN_PORT` | when stack matches | Backend framework conventions. |
+
+Aliases are deliberately liberal — extra env vars are free; the cost of an unused alias is zero. Stack matching is substring-based (`"vite-react"` matches both `vite` and `react`).
+
+The agent's detect-services system prompt is updated to know these — it should never set `PORT` manually in proposals, and should leave the `port` field unset unless a fixed port is genuinely required. See [server/agent-loop.ts](../server/agent-loop.ts) (`buildDetectServicesSystemPrompt`).
+
 ---
 
 ## Worktree-scoped services

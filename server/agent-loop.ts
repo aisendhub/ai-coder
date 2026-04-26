@@ -516,7 +516,15 @@ the user already has; you don't skip them yourself.
 
 Start-command rules:
 - Keep commands short. The host injects \`PORT\` as an env var AND
-  expands \`$PORT\` in the command via its shell.
+  expands \`$PORT\` in the command via its shell. Framework-specific
+  aliases are also auto-injected when \`stack\` matches: Vite gets
+  \`VITE_PORT\`, Nuxt gets \`NUXT_PORT\` / \`NUXT_PUBLIC_PORT\`, Astro
+  gets \`ASTRO_PORT\`, etc. Do NOT set \`PORT\` or these aliases yourself
+  in the env block — the host owns them.
+- Do NOT set the \`port\` field unless the user must use a specific port
+  (rare; e.g. a webhook expecting localhost:3000). Setting it makes the
+  host strict-bind that port and fail loudly if it's taken — usually
+  not what you want for parallel tasks.
 - Node / Express / Fastify / Hono: typically reads \`process.env.PORT\`.
   \`npm run dev\` or \`npm start\` works as-is.
 - Next.js: \`npm run dev -- -p $PORT\`.
@@ -526,6 +534,14 @@ Start-command rules:
 - FastAPI / uvicorn: \`uvicorn main:app --port $PORT --reload\`.
 - Rails: \`rails server -p $PORT\` or \`bin/dev -p $PORT\`.
 - If a service lives in a subdir, prefix \`cd <subdir> && \`.
+
+Service-to-service refs: if one service needs another's URL (web → api),
+write the env value with Railway-style references — e.g.
+\`API_URL=\${{api.URL}}\` or \`API_HOST=\${{api.HOST}}\`. The host resolves
+\`\${{svc.URL|HOST|PORT}}\` against running siblings at spawn time. You
+also get auto-injected \`WORKTREES_SVC_<NAME>_URL\` for every sibling, so
+plain \`fetch(process.env.WORKTREES_SVC_API_URL)\` works without any
+explicit reference.
 
 Names: short identifier (lowercase letters, digits, \`_\`, \`-\`; max
 40 chars). Prefer "default" for the single root service; "web", "api",

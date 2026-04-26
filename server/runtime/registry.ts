@@ -11,6 +11,7 @@ import {
 } from "./ring-buffer.ts"
 import type { Runner, RunnerHandle, RunnerId } from "./runners/types.ts"
 import { injectPortFlag, extractBoundPort } from "./port.ts"
+import { portEnvFor } from "../env-resolver.ts"
 
 export type ServiceStatus =
   | "starting"
@@ -78,6 +79,8 @@ export class RuntimeError extends Error {
     message: string,
     readonly code:
       | "port_range_exhausted"
+      | "port_in_use"
+      | "port_invalid"
       | "user_cap_reached"
       | "not_found"
       | "not_owner"
@@ -131,25 +134,50 @@ function isPortFree(port: number): Promise<boolean> {
   })
 }
 
-// Allocate a port to bind. `preferred` wins when free — commonly set from
-// the conversation's persisted `assigned_port` (so URLs stay stable across
-// restarts) or from `manifest.port` (so an app that hardcodes e.g. 3000 or
-// reads PORT with a specific fallback gets what it expects).
-//
-// The preferred port is honored regardless of whether it's inside our
-// sandbox range: users routinely set port 3000 / 5173 / 8000 and expect
-// those URLs. We still sanity-check for non-privileged ports.
-async function allocatePort(preferred?: number | null): Promise<number> {
-  if (
-    preferred != null &&
-    preferred >= 1024 &&
-    preferred <= 65535 &&
-    !allocatedPorts.has(preferred) &&
-    (await isPortFree(preferred))
-  ) {
-    allocatedPorts.add(preferred)
-    return preferred
+// Allocate a port to bind, with two preference shapes:
+//   strict  — user explicitly set this port in the manifest. If it's taken,
+//             fail loudly. We will NOT silently swap to a different port —
+//             the user asked for 3000 and they get 3000 or an error.
+//   sticky  — port we picked in a previous run for this scope (kept stable
+//             so localhost:<port> URLs stay valid across restarts). If
+//             taken, fall back to auto-allocation.
+// At least one of the two flows wins; if neither is set, auto-allocate from
+// the sandbox range. Honored regardless of whether the chosen port is inside
+// the sandbox range — users routinely want 3000 / 5173 / 8000 / 8080.
+async function allocatePort(opts: {
+  strict?: number | null
+  sticky?: number | null
+}): Promise<number> {
+  const { strict, sticky } = opts
+
+  if (strict != null) {
+    if (strict < 1024 || strict > 65535) {
+      throw new RuntimeError(
+        `port ${strict} is out of range (1024-65535)`,
+        "port_invalid"
+      )
+    }
+    if (allocatedPorts.has(strict) || !(await isPortFree(strict))) {
+      throw new RuntimeError(
+        `port ${strict} is in use — pick another or unset it to auto-allocate`,
+        "port_in_use"
+      )
+    }
+    allocatedPorts.add(strict)
+    return strict
   }
+
+  if (
+    sticky != null &&
+    sticky >= 1024 &&
+    sticky <= 65535 &&
+    !allocatedPorts.has(sticky) &&
+    (await isPortFree(sticky))
+  ) {
+    allocatedPorts.add(sticky)
+    return sticky
+  }
+
   for (let port = PORT_MIN; port <= PORT_MAX; port++) {
     if (allocatedPorts.has(port)) continue
     if (await isPortFree(port)) {
@@ -224,6 +252,12 @@ export async function getRunnersInfo(): Promise<RunnerInfo[]> {
 }
 
 export type StartOptions = {
+  /** User-set port from the manifest. Strict — fails on conflict. */
+  strictPort?: number | null
+  /** Sticky port from a prior run. Soft — falls back to auto-allocate. */
+  stickyPort?: number | null
+  /** Deprecated: same as `stickyPort` for backwards compat. Pass strictPort
+   *  separately when the user explicitly set a manifest port. */
   preferredPort?: number | null
   runnerId?: RunnerId
 }
@@ -256,20 +290,35 @@ export async function startService(
     throw new RuntimeError(reason, "runner_unavailable")
   }
 
-  const port = await allocatePort(opts.preferredPort)
+  const port = await allocatePort({
+    strict: opts.strictPort ?? null,
+    sticky: opts.stickyPort ?? opts.preferredPort ?? null,
+  })
   const id = randomUUID()
   const emitter = new EventEmitter()
   emitter.setMaxListeners(0)
   const logs = createRingBuffer(LOG_LINE_CAP)
+
+  // PORT env injection. Always sets PORT + HOST; adds framework-specific
+  // aliases (VITE_PORT, NUXT_PORT, etc) per stack so framework configs that
+  // read those don't have to be rewritten. User-provided env keys win when
+  // they collide — if the user manually set VITE_PORT they get that value.
+  const portEnv = portEnvFor(manifest.stack ?? null, port)
+  const envWithPort: Record<string, string> = {
+    ...portEnv,
+    ...(manifest.env ?? {}),
+  }
 
   // Framework-aware command rewrite: if the start command doesn't already
   // pass $PORT or a --port/-p flag, and we recognize the framework (Vite,
   // Django, uvicorn, etc.), append the right flag so our allocated port
   // actually takes effect. No-op for commands that already handle it.
   const inject = injectPortFlag(manifest.start)
-  const effectiveManifest: RunManifest = inject.injected
-    ? { ...manifest, start: inject.command }
-    : manifest
+  const effectiveManifest: RunManifest = {
+    ...manifest,
+    ...(inject.injected ? { start: inject.command } : {}),
+    env: envWithPort,
+  }
   if (inject.injected) {
     logRuntimeEvent("port.inject", {
       id,

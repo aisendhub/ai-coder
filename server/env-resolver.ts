@@ -1,0 +1,276 @@
+// Env resolution pipeline for service spawn. Merges the four persisted
+// layers, resolves Railway-style ${{svc.VAR}} references, and emits the
+// auto-injected service-discovery vars (WORKTREES_SVC_<NAME>_*) plus system
+// metadata (WORKTREES_PROJECT_ID, WORKTREES_CONVERSATION_ID, etc).
+//
+// Resolution order (earlier overrides later when keys collide):
+//   1. Service env (project_services.env JSONB)
+//   2. Conversation env (conversation_env_vars table) — only if conversationId set
+//   3. Project env (project_env_vars table)
+//   4. System metadata (auto-set; cannot be overridden by user)
+//   5. Service discovery vars (auto-set; cannot be overridden)
+//
+// See docs/ENV-AND-SERVICES.md for the design.
+
+import type { SupabaseClient } from "@supabase/supabase-js"
+import { decryptToken } from "./integrations/crypto.ts"
+import { listServices } from "./runtime/index.ts"
+
+export type EnvLayers = {
+  service: Record<string, string>           // from project_services.env
+  conversation: Map<string, EnvVar>         // from conversation_env_vars
+  project: Map<string, EnvVar>              // from project_env_vars
+  system: Record<string, string>            // computed metadata
+  discovery: Record<string, string>         // computed sibling-service vars
+}
+
+export type EnvVar = {
+  value: string         // plaintext for non-secrets, encrypted blob for secrets
+  is_secret: boolean
+}
+
+export type EnvResolveContext = {
+  ownerId: string
+  projectId: string
+  serviceName: string
+  conversationId: string | null
+  worktreePath: string | null
+  branch: string | null
+  baseRef: string | null
+}
+
+export type EnvResolveResult = {
+  /** Final flat env to pass to child_process.spawn. Secrets decrypted. */
+  env: Record<string, string>
+  /** Per-key provenance (which layer set each key). For UI/debug. */
+  provenance: Record<string, "service" | "conversation" | "project" | "system" | "discovery">
+  /** ${{svc.VAR}} references that couldn't be resolved. Empty on success. */
+  unresolvedRefs: string[]
+}
+
+const REF_RE = /\$\{\{([^}]+)\}\}/g
+const VALID_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+const VALID_SERVICE_NAME_RE = /^[a-zA-Z0-9_-]+$/
+
+/** Build a service-discovery var-name fragment from a service name.
+ *  "web" → "WEB"; "my-api" → "MY_API"; matches Render/Heroku convention. */
+export function discoveryNameFor(serviceName: string): string {
+  return serviceName.toUpperCase().replace(/[^A-Z0-9]/g, "_")
+}
+
+/** Build the PORT-related env block to inject at spawn time. Always sets
+ *  PORT and HOST; adds framework aliases (VITE_PORT, NUXT_PORT, etc.) per
+ *  stack. Called by the runtime registry — env-resolver doesn't know the
+ *  bound port. */
+export function portEnvFor(
+  stack: string | null,
+  boundPort: number,
+): Record<string, string> {
+  const out: Record<string, string> = {
+    PORT: String(boundPort),
+    HOST: "localhost",
+  }
+  for (const alias of portAliasesForStack(stack)) {
+    out[alias] = String(boundPort)
+  }
+  return out
+}
+
+/** Framework-specific PORT env var aliases by stack. PORT itself is always
+ *  injected (universal convention); these are EXTRA aliases the framework
+ *  or its config files commonly read. Liberal on purpose — extra env vars
+ *  are free, and users frequently write `vite.config.ts` that reads
+ *  `process.env.VITE_PORT`. Stacks not listed here just get PORT.
+ *
+ *  Treats the stack string as a hint, not a strict enum — substring matches
+ *  catch user-typed variations like "vite-react", "next.js", "react-vite". */
+export function portAliasesForStack(stack: string | null): string[] {
+  if (!stack) return []
+  const s = stack.toLowerCase()
+  const aliases: string[] = []
+  if (s.includes("vite")) aliases.push("VITE_PORT")
+  if (s.includes("next")) aliases.push("NEXT_PUBLIC_PORT")
+  if (s.includes("nuxt")) aliases.push("NUXT_PORT", "NUXT_PUBLIC_PORT")
+  if (s.includes("astro")) aliases.push("ASTRO_PORT")
+  if (s.includes("svelte")) aliases.push("SVELTEKIT_PORT")
+  if (s.includes("remix")) aliases.push("REMIX_PORT")
+  if (s.includes("django")) aliases.push("DJANGO_PORT")
+  if (s.includes("rails")) aliases.push("RAILS_PORT")
+  if (s.includes("flask")) aliases.push("FLASK_RUN_PORT")
+  return aliases
+}
+
+/** Load env layers from the database. Service-scoped env comes from the
+ *  caller (already-fetched ProjectServiceRow) so we don't re-read it. */
+export async function loadEnvLayers(
+  sb: SupabaseClient,
+  ctx: EnvResolveContext,
+  serviceEnv: Record<string, string>,
+): Promise<EnvLayers> {
+  const projectRows = await sb
+    .from("project_env_vars")
+    .select("key, value, is_secret")
+    .eq("project_id", ctx.projectId)
+  const project = new Map<string, EnvVar>()
+  for (const r of projectRows.data ?? []) {
+    project.set(r.key as string, {
+      value: r.value as string,
+      is_secret: !!r.is_secret,
+    })
+  }
+
+  const conversation = new Map<string, EnvVar>()
+  if (ctx.conversationId) {
+    const convRows = await sb
+      .from("conversation_env_vars")
+      .select("key, value, is_secret")
+      .eq("conversation_id", ctx.conversationId)
+    for (const r of convRows.data ?? []) {
+      conversation.set(r.key as string, {
+        value: r.value as string,
+        is_secret: !!r.is_secret,
+      })
+    }
+  }
+
+  // System metadata — cheap, eliminates "how do I tell what env I'm in?" code
+  // in user services. Reserved namespace; cannot be overridden.
+  const system: Record<string, string> = {
+    WORKTREES_PROJECT_ID: ctx.projectId,
+    WORKTREES_SERVICE_NAME: ctx.serviceName,
+  }
+  if (ctx.conversationId) system.WORKTREES_CONVERSATION_ID = ctx.conversationId
+  if (ctx.worktreePath) system.WORKTREES_WORKTREE_PATH = ctx.worktreePath
+  if (ctx.branch) system.WORKTREES_BRANCH = ctx.branch
+  if (ctx.baseRef) system.WORKTREES_BASE_REF = ctx.baseRef
+
+  // Note: PORT / HOST / framework aliases are injected by the runtime
+  // registry at spawn time, not here. The registry owns port allocation
+  // and is the only thing that knows the bound port. See
+  // portEnvFor(stack, port) below — registry calls it with the allocated
+  // port and merges the result on top of manifest.env.
+
+  // Service discovery — every running sibling in the same scope contributes
+  // WORKTREES_SVC_<NAME>_URL, _HOST, _PORT. Same-scope = same project + same
+  // worktree (chats share null bucket). Excludes self so a service doesn't
+  // get vars pointing at its own previous instance.
+  const discovery: Record<string, string> = {}
+  const siblings = listServices({
+    ownerId: ctx.ownerId,
+    projectId: ctx.projectId,
+    worktreePath: ctx.worktreePath,
+  })
+  for (const sib of siblings) {
+    if (sib.serviceName === ctx.serviceName) continue
+    if (!sib.port) continue
+    if (sib.status !== "running" && sib.status !== "starting") continue
+    const tag = discoveryNameFor(sib.serviceName)
+    discovery[`WORKTREES_SVC_${tag}_HOST`] = "localhost"
+    discovery[`WORKTREES_SVC_${tag}_PORT`] = String(sib.port)
+    discovery[`WORKTREES_SVC_${tag}_URL`] = `http://localhost:${sib.port}`
+  }
+
+  return { service: serviceEnv, conversation, project, system, discovery }
+}
+
+/** Merge layers in precedence order, decrypt secrets, and resolve ${{}}
+ *  references. Returns the final flat env + provenance + any unresolved
+ *  references (caller decides whether to fail on them). */
+export function resolveEnv(layers: EnvLayers): EnvResolveResult {
+  const out: Record<string, string> = {}
+  const provenance: EnvResolveResult["provenance"] = {}
+
+  // Lower-precedence layers first; later writes override earlier.
+  for (const [k, v] of layers.project) {
+    out[k] = decryptIfSecret(v)
+    provenance[k] = "project"
+  }
+  for (const [k, v] of layers.conversation) {
+    out[k] = decryptIfSecret(v)
+    provenance[k] = "conversation"
+  }
+  for (const [k, v] of Object.entries(layers.service)) {
+    out[k] = v
+    provenance[k] = "service"
+  }
+  // System + discovery are reserved namespaces; they overwrite user-set keys
+  // (since users shouldn't set WORKTREES_* anyway, and silent override is
+  // safer than letting a user shadow the metadata they need).
+  for (const [k, v] of Object.entries(layers.system)) {
+    out[k] = v
+    provenance[k] = "system"
+  }
+  for (const [k, v] of Object.entries(layers.discovery)) {
+    out[k] = v
+    provenance[k] = "discovery"
+  }
+
+  // Resolve ${{svc.VAR}} — pass over every value, substitute references.
+  // Cycle detection: each value is resolved against the FROZEN map (we don't
+  // re-resolve the substitutions), which prevents infinite recursion. To
+  // chain references (`API_URL=https://${{api.HOST}}` then
+  // `FULL=${{self.API_URL}}/v1`) the user would need a second pass — not
+  // worth the complexity vs. just having them write the full thing.
+  const unresolvedRefs: string[] = []
+  for (const k of Object.keys(out)) {
+    const original = out[k]
+    let changed = original
+    let m: RegExpExecArray | null
+    REF_RE.lastIndex = 0
+    while ((m = REF_RE.exec(original)) !== null) {
+      const expr = m[1].trim()
+      const dot = expr.indexOf(".")
+      if (dot === -1) {
+        unresolvedRefs.push(`${k}: malformed reference \${{${expr}}}`)
+        continue
+      }
+      const refSvc = expr.slice(0, dot).trim()
+      const refKey = expr.slice(dot + 1).trim()
+      if (!VALID_SERVICE_NAME_RE.test(refSvc) || !VALID_KEY_RE.test(refKey)) {
+        unresolvedRefs.push(`${k}: invalid reference \${{${expr}}}`)
+        continue
+      }
+      const subst = lookupReference(refSvc, refKey, layers, out)
+      if (subst === null) {
+        unresolvedRefs.push(`${k}: \${{${expr}}} → no running service '${refSvc}' or key '${refKey}'`)
+        continue
+      }
+      changed = changed.replaceAll(`\${{${m[1]}}}`, subst)
+    }
+    if (changed !== original) out[k] = changed
+  }
+
+  return { env: out, provenance, unresolvedRefs }
+}
+
+function decryptIfSecret(v: EnvVar): string {
+  if (!v.is_secret) return v.value
+  try {
+    return decryptToken(v.value)
+  } catch {
+    // If decryption fails (rotated key, corrupt blob), surface the secret as
+    // empty — better than leaking the encrypted blob into the child env.
+    return ""
+  }
+}
+
+function lookupReference(
+  svc: string,
+  key: string,
+  layers: EnvLayers,
+  resolved: Record<string, string>,
+): string | null {
+  // ${{self.VAR}} = look up in current service's resolved env
+  if (svc === "self") {
+    return resolved[key] ?? null
+  }
+  // ${{svc.URL|HOST|PORT}} = look up in the auto-discovery vars
+  const tag = discoveryNameFor(svc)
+  const discoveryKey = `WORKTREES_SVC_${tag}_${key}`
+  if (discoveryKey in layers.discovery) return layers.discovery[discoveryKey]
+  // We only support the discovery shorthand (URL/HOST/PORT) for sibling
+  // services. Looking up arbitrary env keys on another service is out of
+  // scope for v1 — would need cross-service env reads, which open a different
+  // can of worms (race conditions, ordering).
+  return null
+}
