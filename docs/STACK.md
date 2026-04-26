@@ -203,6 +203,18 @@ Current setup: `server/index.ts` does `delete process.env.ANTHROPIC_API_KEY` so 
 
 When container isolation is revisited: set `ANTHROPIC_API_KEY` as a sandbox env var before invoking `claude`. Never mount the host's `~/.claude` OAuth token into a sandbox — that bypasses billing and breaks TOS at scale.
 
+### Decision: we will not drive subscription OAuth from ai-coder itself
+
+It is technically possible to spawn `claude /login` (or `claude setup-token`) from our server, surface the OAuth URL to the end user, and capture the resulting token from macOS Keychain (`claude-code` service) or `~/.claude/.credentials.json`. **We will not build this.** Per the [Claude Code authentication docs](https://code.claude.com/docs/en/authentication), Pro/Max subscription OAuth tokens are not permitted in non-official products. Anthropic has already taken enforcement action against third-party harnesses that tried (OpenCode / OpenClaw, Feb 2026), so building on it is a TOS-violation time-bomb regardless of whether it works on day one.
+
+It would also be a bad fit even if it were allowed: access tokens are ~60 min with refresh, credentials are device-scoped (Keychain / per-host file), and `setup-token` long-lived tokens are intended for CI on a single trusted machine — none of this maps to a multi-user shared server.
+
+The supported shapes for ai-coder are therefore:
+
+1. **Local / self-hosted personal use** — the user runs `claude /login` themselves on their own machine; the SDK on the same host picks up the credentials. This is the current "dev" mode and is the right model to document for solo users running ai-coder on their own laptop or VPS.
+2. **Hosted production** — `ANTHROPIC_API_KEY` in the secret store, billed against an Anthropic Console account we control (or pass-through with the user pasting their own key into their account settings).
+3. **Future multi-tenant** — Claude for Teams / Enterprise if/when that becomes relevant; org admin handles access, billing is centralized.
+
 ---
 
 ## 7. Local development
