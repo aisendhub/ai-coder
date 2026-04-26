@@ -101,27 +101,31 @@ for await (const msg of messages) {
 
 ## The factory
 
-[`server/llm/index.ts`](../server/llm/index.ts):
+[`server/llm/index.ts`](../server/llm/index.ts) holds a registry of
+provider id → instance, and reads `LLM_PROVIDER` from env to pick one:
 
 ```ts
+const PROVIDERS: Record<string, LlmProvider> = {
+  [claudeCodeProvider.id]: claudeCodeProvider,
+}
+
 export function getLlmProvider(): LlmProvider {
-  return claudeCodeProvider
+  const id = process.env.LLM_PROVIDER?.trim() || "claude-code-sdk"
+  const provider = PROVIDERS[id]
+  if (!provider) throw new Error(`LLM_PROVIDER="${id}" is not registered`)
+  return provider
 }
 ```
 
-When a second provider lands, this becomes:
+Today only `claude-code-sdk` is registered, and it's the default — leaving
+`LLM_PROVIDER` unset works. Setting it to an unknown value throws on first
+call rather than silently falling back, so a typo can't go unnoticed.
 
-```ts
-export function getLlmProvider(): LlmProvider {
-  const id = process.env.LLM_PROVIDER ?? "claude-code-sdk"
-  switch (id) {
-    case "claude-code-sdk": return claudeCodeProvider
-    case "openai-agents":   return openAiAgentsProvider     // hypothetical
-    default:
-      throw new Error(`unknown LLM_PROVIDER: ${id}`)
-  }
-}
-```
+To register a new provider:
+
+1. Implement `LlmProvider` in `server/llm/<your-provider>.ts`.
+2. Add it to the `PROVIDERS` map in `server/llm/index.ts`.
+3. Set `LLM_PROVIDER=<your-id>` in `.env`.
 
 ## Adding a non-Claude provider
 

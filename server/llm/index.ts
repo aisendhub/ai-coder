@@ -9,15 +9,29 @@ export type {
   SystemPromptSpec,
 } from "./provider.ts"
 
-// Single source of truth for which provider drives the agent. Today there is
-// only one (the Claude Agent SDK). When another lands, switch via env:
-//
-//   const id = process.env.LLM_PROVIDER ?? "claude-code-sdk"
-//   switch (id) { case "claude-code-sdk": return claudeCodeProvider; ... }
+const PROVIDERS: Record<string, LlmProvider> = {
+  [claudeCodeProvider.id]: claudeCodeProvider,
+}
+
+const DEFAULT_PROVIDER_ID = claudeCodeProvider.id
+
+// Single source of truth for which provider drives the agent. Today the
+// only implementation is `claude-code-sdk`. Set `LLM_PROVIDER` in `.env`
+// to switch when another lands. Unknown ids throw on first call so a
+// typo in env doesn't silently fall back.
 //
 // Callers should NEVER import `query` from `@anthropic-ai/claude-agent-sdk`
-// directly — go through `getLlmProvider().runAgent(...)` so the swap is
-// one-line. See docs/LLM-PROVIDER.md.
+// directly — go through `getLlmProvider().runAgent(...)`. See
+// docs/LLM-PROVIDER.md.
 export function getLlmProvider(): LlmProvider {
-  return claudeCodeProvider
+  const id = process.env.LLM_PROVIDER?.trim() || DEFAULT_PROVIDER_ID
+  const provider = PROVIDERS[id]
+  if (!provider) {
+    const known = Object.keys(PROVIDERS).join(", ")
+    throw new Error(
+      `LLM_PROVIDER="${id}" is not registered (known: ${known}). ` +
+      `Unset to use the default ("${DEFAULT_PROVIDER_ID}"), or register a new provider in server/llm/index.ts.`
+    )
+  }
+  return provider
 }
