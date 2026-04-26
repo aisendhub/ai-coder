@@ -1,4 +1,5 @@
 import { action, computed, observable, runInAction } from "mobx"
+import { toast } from "sonner"
 import { BaseList } from "./BaseList.model"
 import { BaseModel } from "./Base.model"
 import { Conversation } from "./Conversation.model"
@@ -21,6 +22,40 @@ class ProjectList extends BaseList<typeof Project> {
 }
 
 const LAST_PROJECT_KEY = "ai-coder:activeProjectId"
+
+// Per-session set of project ids we've already shown the project-switch
+// notice for. Repeated switches between two projects shouldn't toast every
+// time — once is enough.
+const switchNoticeShown = new Set<string>()
+
+async function notifyIfPreviousProjectHasServices(
+  projectId: string,
+  projectName: string | null,
+): Promise<void> {
+  if (switchNoticeShown.has(projectId)) return
+  try {
+    const res = await api(`/api/services?projectId=${encodeURIComponent(projectId)}`)
+    if (!res.ok) return
+    const json = (await res.json()) as { services: Array<{ status: string }> }
+    const live = json.services.filter(
+      (s) => s.status === "running" || s.status === "starting" || s.status === "stopping",
+    ).length
+    if (live === 0) return
+    switchNoticeShown.add(projectId)
+    const label = projectName ?? "Previous project"
+    toast.info(`${label}: ${live} service${live === 1 ? " is" : "s are"} still running`, {
+      description: "They keep running across project switches. Open the global drawer to manage.",
+      action: {
+        label: "View",
+        onClick: () =>
+          window.dispatchEvent(new CustomEvent("worktrees:open-services-drawer")),
+      },
+      duration: 8000,
+    })
+  } catch {
+    // advisory; silent failure is fine
+  }
+}
 
 export class Workspace extends BaseModel {
   @observable userId: string | null = null
@@ -118,6 +153,10 @@ export class Workspace extends BaseModel {
 
   @action setActiveProject(id: string | null) {
     if (id === this.activeProjectId) return
+    const previousId = this.activeProjectId
+    const previousName = previousId
+      ? this.projects.find(previousId)?.name ?? null
+      : null
     this.activeProjectId = id
     try {
       if (id) localStorage.setItem(LAST_PROJECT_KEY, id)
@@ -138,6 +177,10 @@ export class Workspace extends BaseModel {
         /* advisory; panel surfaces its own errors */
       })
     }
+    // Passive notice: if the project we just left has running services, let
+    // the user know so they don't forget about them. The global drawer chip
+    // also shows an amber indicator, but this toast is the discovery moment.
+    if (previousId) void notifyIfPreviousProjectHasServices(previousId, previousName)
   }
 
   async signIn(userId: string) {

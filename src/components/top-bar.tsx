@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ChangesTrigger, TerminalTrigger, FileTreeTrigger } from "@/components/right-panel"
 import { ServicesTrigger } from "@/components/services-panel"
+import { GlobalServicesTrigger } from "@/components/global-services-drawer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { showOsNotification } from "@/hooks/use-turn-notifications"
 import { workspace } from "@/models"
@@ -96,6 +97,7 @@ export const TopBar = observer(function TopBar({
           </Tooltip>
         )}
         <NotificationsTrigger />
+        <GlobalServicesTrigger />
         <ServicesTrigger open={servicesOpen} onOpenChange={onServicesOpenChange} />
         <FileTreeTrigger open={fileTreeOpen} onOpenChange={onFileTreeOpenChange} />
         <ChangesTrigger open={rightOpen} onOpenChange={onRightOpenChange} />

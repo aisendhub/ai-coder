@@ -4643,6 +4643,96 @@ app.get("/api/services/runners", async (c) => {
   return c.json({ runners })
 })
 
+// Cross-project listing for the global running-services drawer. Returns
+// services for the user across every project + worktree, plus a small
+// metadata side-channel so the client can group by Project → Worktree
+// without N extra lookups. Used by the top-bar chip + drawer.
+app.get("/api/services/all", async (c) => {
+  const sb = c.get("sb")
+  const userId = c.get("userId")
+  const services = listServices({ ownerId: userId })
+
+  // Side-channel: project names + conversation titles for the ids actually
+  // present in the running set. RLS filters; non-owned ids drop out.
+  const projectIds = Array.from(new Set(services.map((s) => s.projectId).filter(Boolean)))
+  const conversationIds = Array.from(
+    new Set(
+      services
+        .map((s) => s.worktreePath ? s.worktreePath : null)
+        .filter((p): p is string => !!p)
+    )
+  )
+  const [projects, conversations] = await Promise.all([
+    projectIds.length
+      ? sb.from("projects").select("id, name, cwd").in("id", projectIds)
+      : Promise.resolve({ data: [] }),
+    conversationIds.length
+      ? sb
+          .from("conversations")
+          .select("id, title, kind, worktree_path, branch")
+          .in("worktree_path", conversationIds)
+      : Promise.resolve({ data: [] }),
+  ])
+  return c.json({
+    services,
+    projects: projects.data ?? [],
+    conversations: conversations.data ?? [],
+  })
+})
+
+// Stop services in bulk by scope. Confirms are the client's job; the server
+// just enumerates instances matching the filter and stops each. Returns the
+// count actually stopped (which may be less than matched if some were
+// already stopping). Idempotent.
+//
+// Body: { scope, projectId?, worktreePath?, instanceIds? }
+//   scope: "user" — every instance for the calling user
+//        : "project" — every instance for one project (across worktrees)
+//        : "project-chats" — instances on the project cwd (worktreePath = null)
+//        : "worktree" — one worktree's instances (project + worktreePath)
+app.post("/api/services/stop-scope", async (c) => {
+  const userId = c.get("userId")
+  const body = await c.req.json<{
+    scope?: string
+    projectId?: string
+    worktreePath?: string | null
+  }>().catch(() => ({}))
+  const scope = body.scope
+  if (!scope) return c.json({ error: "scope required" }, 400)
+
+  // Build the listServices filter for each scope variant. The runtime's
+  // existing 4-tuple is enough — we don't need new filter primitives.
+  let toStop: ReturnType<typeof listServices>
+  if (scope === "user") {
+    toStop = listServices({ ownerId: userId })
+  } else if (scope === "project") {
+    if (!body.projectId) return c.json({ error: "projectId required for project scope" }, 400)
+    toStop = listServices({ ownerId: userId, projectId: body.projectId })
+  } else if (scope === "project-chats") {
+    if (!body.projectId) return c.json({ error: "projectId required" }, 400)
+    toStop = listServices({ ownerId: userId, projectId: body.projectId, worktreePath: null })
+  } else if (scope === "worktree") {
+    if (!body.projectId || !body.worktreePath) {
+      return c.json({ error: "projectId + worktreePath required for worktree scope" }, 400)
+    }
+    toStop = listServices({
+      ownerId: userId,
+      projectId: body.projectId,
+      worktreePath: body.worktreePath,
+    })
+  } else {
+    return c.json({ error: `unknown scope: ${scope}` }, 400)
+  }
+
+  // Settle all stops in parallel; tolerate per-instance failure (an instance
+  // may have already exited between list and stop).
+  const results = await Promise.allSettled(
+    toStop.map((s) => stopServiceAndWait(s.id, userId))
+  )
+  const stopped = results.filter((r) => r.status === "fulfilled").length
+  return c.json({ matched: toStop.length, stopped })
+})
+
 app.get("/api/services", (c) => {
   const userId = c.get("userId")
   const projectId = c.req.query("projectId") ?? undefined
