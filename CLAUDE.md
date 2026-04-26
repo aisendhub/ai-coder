@@ -11,11 +11,13 @@ Chat UI for Claude Code running on the host VM with per-project working director
 - **LLM**: `@anthropic-ai/claude-agent-sdk` spawning the `claude` CLI
 
 Docs:
+- [docs/PRODUCT-SIGNAL.md](docs/PRODUCT-SIGNAL.md) — **north-star**: async supervision, parallel AI, user as orchestrator. Read first when designing UI.
 - [docs/PLAN.md](docs/PLAN.md) — what we're building and why
 - [docs/PROGRESS.md](docs/PROGRESS.md) — live checklist of what's done and next
 - [docs/STACK.md](docs/STACK.md) — architecture, migrations, deployment, secrets
 - [docs/LLM-PROVIDER.md](docs/LLM-PROVIDER.md) — provider interface (`server/llm/`); swap point for non-Claude SDKs
 - [docs/SYSTEM-PROMPT.md](docs/SYSTEM-PROMPT.md) — system-prompt composition, `settingSources`, `<cwd>/.ai-coder/instructions.md` addendum
+- [docs/GIT-LOG.md](docs/GIT-LOG.md) — design proposal for the expandable git log (review-and-orchestrate surface)
 
 ## Quick links
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { observer } from "mobx-react-lite"
-import { X, FileText, RefreshCw, Code, Eye, Download, GitCommit, MessageSquare, ChevronDown, ChevronRight } from "lucide-react"
+import { X, FileText, RefreshCw, Code, Eye, Download, GitCommit, MessageSquare, ChevronDown, ChevronRight, ArrowLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable"
@@ -92,6 +92,35 @@ function BlameTrigger({
   )
 }
 
+/** Banner shown when the file panel is in commit-pinned mode. Sits below the
+ *  toolbar; click "Working tree" to drop the pin and return to the live file. */
+function CommitPinnedBanner({
+  shortSha,
+  onUnpin,
+}: {
+  shortSha: string
+  onUnpin: () => void
+}) {
+  return (
+    <div className="flex items-center gap-2 px-3 pb-2 text-[11px]">
+      <GitCommit className="size-3 shrink-0 text-muted-foreground" />
+      <span className="text-muted-foreground">
+        Viewing at{" "}
+        <code className="font-mono text-foreground">{shortSha}</code>
+      </span>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-6 px-2 ml-auto text-[11px]"
+        onClick={onUnpin}
+      >
+        <ArrowLeft className="size-3 mr-1" />
+        Working tree
+      </Button>
+    </div>
+  )
+}
+
 /** Header button that toggles the comment rail + pins in the file panel. */
 function CommentsTrigger({
   open,
@@ -140,6 +169,11 @@ export const FilePanelSlot = observer(function FilePanelSlot() {
 export const FilePanel = observer(function FilePanel() {
   const conversationId = workspace.active?.id ?? null
   const path = workspace.openFilePath
+  // Commit-pinned mode: when set, the panel shows the file at this sha
+  // (content + diff vs parent) instead of the working tree. Driven by
+  // clicking a file in the git-log expanded view. See docs/GIT-LOG.md.
+  const pinnedCommit = workspace.pinnedCommit
+  const pinnedSha = pinnedCommit?.sha ?? null
   const [content, setContent] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -206,30 +240,53 @@ export const FilePanel = observer(function FilePanel() {
     setLoading(true)
     setError(null)
     try {
-      // Pull the file's diff text from the changes endpoint (same payload the
-      // ChangesPanel uses) so we can compute line statuses without a second
-      // round-trip when it's already cached server-side.
-      const [fileRes, changesRes] = await Promise.all([
-        api(`/api/changes/file?conversationId=${encodeURIComponent(conversationId)}&path=${encodeURIComponent(path)}`),
-        api(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`),
-      ])
-      if (!fileRes.ok) {
-        const j = await fileRes.json().catch(() => ({}))
-        throw new Error(j.error || `HTTP ${fileRes.status}`)
-      }
-      const fileJson = (await fileRes.json()) as FileResponse
-      setContent(fileJson.content)
-      setTruncated(fileJson.truncated)
-      if (changesRes.ok) {
-        const cj = (await changesRes.json()) as {
-          files: { path: string; diff: string; status: typeof changeStatus }[]
+      if (pinnedSha) {
+        // Commit-pinned mode: one fetch for content + diff vs parent at this sha.
+        const res = await api(
+          `/api/git/show?conversationId=${encodeURIComponent(conversationId)}&sha=${encodeURIComponent(pinnedSha)}&path=${encodeURIComponent(path)}`
+        )
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}))
+          throw new Error(j.error || `HTTP ${res.status}`)
         }
-        const match = cj.files.find((f) => f.path === path)
-        setDiff(match?.diff ?? "")
-        setChangeStatus(match?.status ?? null)
+        const json = (await res.json()) as {
+          content: string
+          diff: string
+          truncated: boolean
+          isBinary: boolean
+        }
+        setContent(json.isBinary ? "" : json.content)
+        setTruncated(!!json.truncated)
+        setDiff(json.diff ?? "")
+        // Fake a status so the gutter still renders added/modified bars from
+        // the diff. Per-file status is in the git-log file row, not here.
+        setChangeStatus("modified")
       } else {
-        setDiff("")
-        setChangeStatus(null)
+        // Pull the file's diff text from the changes endpoint (same payload the
+        // ChangesPanel uses) so we can compute line statuses without a second
+        // round-trip when it's already cached server-side.
+        const [fileRes, changesRes] = await Promise.all([
+          api(`/api/changes/file?conversationId=${encodeURIComponent(conversationId)}&path=${encodeURIComponent(path)}`),
+          api(`/api/changes?conversationId=${encodeURIComponent(conversationId)}`),
+        ])
+        if (!fileRes.ok) {
+          const j = await fileRes.json().catch(() => ({}))
+          throw new Error(j.error || `HTTP ${fileRes.status}`)
+        }
+        const fileJson = (await fileRes.json()) as FileResponse
+        setContent(fileJson.content)
+        setTruncated(fileJson.truncated)
+        if (changesRes.ok) {
+          const cj = (await changesRes.json()) as {
+            files: { path: string; diff: string; status: typeof changeStatus }[]
+          }
+          const match = cj.files.find((f) => f.path === path)
+          setDiff(match?.diff ?? "")
+          setChangeStatus(match?.status ?? null)
+        } else {
+          setDiff("")
+          setChangeStatus(null)
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -238,7 +295,7 @@ export const FilePanel = observer(function FilePanel() {
     } finally {
       setLoading(false)
     }
-  }, [conversationId, path])
+  }, [conversationId, path, pinnedSha])
 
   // Initial + path-change fetch.
   useEffect(() => {
@@ -251,10 +308,16 @@ export const FilePanel = observer(function FilePanel() {
     if (path) fetchFile()
   }, [path, fetchFile])
 
+  // Blame and comments are working-tree concepts. In commit-pinned mode the
+  // file is a frozen snapshot; turning these off keeps the panel honest and
+  // avoids a `git blame` against working-tree state that no longer matches.
+  const blameActive = blameEnabled && !pinnedSha
+  const commentsActive = commentsEnabled && !pinnedSha
+
   // Blame fetch — only when enabled. Re-runs on path/conv change and on
   // file-watcher SSE (wired alongside the file-content watcher below).
   const fetchBlame = useCallback(async () => {
-    if (!conversationId || !path || !blameEnabled) {
+    if (!conversationId || !path || !blameActive) {
       setBlame(null)
       return
     }
@@ -270,18 +333,18 @@ export const FilePanel = observer(function FilePanel() {
     } catch {
       setBlame(null)
     }
-  }, [conversationId, path, blameEnabled])
+  }, [conversationId, path, blameActive])
 
   useEffect(() => {
     setBlame(null)
     setOpenBlameLine(null)
-    if (blameEnabled) void fetchBlame()
-  }, [blameEnabled, path, fetchBlame])
+    if (blameActive) void fetchBlame()
+  }, [blameActive, path, fetchBlame])
 
   // Comments fetch. Re-runs when conv/path/projectId/enabled changes or when
   // the file changes on disk (see SSE watcher below).
   const fetchComments = useCallback(async () => {
-    if (!conversationId || !path || !projectId || !commentsEnabled) {
+    if (!conversationId || !path || !projectId || !commentsActive) {
       setComments([])
       return
     }
@@ -298,14 +361,14 @@ export const FilePanel = observer(function FilePanel() {
     } catch {
       setComments([])
     }
-  }, [conversationId, path, projectId, commentsEnabled])
+  }, [conversationId, path, projectId, commentsActive])
 
   useEffect(() => {
     setComments([])
     setOpenCommentId(null)
     setComposerLine(null)
-    if (commentsEnabled) void fetchComments()
-  }, [commentsEnabled, path, projectId, fetchComments])
+    if (commentsActive) void fetchComments()
+  }, [commentsActive, path, projectId, fetchComments])
 
   const submitComment = useCallback(
     async (line: number, body: string) => {
@@ -361,9 +424,11 @@ export const FilePanel = observer(function FilePanel() {
     [fetchComments],
   )
 
-  // Live refresh on file-system change.
+  // Live refresh on file-system change. Skipped in commit-pinned mode — the
+  // pinned snapshot is by definition frozen, and we don't want a working-tree
+  // edit to silently swap the content under the user.
   useEffect(() => {
-    if (!conversationId || !path) return
+    if (!conversationId || !path || pinnedSha) return
     let es: EventSource | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
     const debounce = (() => {
@@ -372,8 +437,8 @@ export const FilePanel = observer(function FilePanel() {
         if (t) clearTimeout(t)
         t = setTimeout(() => {
           void fetchFile()
-          if (blameEnabled) void fetchBlame()
-          if (commentsEnabled) void fetchComments()
+          if (blameActive) void fetchBlame()
+          if (commentsActive) void fetchComments()
         }, 200)
       }
     })()
@@ -390,7 +455,7 @@ export const FilePanel = observer(function FilePanel() {
       es?.close()
       if (retry) clearTimeout(retry)
     }
-  }, [conversationId, path, fetchFile, fetchBlame, fetchComments, blameEnabled, commentsEnabled])
+  }, [conversationId, path, pinnedSha, fetchFile, fetchBlame, fetchComments, blameActive, commentsActive])
 
   // Highlight when content changes.
   useEffect(() => {
@@ -455,14 +520,18 @@ export const FilePanel = observer(function FilePanel() {
             </span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <CommentsTrigger
-              open={commentsEnabled}
-              onOpenChange={setCommentsEnabled}
-            />
-            <BlameTrigger
-              open={blameEnabled}
-              onOpenChange={setBlameEnabled}
-            />
+            {!pinnedSha && (
+              <>
+                <CommentsTrigger
+                  open={commentsEnabled}
+                  onOpenChange={setCommentsEnabled}
+                />
+                <BlameTrigger
+                  open={blameEnabled}
+                  onOpenChange={setBlameEnabled}
+                />
+              </>
+            )}
             {isMarkdown && (
               <Tooltip>
                 <TooltipTrigger>
@@ -541,10 +610,16 @@ export const FilePanel = observer(function FilePanel() {
         {error && (
           <div className="px-3 pb-2 text-xs text-red-600">{error}</div>
         )}
-        {commentsEnabled && outdatedComments.length > 0 && (
+        {commentsActive && outdatedComments.length > 0 && (
           <OutdatedCommentsDrawer
             comments={outdatedComments}
             onResolve={(id) => updateCommentStatus(id, "resolved")}
+          />
+        )}
+        {pinnedCommit && (
+          <CommitPinnedBanner
+            shortSha={pinnedCommit.shortSha}
+            onUnpin={() => workspace.unpinCommit()}
           />
         )}
       </div>
@@ -562,11 +637,11 @@ export const FilePanel = observer(function FilePanel() {
           html={language ? html : null}
           byLine={lineStatuses.byLine}
           removedAfter={lineStatuses.removedAfter}
-          blameEnabled={blameEnabled}
+          blameEnabled={blameActive}
           blame={blame}
           openBlameLine={openBlameLine}
           onOpenBlameLine={openBlame}
-          commentsEnabled={commentsEnabled}
+          commentsEnabled={commentsActive}
           commentsByLine={commentsByLine}
           openComment={openComment}
           onOpenCommentById={openCommentById}
@@ -893,9 +968,20 @@ function FileBody({
                   color={color}
                   faded
                   isOpen={openBlameLine === lineNo}
-                  onClick={() =>
-                    onOpenBlameLine(openBlameLine === lineNo ? null : lineNo)
-                  }
+                  onClick={() => {
+                    const opening = openBlameLine !== lineNo
+                    onOpenBlameLine(opening ? lineNo : null)
+                    if (opening && !info.isUncommitted) {
+                      window.dispatchEvent(new CustomEvent("ai-coder:open-git-log"))
+                      setTimeout(() => {
+                        window.dispatchEvent(
+                          new CustomEvent("ai-coder:focus-commit", {
+                            detail: { sha: info.sha },
+                          })
+                        )
+                      }, 50)
+                    }
+                  }}
                 />
               </div>
             )

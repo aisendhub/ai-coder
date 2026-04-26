@@ -34,6 +34,12 @@ export class Workspace extends BaseModel {
   /** When non-null, the file panel is open and showing this path
    *  (relative to the active conversation's project cwd). */
   @observable openFilePath: string | null = null
+  /** When non-null, the file panel is in *commit-pinned* mode: it shows the
+   *  file's content + diff at this sha instead of the working tree. Set by
+   *  clicking a file inside the git-log expanded view. Cleared by opening a
+   *  file from any working-tree surface or by hitting "back to working tree"
+   *  in the file-panel banner. See docs/GIT-LOG.md. */
+  @observable pinnedCommit: { sha: string; shortSha: string } | null = null
   @observable loading = false
 
   conversations = ConversationList.create()
@@ -76,6 +82,7 @@ export class Workspace extends BaseModel {
     this.activeId = id
     // The open file is scoped to a conversation's project — drop it on switch.
     this.openFilePath = null
+    this.pinnedCommit = null
     const next = this.active
     if (next) {
       if (!next.loaded) void next.loadMessages()
@@ -90,10 +97,23 @@ export class Workspace extends BaseModel {
 
   @action openFile(path: string) {
     this.openFilePath = path
+    // Opening from any working-tree surface returns the panel to working-tree
+    // mode. Commit-pinned mode is opt-in via openFileAtCommit().
+    this.pinnedCommit = null
+  }
+
+  @action openFileAtCommit(path: string, sha: string, shortSha: string) {
+    this.openFilePath = path
+    this.pinnedCommit = { sha, shortSha }
+  }
+
+  @action unpinCommit() {
+    this.pinnedCommit = null
   }
 
   @action closeFile() {
     this.openFilePath = null
+    this.pinnedCommit = null
   }
 
   @action setActiveProject(id: string | null) {
@@ -254,7 +274,7 @@ export class Workspace extends BaseModel {
       const res = await api("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, userId: this.userId, name, cwd, worktreeMode }),
+        body: JSON.stringify({ id, name, cwd, worktreeMode }),
       })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
@@ -323,7 +343,6 @@ export class Workspace extends BaseModel {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id,
-          userId,
           projectId,
           title,
           kind: "task",
@@ -401,7 +420,6 @@ export class Workspace extends BaseModel {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id,
-          userId,
           projectId,
           title: "New chat",
         }),

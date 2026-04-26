@@ -1189,6 +1189,238 @@ app.get("/api/git/log", async (c) => {
   }
 })
 
+// Commit detail: subject + body + parents + per-file status & numstat. Used
+// by the git-log expand-on-click view (see docs/GIT-LOG.md). Subject/body
+// are returned for later phases — phase 1 only renders the file list.
+app.get("/api/git/commit", async (c) => {
+  try {
+    const conversationId = c.req.query("conversationId")
+    const sha = c.req.query("sha")
+    if (!conversationId || !sha) {
+      return c.json({ error: "conversationId and sha required" }, 400)
+    }
+    if (!/^[0-9a-f]{4,64}$/i.test(sha)) {
+      return c.json({ error: "invalid sha" }, 400)
+    }
+    const cwd = await cwdForConversation(conversationId)
+    const FS = "\x1f"
+    // %H sha · %h shortSha · %P parents · %an author · %ae email · %ct ctime · %s subject · %b body
+    const { stdout: meta } = await execFileP(
+      "git",
+      ["show", "--no-patch", `--pretty=format:%H${FS}%h${FS}%P${FS}%an${FS}%ae${FS}%ct${FS}%s${FS}%b`, sha],
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
+    )
+    const [fullSha, shortSha, parentsRaw, authorName, authorEmail, ctime, subject, ...bodyParts] =
+      meta.split(FS)
+    const body = bodyParts.join(FS).replace(/\n+$/, "")
+    const parents = parentsRaw ? parentsRaw.split(" ").filter(Boolean) : []
+
+    // --raw gives us status AND file modes in one parse, which lets us flag
+    // gitlink entries (mode 160000 = submodule pointers). Without this the
+    // git-log file list would render submodules as regular files and clicking
+    // them would 500 with `git show <sha>:<submodulePath>` failing because
+    // the path resolves to a commit pointer, not a blob.
+    type CommitFile = {
+      path: string
+      oldPath?: string
+      status: "A" | "M" | "D" | "R" | "C" | "T"
+      insertions: number
+      deletions: number
+      isBinary: boolean
+      isSubmodule: boolean
+      submoduleFromSha?: string
+      submoduleToSha?: string
+    }
+    const files = new Map<string, CommitFile>()
+
+    const { stdout: rawDiff } = await execFileP(
+      "git",
+      ["show", "--raw", "-z", "-M", "-C", "--pretty=format:", sha],
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
+    )
+    // Format with -z (single-parent commits):
+    //   :<srcMode> <dstMode> <srcSha> <dstSha> <status>\0<path>\0
+    // Renames/copies:
+    //   :<srcMode> <dstMode> <srcSha> <dstSha> R<score>\0<oldPath>\0<newPath>\0
+    // Combined diffs (merge commits) prefix with `::` and have extra columns;
+    // we skip those — phase 1 doesn't render merge commits specially.
+    const rawTokens = rawDiff.split("\0").filter((t) => t.length > 0)
+    let i = 0
+    while (i < rawTokens.length) {
+      const meta = rawTokens[i]
+      if (!meta.startsWith(":") || meta.startsWith("::")) {
+        i++
+        continue
+      }
+      const fields = meta.replace(/^:+/, "").split(" ").filter(Boolean)
+      if (fields.length < 5) {
+        i++
+        continue
+      }
+      const [srcMode, dstMode, srcSha, dstSha, statusCode] = fields
+      const letter = statusCode[0] as CommitFile["status"]
+      // Submodule = gitlink mode on either side. Deleted submodules carry
+      // mode on srcMode; added on dstMode; modified on both.
+      const isSubmodule = srcMode === "160000" || dstMode === "160000"
+      const submoduleFromSha = isSubmodule && srcSha !== "0".repeat(srcSha.length) ? srcSha : undefined
+      const submoduleToSha = isSubmodule && dstSha !== "0".repeat(dstSha.length) ? dstSha : undefined
+      if (letter === "R" || letter === "C") {
+        const oldPath = rawTokens[i + 1]
+        const newPath = rawTokens[i + 2]
+        files.set(newPath, {
+          path: newPath, oldPath, status: letter,
+          insertions: 0, deletions: 0, isBinary: false,
+          isSubmodule, submoduleFromSha, submoduleToSha,
+        })
+        i += 3
+      } else {
+        const path = rawTokens[i + 1]
+        files.set(path, {
+          path, status: letter,
+          insertions: 0, deletions: 0, isBinary: false,
+          isSubmodule, submoduleFromSha, submoduleToSha,
+        })
+        i += 2
+      }
+    }
+
+    const { stdout: numstat } = await execFileP(
+      "git",
+      ["show", "--numstat", "-z", "--pretty=format:", sha],
+      { cwd, maxBuffer: 5 * 1024 * 1024 }
+    )
+    // -z numstat format is `<add>\t<del>\t<path>\0` for normal files and
+    // `<add>\t<del>\t\0<oldPath>\0<newPath>\0` for renames. Binary rows
+    // report `-\t-\t…`.
+    const tokens = numstat.split("\0")
+    let j = 0
+    while (j < tokens.length) {
+      const row = tokens[j]
+      if (!row) { j++; continue }
+      const tabs = row.split("\t")
+      if (tabs.length < 3) { j++; continue }
+      const [addStr, delStr, maybePath] = tabs
+      const isBinary = addStr === "-" && delStr === "-"
+      const insertions = isBinary ? 0 : parseInt(addStr, 10) || 0
+      const deletions = isBinary ? 0 : parseInt(delStr, 10) || 0
+      let path = maybePath
+      if (!path) {
+        // rename: next two NUL-separated tokens are oldPath, newPath
+        path = tokens[j + 2] ?? ""
+        j += 3
+      } else {
+        j += 1
+      }
+      const existing = files.get(path)
+      if (existing) {
+        existing.insertions = insertions
+        existing.deletions = deletions
+        existing.isBinary = isBinary
+      }
+    }
+
+    const totals = Array.from(files.values()).reduce(
+      (acc, f) => ({
+        insertions: acc.insertions + f.insertions,
+        deletions: acc.deletions + f.deletions,
+      }),
+      { insertions: 0, deletions: 0 }
+    )
+
+    return c.json({
+      sha: fullSha,
+      shortSha,
+      parents,
+      authorName,
+      authorEmail,
+      committerTime: (parseInt(ctime, 10) || 0) * 1000,
+      subject: subject ?? "",
+      body,
+      stats: { files: files.size, ...totals },
+      files: Array.from(files.values()),
+    })
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+// File content + diff at a specific commit. Used by the file panel in
+// commit-pinned mode (clicking a file in the git-log expanded view). Same
+// response shape as /api/changes/file plus a `diff` field, so the panel
+// can swap fetch sources without restructuring its render path.
+app.get("/api/git/show", async (c) => {
+  try {
+    const conversationId = c.req.query("conversationId")
+    const sha = c.req.query("sha")
+    const path = c.req.query("path")
+    if (!conversationId || !sha || !path) {
+      return c.json({ error: "conversationId, sha and path required" }, 400)
+    }
+    if (!/^[0-9a-f]{4,64}$/i.test(sha)) {
+      return c.json({ error: "invalid sha" }, 400)
+    }
+    const cwd = await cwdForConversation(conversationId)
+    // Reject paths that would escape the cwd via sandbox check on the resolved
+    // absolute. `git show` itself respects the repo, but the path string still
+    // gets logged — keep parity with /api/changes/file.
+    const abs = resolve(cwd, path)
+    if (!abs.startsWith(cwd + "/") && abs !== cwd) {
+      return c.json({ error: "path escapes project root" }, 400)
+    }
+    let content = ""
+    let isBinary = false
+    try {
+      const { stdout } = await execFileP("git", ["show", `${sha}:${path}`], {
+        cwd, maxBuffer: 5 * 1024 * 1024, encoding: "utf8",
+      })
+      content = stdout
+    } catch (err) {
+      // File didn't exist at this commit (e.g., deleted commits) — return
+      // empty content with a marker. The panel renders the diff regardless.
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/does not exist|exists on disk/i.test(msg)) throw err
+    }
+    let diff = ""
+    try {
+      const { stdout } = await execFileP(
+        "git",
+        ["diff", `${sha}^!`, "--", path],
+        { cwd, maxBuffer: 5 * 1024 * 1024 }
+      )
+      diff = stdout
+    } catch {
+      // Initial commit (no parent) — diff against the empty tree.
+      try {
+        const { stdout } = await execFileP(
+          "git",
+          ["diff", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", sha, "--", path],
+          { cwd, maxBuffer: 5 * 1024 * 1024 }
+        )
+        diff = stdout
+      } catch {
+        diff = ""
+      }
+    }
+    // Cheap binary heuristic — `git show` will already have warned if the
+    // blob is binary, but we don't see that signal in stdout. Detect by NUL.
+    if (content.includes("\0")) {
+      isBinary = true
+      content = ""
+    }
+    return c.json({
+      sha,
+      path,
+      content,
+      diff,
+      truncated: false,
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+      isBinary,
+    })
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // `git blame` per-line authorship for the file panel's blame rail.
 // Scoped to a conversation's cwd (worktree-aware via cwdForConversation).
@@ -2931,6 +3163,124 @@ async function reapTrashedConversations(): Promise<void> {
 setTimeout(() => { void reapTrashedConversations() }, 30_000)
 setInterval(() => { void reapTrashedConversations() }, REAPER_INTERVAL_MS)
 
+// ─── Worktree disk usage + manual prune ─────────────────────────────────────
+// Operational surfaces for the kanban board: a per-project usage report so
+// users see how much disk the worktrees are eating, and a manual prune that
+// reaps soft-trashed conversations regardless of the 7-day grace window.
+
+async function diskUsageBytes(path: string): Promise<number> {
+  try {
+    // -k forces 1024-byte blocks (POSIX); -s gives the directory total only.
+    const { stdout } = await execFileP("du", ["-sk", path], { maxBuffer: 1024 * 1024 })
+    const k = parseInt(stdout.split(/\s+/)[0], 10) || 0
+    return k * 1024
+  } catch {
+    // Path missing or unreadable — treat as zero, don't fail the report.
+    return 0
+  }
+}
+
+// GET /api/projects/:id/usage
+// RLS scopes the project lookup; non-owned projects return 404. Worktree
+// rows come from `conversations` filtered by project_id, also RLS-scoped.
+app.get("/api/projects/:id/usage", async (c) => {
+  const sb = c.get("sb")
+  const projectId = c.req.param("id")
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, cwd")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+
+  const { data: convs } = await sb
+    .from("conversations")
+    .select("id, branch, worktree_path, deleted_at, shipped_at")
+    .eq("project_id", projectId)
+    .not("worktree_path", "is", null)
+  const worktrees = await Promise.all(
+    (convs ?? []).map(async (conv) => {
+      const path = conv.worktree_path as string
+      const bytes = await diskUsageBytes(path)
+      const status: "active" | "trashed" | "shipped" =
+        conv.deleted_at ? "trashed" : conv.shipped_at ? "shipped" : "active"
+      return {
+        conversationId: conv.id,
+        branch: conv.branch as string | null,
+        path,
+        bytes,
+        status,
+      }
+    })
+  )
+  const totalBytes = worktrees.reduce((sum, w) => sum + w.bytes, 0)
+  const trashedBytes = worktrees
+    .filter((w) => w.status === "trashed")
+    .reduce((sum, w) => sum + w.bytes, 0)
+  return c.json({
+    project: { cwd: resolveProjectCwd(project.cwd as string), totalBytes, trashedBytes },
+    worktrees,
+  })
+})
+
+// POST /api/projects/:id/prune-trashed
+// Hard-deletes every soft-trashed conversation in this project right now,
+// regardless of the reaper's grace window. Returns the count freed and the
+// total bytes reclaimed (best-effort; computed from `du` before removal).
+app.post("/api/projects/:id/prune-trashed", async (c) => {
+  const sb = c.get("sb")
+  const projectId = c.req.param("id")
+  if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
+
+  // Ownership: read the project user-scoped so RLS gates this endpoint.
+  const { data: project } = await sb
+    .from("projects")
+    .select("id, cwd")
+    .eq("id", projectId)
+    .single()
+  if (!project) return c.json({ error: "project not found" }, 404)
+
+  // Trashed conversations to reap (also user-scoped via RLS).
+  const { data: rows } = await sb
+    .from("conversations")
+    .select("id, worktree_path, branch")
+    .eq("project_id", projectId)
+    .not("deleted_at", "is", null)
+  const trashed = rows ?? []
+  if (trashed.length === 0) return c.json({ count: 0, bytesFreed: 0 })
+
+  const baseCwd = resolveProjectCwd(project.cwd as string)
+  let bytesFreed = 0
+  let count = 0
+  for (const row of trashed) {
+    try {
+      if (row.worktree_path) {
+        bytesFreed += await diskUsageBytes(row.worktree_path as string)
+        await removeWorktree({
+          baseCwd,
+          worktreePath: row.worktree_path as string,
+          branch: (row.branch as string | null) ?? undefined,
+          force: true,
+        })
+      }
+      // Hard-delete via service-role; RLS would also allow but service-role
+      // matches the reaper's path so logs read identically.
+      await sbSystem.from("conversations").delete().eq("id", row.id)
+      logWorktreeEvent("reap.manual_prune", {
+        conv: (row.id as string).slice(0, 8),
+        branch: (row.branch as string | null) ?? "",
+      })
+      count++
+    } catch (err) {
+      console.warn(
+        "[prune] failed for", (row.id as string).slice(0, 8),
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+  return c.json({ count, bytesFreed })
+})
+
 // ─── Local runtime: /api/services/* ─────────────────────────────────────────
 // Spawns the user's app from a project or worktree cwd, captures logs,
 // and lists/streams. See docs/RUNTIME.md; runner code lives in
@@ -3685,25 +4035,6 @@ app.delete("/api/projects/:id/manifest", async (c) => {
 // read/write the default service row; these endpoints are the new surface
 // for multi-service setups.
 
-type ProjectAuth =
-  | { ok: true }
-  | { ok: false; status: 403 | 404 | 503; error: string }
-
-async function authorizeProject(
-  projectId: string,
-  userId: string
-): Promise<ProjectAuth> {
-  if (!sbSystem) return { ok: false, status: 503, error: "persistence disabled" }
-  const { data: project } = await sbSystem
-    .from("projects")
-    .select("id, user_id")
-    .eq("id", projectId)
-    .single()
-  if (!project) return { ok: false, status: 404, error: "project not found" }
-  if (project.user_id !== userId) return { ok: false, status: 403, error: "forbidden" }
-  return { ok: true }
-}
-
 function sanitizeServiceWrite(raw: unknown, fallbackName?: string): ProjectServiceWrite | null {
   if (!raw || typeof raw !== "object") return null
   const r = raw as Record<string, unknown>
@@ -3750,8 +4081,8 @@ app.get("/api/projects/:id/services", async (c) => {
   const sb = c.get("sb")
   const projectId = c.req.param("id")
   const userId = c.get("userId")
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
   const rows = await listProjectServices(sb, projectId)
   return c.json({ services: rows })
 })
@@ -3761,8 +4092,8 @@ app.post("/api/projects/:id/services", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
 
   const write = sanitizeServiceWrite(body.service)
   if (!write) return c.json({ error: "invalid service — need at least { name, start }" }, 400)
@@ -3793,8 +4124,8 @@ app.get("/api/projects/:id/services/detect", async (c) => {
   const projectId = c.req.param("id")
   const userId = c.get("userId")
   const conversationId = c.req.query("conversationId") || undefined
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
 
   // Resolve cwd: prefer the conversation's worktree when present so a task's
   // monorepo view shows what the user has actually built in it.
@@ -3845,8 +4176,8 @@ app.post("/api/projects/:id/services/detect-llm", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; conversationId?: string }>().catch(() => ({}))
   const userId = c.get("userId")
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
 
   const { data: project } = await sb
     .from("projects")
@@ -3908,8 +4239,8 @@ app.get("/api/projects/:id/services/:name", async (c) => {
   const projectId = c.req.param("id")
   const name = c.req.param("name")
   const userId = c.get("userId")
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
   const row = await getProjectService(sb, projectId, name)
   if (!row) return c.json({ error: "service not found" }, 404)
   return c.json(row)
@@ -3921,8 +4252,8 @@ app.put("/api/projects/:id/services/:name", async (c) => {
   const name = c.req.param("name")
   const body = await c.req.json<{ userId?: string; service?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
 
   // URL path wins on name — clients renaming a service do it via DELETE+POST.
   const write = sanitizeServiceWrite(body.service, name)
@@ -3959,8 +4290,8 @@ app.delete("/api/projects/:id/services/:name", async (c) => {
   const projectId = c.req.param("id")
   const name = c.req.param("name")
   const userId = c.get("userId")
-  const auth = await authorizeProject(projectId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
+  if (!project) return c.json({ error: "project not found" }, 404)
 
   try {
     await deleteProjectService(sb, projectId, name)
@@ -4103,28 +4434,13 @@ app.delete("/api/conversations/:id/manifest-override", async (c) => {
 // don't have any overrides. The column is `conversations.service_overrides`
 // (jsonb map keyed by service name). See docs/MULTI-SERVICE.md.
 
-async function authorizeConversation(
-  conversationId: string,
-  userId: string
-): Promise<ProjectAuth> {
-  if (!sbSystem) return { ok: false, status: 503, error: "persistence disabled" }
-  const { data: conv } = await sbSystem
-    .from("conversations")
-    .select("id, user_id")
-    .eq("id", conversationId)
-    .single()
-  if (!conv) return { ok: false, status: 404, error: "conversation not found" }
-  if (conv.user_id !== userId) return { ok: false, status: 403, error: "forbidden" }
-  return { ok: true }
-}
-
 app.get("/api/conversations/:id/services/:name/override", async (c) => {
   const sb = c.get("sb")
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
   const userId = c.get("userId")
-  const auth = await authorizeConversation(conversationId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: conv } = await sb.from("conversations").select("id").eq("id", conversationId).single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
   const override = await getConversationServiceOverride(sb, conversationId, serviceName)
   return c.json({ override })
 })
@@ -4135,8 +4451,8 @@ app.put("/api/conversations/:id/services/:name/override", async (c) => {
   const serviceName = c.req.param("name")
   const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
-  const auth = await authorizeConversation(conversationId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: conv } = await sb.from("conversations").select("id").eq("id", conversationId).single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
 
   const override = sanitizeOverride(body.override)
   if (!override) return c.json({ error: "invalid override — need at least one manifest field" }, 400)
@@ -4154,8 +4470,8 @@ app.delete("/api/conversations/:id/services/:name/override", async (c) => {
   const conversationId = c.req.param("id")
   const serviceName = c.req.param("name")
   const userId = c.get("userId")
-  const auth = await authorizeConversation(conversationId, userId)
-  if (!auth.ok) return c.json({ error: auth.error }, auth.status)
+  const { data: conv } = await sb.from("conversations").select("id").eq("id", conversationId).single()
+  if (!conv) return c.json({ error: "conversation not found" }, 404)
   try {
     await setConversationServiceOverride(sb, conversationId, serviceName, null)
     return c.json({ ok: true })

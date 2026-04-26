@@ -24,6 +24,13 @@ import { workspace } from "@/models"
 type ConfirmFn = ReturnType<typeof useConfirm>
 type DiffSummary = { filesChanged: number; additions: number; deletions: number }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
 type BoardTask = {
   id: string
   title: string
@@ -182,6 +189,72 @@ export const Board = observer(function Board({ open, onClose }: Props) {
   // Empty for backlog/shipped/trashed; the server only computes for tasks
   // that have a worktree and a base ref.
   const [summaries, setSummaries] = useState<Record<string, DiffSummary>>({})
+  // Disk usage summary for this project's worktrees. Loaded from
+  // GET /api/projects/:id/usage when the board opens; refreshed after a
+  // manual prune so the indicator reflects what was just freed.
+  const [usage, setUsage] = useState<{ totalBytes: number; trashedBytes: number } | null>(null)
+  const [pruning, setPruning] = useState(false)
+
+  const refreshUsage = useCallback(async () => {
+    if (!projectId) {
+      setUsage(null)
+      return
+    }
+    try {
+      const res = await api(`/api/projects/${projectId}/usage`)
+      if (!res.ok) return
+      const json = (await res.json()) as {
+        project: { totalBytes: number; trashedBytes: number }
+      }
+      setUsage({
+        totalBytes: json.project.totalBytes,
+        trashedBytes: json.project.trashedBytes,
+      })
+    } catch {
+      // advisory; the indicator just won't render
+    }
+  }, [projectId])
+
+  const handlePrune = useCallback(async () => {
+    if (!projectId || pruning) return
+    const trashedCount = tasks.filter((t) => t.deleted_at).length
+    if (trashedCount === 0) {
+      toast.info("Nothing to prune", { description: "No trashed tasks." })
+      return
+    }
+    const ok = await confirm({
+      title: `Prune ${trashedCount} trashed task${trashedCount === 1 ? "" : "s"}?`,
+      description:
+        "This skips the 7-day grace window and permanently removes the worktree(s) on disk.",
+      variant: "destructive",
+      confirmText: "Prune now",
+    })
+    if (!ok) return
+    setPruning(true)
+    try {
+      const res = await api(`/api/projects/${projectId}/prune-trashed`, {
+        method: "POST",
+      })
+      const body = (await res.json().catch(() => ({}))) as {
+        count?: number
+        bytesFreed?: number
+        error?: string
+      }
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+      toast.success(`Pruned ${body.count ?? 0} task(s)`, {
+        description: body.bytesFreed
+          ? `Freed ${formatBytes(body.bytesFreed)}.`
+          : undefined,
+      })
+      await refreshUsage()
+    } catch (err) {
+      toast.error("Prune failed", {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setPruning(false)
+    }
+  }, [projectId, pruning, tasks, confirm, refreshUsage])
 
   const handleDrop = useCallback(
     async (taskId: string, from: ColumnKey, to: ColumnKey) => {
@@ -211,6 +284,17 @@ export const Board = observer(function Board({ open, onClose }: Props) {
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [open, onClose])
+
+  // Refresh the disk-usage indicator whenever the board opens. The values
+  // change slowly (per-task, not per-keystroke) so we don't poll — just
+  // refresh on open and after a manual prune.
+  useEffect(() => {
+    if (!open) {
+      setUsage(null)
+      return
+    }
+    void refreshUsage()
+  }, [open, refreshUsage])
 
   // Load all tasks (including trashed) for the active project when the board
   // opens. Small scope keeps the query fast; realtime below handles updates.
@@ -344,9 +428,39 @@ export const Board = observer(function Board({ open, onClose }: Props) {
           </span>
           {loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground ml-1" />}
         </div>
-        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close board">
-          <X className="size-4" />
-        </Button>
+        <div className="flex items-center gap-3">
+          {usage && usage.totalBytes > 0 && (
+            <span
+              className="text-[11px] text-muted-foreground font-mono inline-flex items-center gap-2"
+              title={
+                usage.trashedBytes > 0
+                  ? `Total worktree disk usage: ${formatBytes(usage.totalBytes)} (${formatBytes(usage.trashedBytes)} in trashed tasks)`
+                  : `Total worktree disk usage: ${formatBytes(usage.totalBytes)}`
+              }
+            >
+              <span>{formatBytes(usage.totalBytes)} on disk</span>
+              {usage.trashedBytes > 0 && (
+                <span className="text-amber-600 dark:text-amber-400">
+                  · {formatBytes(usage.trashedBytes)} trashed
+                </span>
+              )}
+            </span>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 text-xs"
+            disabled={pruning || tasks.filter((t) => t.deleted_at).length === 0}
+            onClick={handlePrune}
+            title="Hard-delete trashed tasks now (skips the 7-day grace window)"
+          >
+            {pruning ? <Loader2 className="size-3 animate-spin" /> : <Trash2 className="size-3" />}
+            Prune trashed
+          </Button>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close board">
+            <X className="size-4" />
+          </Button>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 overflow-x-auto">
