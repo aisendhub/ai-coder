@@ -535,13 +535,21 @@ Start-command rules:
 - Rails: \`rails server -p $PORT\` or \`bin/dev -p $PORT\`.
 - If a service lives in a subdir, prefix \`cd <subdir> && \`.
 
-Service-to-service refs: if one service needs another's URL (web → api),
-write the env value with Railway-style references — e.g.
-\`API_URL=\${{api.URL}}\` or \`API_HOST=\${{api.HOST}}\`. The host resolves
-\`\${{svc.URL|HOST|PORT}}\` against running siblings at spawn time. You
-also get auto-injected \`WORKTREES_SVC_<NAME>_URL\` for every sibling, so
-plain \`fetch(process.env.WORKTREES_SVC_API_URL)\` works without any
-explicit reference.
+Service-to-service refs: every running sibling auto-injects
+\`<NAME>_URL\`, \`<NAME>_HOST\`, \`<NAME>_PORT\` into other services in
+the same scope (project + worktree). So if you have \`api\` running, the
+\`web\` service automatically gets \`API_URL\`, \`API_HOST\`, \`API_PORT\`
+in its env — \`fetch(process.env.API_URL)\` just works. No explicit
+reference needed for the common case.
+
+If you need composition (e.g. \`API_URL=https://\${{api.HOST}}:\${{api.PORT}}/v1\`)
+use Railway-style \`\${{svc.URL|HOST|PORT}}\` syntax in env values; the
+host resolves them at spawn time against the live registry.
+
+If the user has set their own \`API_URL\` (project or worktree env), it
+overrides the auto-injected one — discovery is the LOWEST-precedence
+layer. So an app pointing at remote staging stays pointing at remote
+staging even when a local \`api\` service is running.
 
 Names: short identifier (lowercase letters, digits, \`_\`, \`-\`; max
 40 chars). Prefer "default" for the single root service; "web", "api",

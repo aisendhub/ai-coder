@@ -34,16 +34,16 @@ Every UX decision in this doc traces back to making these four axes legible. The
 
 ## Env var hierarchy (the recommendation)
 
-**Three persisted layers + one runtime layer**, in precedence order (later overrides earlier):
+**Layers in precedence order (later overrides earlier):**
 
-1. **Project defaults** — committed to repo as `.ai-coder/env.example` (or similar). Non-secret only. Documents what env keys the project expects. Optional.
-2. **Project shared** — gitignored, shared across all chats and worktrees on this project. *DB-stored*, not file-stored, so multi-user teams sync via Supabase RLS. Table: `project_env_vars`.
-3. **Worktree-scoped** — overrides for a specific worktree (= conversation). Table: `conversation_env_vars`. Cleaned up via FK CASCADE when the conversation hard-deletes.
-4. **Service-scoped** — per-service overrides at start time. Today already in `project_services.env` (JSONB). Per-task variants land in `conversations.service_overrides[svc].env`.
+1. **Discovery vars** (runtime, auto-injected) — `<NAME>_URL/HOST/PORT` for every running sibling. *Lowest precedence so users can override:* set `API_URL=https://staging` to point past the local sibling.
+2. **Project defaults** — committed to repo as `.ai-coder/env.example` (or similar). Non-secret only. Documents what env keys the project expects. Optional.
+3. **Project shared** — gitignored, shared across all chats and worktrees on this project. *DB-stored*, not file-stored, so multi-user teams sync via Supabase RLS. Table: `project_env_vars`.
+4. **Worktree-scoped** — overrides for a specific worktree (= conversation). Table: `conversation_env_vars`. Cleaned up via FK CASCADE when the conversation hard-deletes.
+5. **Service-scoped** — per-service overrides at start time. `project_services.env` (JSONB). Per-task variants land in `conversations.service_overrides[svc].env`.
+6. **System metadata** (runtime, reserved) — `WORKTREES_PROJECT_ID`, `WORKTREES_CONVERSATION_ID`, `WORKTREES_BRANCH`, `WORKTREES_BASE_REF`. *Highest precedence — user can't shadow ground truth.*
 
-**Runtime layer (not persisted):**
-- **Auto-injected service-discovery vars** — see [Service-to-service injection](#service-to-service-injection). Populated at process spawn from the live registry.
-- **System metadata** — `WORKTREES_PROJECT_ID`, `WORKTREES_CONVERSATION_ID`, `WORKTREES_BRANCH`, `WORKTREES_BASE_REF`. Cheap, eliminates "how do I tell what env I'm in?" code.
+The PORT-related env (PORT, HOST, framework aliases like VITE_PORT) is layered on top of all of this in a separate registry pass — see [Port semantics + framework aliases](#port-semantics--framework-aliases).
 
 **Why three persisted layers (not five like Railway, not one like Fly)?**
 - Project shared = the 90% case. Most env is "DATABASE_URL = ..." that every service needs.
@@ -81,14 +81,16 @@ The classic problem: web depends on api, api on postgres. How does web know api'
 When service `web` starts, sibling services in the same scope (running in the same project + worktree) get these env vars auto-populated:
 
 ```
-WORKTREES_SVC_WEB_URL=http://localhost:4127
-WORKTREES_SVC_WEB_HOST=localhost
-WORKTREES_SVC_WEB_PORT=4127
+WEB_URL=http://localhost:4127
+WEB_HOST=localhost
+WEB_PORT=4127
 ```
 
-Naming: `WORKTREES_SVC_<UPPER_NAME>_<URL|HOST|PORT>`. Recompute on every service start within the same scope so subscribers see fresh values.
+Naming: `<UPPER_NAME>_<URL|HOST|PORT>`. Recompute on every service start within the same scope so subscribers see fresh values.
 
-This is the *Render / Heroku / Render-style auto-binding* pattern. Most users never need anything more.
+This is the **Render / Heroku convention** — unprefixed because the whole point of auto-discovery is that real apps can read it without knowing about Worktrees. `process.env.API_URL` is what existing code already does. Most users never need anything more.
+
+**Discovery is the LOWEST-precedence layer**, so user-set values always win. If a user sets `API_URL=https://staging.example.com` in project env vars, that wins over the local sibling URL — pointing the app at remote staging keeps working even if a local `api` service starts. To opt back into local discovery, the user just unsets their override.
 
 **2. Explicit reference syntax for composition** (the 10% case):
 

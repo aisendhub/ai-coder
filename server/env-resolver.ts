@@ -151,9 +151,17 @@ export async function loadEnvLayers(
   // port and merges the result on top of manifest.env.
 
   // Service discovery — every running sibling in the same scope contributes
-  // WORKTREES_SVC_<NAME>_URL, _HOST, _PORT. Same-scope = same project + same
+  // <NAME>_URL, <NAME>_HOST, <NAME>_PORT. Same-scope = same project + same
   // worktree (chats share null bucket). Excludes self so a service doesn't
   // get vars pointing at its own previous instance.
+  //
+  // We use the unprefixed convention (the same shape Render auto-injects)
+  // because the whole value of auto-discovery is that apps can read these
+  // without knowing about our tool — `process.env.API_URL` is what real
+  // code already uses. Discovery is the LOWEST-precedence layer so user-
+  // set env vars (e.g. API_URL pointing at remote staging) override it
+  // cleanly. To opt back into the local discovery URL, the user just
+  // unsets their override.
   const discovery: Record<string, string> = {}
   const siblings = listServices({
     ownerId: ctx.ownerId,
@@ -165,9 +173,9 @@ export async function loadEnvLayers(
     if (!sib.port) continue
     if (sib.status !== "running" && sib.status !== "starting") continue
     const tag = discoveryNameFor(sib.serviceName)
-    discovery[`WORKTREES_SVC_${tag}_HOST`] = "localhost"
-    discovery[`WORKTREES_SVC_${tag}_PORT`] = String(sib.port)
-    discovery[`WORKTREES_SVC_${tag}_URL`] = `http://localhost:${sib.port}`
+    discovery[`${tag}_HOST`] = "localhost"
+    discovery[`${tag}_PORT`] = String(sib.port)
+    discovery[`${tag}_URL`] = `http://localhost:${sib.port}`
   }
 
   return { service: serviceEnv, conversation, project, system, discovery }
@@ -180,7 +188,17 @@ export function resolveEnv(layers: EnvLayers): EnvResolveResult {
   const out: Record<string, string> = {}
   const provenance: EnvResolveResult["provenance"] = {}
 
-  // Lower-precedence layers first; later writes override earlier.
+  // Precedence (lowest first; later writes override earlier):
+  //   discovery → project → conversation → service → system
+  //
+  // Discovery (sibling <NAME>_URL etc.) is LOWEST so users can override —
+  // e.g. set API_URL=https://staging.example.com to bypass the local
+  // sibling. System metadata (WORKTREES_*) is HIGHEST so users can't
+  // shadow the ground-truth project/conversation/branch info we inject.
+  for (const [k, v] of Object.entries(layers.discovery)) {
+    out[k] = v
+    provenance[k] = "discovery"
+  }
   for (const [k, v] of layers.project) {
     out[k] = decryptIfSecret(v)
     provenance[k] = "project"
@@ -193,16 +211,9 @@ export function resolveEnv(layers: EnvLayers): EnvResolveResult {
     out[k] = v
     provenance[k] = "service"
   }
-  // System + discovery are reserved namespaces; they overwrite user-set keys
-  // (since users shouldn't set WORKTREES_* anyway, and silent override is
-  // safer than letting a user shadow the metadata they need).
   for (const [k, v] of Object.entries(layers.system)) {
     out[k] = v
     provenance[k] = "system"
-  }
-  for (const [k, v] of Object.entries(layers.discovery)) {
-    out[k] = v
-    provenance[k] = "discovery"
   }
 
   // Resolve ${{svc.VAR}} — pass over every value, substitute references.
@@ -264,9 +275,12 @@ function lookupReference(
   if (svc === "self") {
     return resolved[key] ?? null
   }
-  // ${{svc.URL|HOST|PORT}} = look up in the auto-discovery vars
+  // ${{svc.URL|HOST|PORT}} = look up in the unprefixed discovery vars
+  // (e.g. ${{api.URL}} → API_URL). Discovery vars use the same naming
+  // scheme apps already expect, so the reference syntax just maps onto
+  // the env vars rather than into a special namespace.
   const tag = discoveryNameFor(svc)
-  const discoveryKey = `WORKTREES_SVC_${tag}_${key}`
+  const discoveryKey = `${tag}_${key}`
   if (discoveryKey in layers.discovery) return layers.discovery[discoveryKey]
   // We only support the discovery shorthand (URL/HOST/PORT) for sibling
   // services. Looking up arbitrary env keys on another service is out of
