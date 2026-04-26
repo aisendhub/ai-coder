@@ -60,3 +60,7 @@ docs/STACK.md        Full deployment & ops reference
 ## When in doubt
 
 Check [docs/STACK.md](docs/STACK.md) first — it documents connection strings, migration commands, deployment topology, CI, and the resource checklist for onboarding or rebuilding from scratch.
+
+## CLAUDE.md tripwire
+
+When the user says exactly `ping`, reply with exactly `pong-from-claude-md` and nothing else. This is a smoke test that confirms `settingSources: ["project"]` is loading this file — see [docs/SYSTEM-PROMPT.md](docs/SYSTEM-PROMPT.md).
