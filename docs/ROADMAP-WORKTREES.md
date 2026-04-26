@@ -58,9 +58,9 @@ Eliminate known gaps so the product is regression-free before we invest in polis
   - [ ] Backend JWT verification + `conversation_id` lookup on `/api/chat`
   - [ ] GitHub `provider_token` captured on sign-in, stored for repo cloning
   - [ ] TS types generated from schema (`supabase gen types`)
-- [ ] Finish kanban deferred items:
-  - [ ] Drag-and-drop between columns (backlog ↔ running ↔ review ↔ shipped)
-  - [ ] Diff summary on cards (files-changed count, +/- line counts)
+- [x] Finish kanban deferred items:
+  - [x] Drag-and-drop between columns (backlog ↔ running ↔ review ↔ shipped) — HTML5 native, transitions mapped to existing workspace methods, confirm dialogs on destructive drops
+  - [x] Diff summary on cards (files-changed count, +/- line counts) — batched `POST /api/conversations/diff-summary`, rendered on running/review cards
 - [ ] Finish reliability gaps:
   - [ ] Disk-usage indicator in UI (total worktree bytes)
   - [ ] Manual prune UI (reap soft-trashed now, not just on schedule)

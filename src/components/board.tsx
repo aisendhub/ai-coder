@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { observer } from "mobx-react-lite"
 import { toast } from "sonner"
 import {
@@ -18,7 +18,11 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
 import { supabase } from "@/lib/supabase"
+import { api } from "@/lib/api"
 import { workspace } from "@/models"
+
+type ConfirmFn = ReturnType<typeof useConfirm>
+type DiffSummary = { filesChanged: number; additions: number; deletions: number }
 
 type BoardTask = {
   id: string
@@ -83,6 +87,82 @@ function columnFor(t: BoardTask, runningIds: Set<string>): ColumnKey {
   return "review"
 }
 
+// Map a (from → to) drag onto the underlying lifecycle action. Returns null
+// for transitions that don't correspond to a real state change (same column,
+// terminal source, target that requires data we can't fabricate from a drop).
+type DragAction =
+  | { kind: "open" }       // backlog → running needs a goal; punt to detail UI
+  | { kind: "pause" }      // running → review
+  | { kind: "resume" }     // review → running
+  | { kind: "trash" }      // → trashed
+  | { kind: "restore" }    // trashed → review|backlog
+  | { kind: "ship" }       // review → shipped (merge)
+
+function transitionFor(from: ColumnKey, to: ColumnKey): DragAction | null {
+  if (from === to) return null
+  if (from === "shipped") return null   // terminal; can't drag out of shipped
+  if (to === "backlog") return null     // can't reset loop_iteration
+  if (to === "shipped") return from === "review" ? { kind: "ship" } : null
+  if (to === "trashed") return { kind: "trash" }
+  if (to === "running") {
+    if (from === "review") return { kind: "resume" }
+    if (from === "backlog") return { kind: "open" }
+    if (from === "trashed") return { kind: "restore" }
+    return null
+  }
+  if (to === "review") {
+    if (from === "running") return { kind: "pause" }
+    if (from === "trashed") return { kind: "restore" }
+    return null
+  }
+  return null
+}
+
+async function runTransition(
+  action: DragAction,
+  taskId: string,
+  task: BoardTask | undefined,
+  confirm: ConfirmFn,
+  open: () => void,
+): Promise<void> {
+  switch (action.kind) {
+    case "open":
+      // backlog→running needs a goal; let the task detail collect it.
+      open()
+      return
+    case "pause":
+      await workspace.pauseTask(taskId)
+      return
+    case "resume":
+      await workspace.resumeTask(taskId)
+      return
+    case "restore":
+      await workspace.restore(taskId)
+      return
+    case "trash": {
+      const ok = await confirm({
+        title: `Delete "${task?.title ?? "this task"}"?`,
+        variant: "destructive",
+        confirmText: "Delete",
+      })
+      if (!ok) return
+      await workspace.remove(taskId)
+      return
+    }
+    case "ship": {
+      const base = task?.base_ref ?? "base"
+      const ok = await confirm({
+        title: `Merge "${task?.title ?? "this task"}" into ${base}?`,
+        description: "The agent will run the merge in the chat — you'll see each step.",
+        confirmText: "Merge",
+      })
+      if (!ok) return
+      await workspace.mergeConversation(taskId)
+      return
+    }
+  }
+}
+
 type Props = {
   open: boolean
   onClose: () => void
@@ -93,6 +173,34 @@ export const Board = observer(function Board({ open, onClose }: Props) {
   const [tasks, setTasks] = useState<BoardTask[]>([])
   const [loading, setLoading] = useState(false)
   const runningIds = workspace.runningServerIds
+  const confirm = useConfirm()
+  // Tracks the active HTML5 drag — set on dragStart, cleared on dragEnd or
+  // drop. `from` is the source column at drag-start; we use it to decide
+  // which transitions are valid as the cursor passes over each column.
+  const [drag, setDrag] = useState<{ taskId: string; from: ColumnKey } | null>(null)
+  // Per-card diff summaries (files changed + insertions/deletions vs base).
+  // Empty for backlog/shipped/trashed; the server only computes for tasks
+  // that have a worktree and a base ref.
+  const [summaries, setSummaries] = useState<Record<string, DiffSummary>>({})
+
+  const handleDrop = useCallback(
+    async (taskId: string, from: ColumnKey, to: ColumnKey) => {
+      const transition = transitionFor(from, to)
+      if (!transition) return
+      const task = tasks.find((t) => t.id === taskId)
+      try {
+        await runTransition(transition, taskId, task, confirm, () => {
+          workspace.setActive(taskId)
+          onClose()
+        })
+      } catch (err) {
+        toast.error("Couldn't move task", {
+          description: err instanceof Error ? err.message : String(err),
+        })
+      }
+    },
+    [tasks, confirm, onClose]
+  )
 
   // Escape closes.
   useEffect(() => {
@@ -178,6 +286,47 @@ export const Board = observer(function Board({ open, onClose }: Props) {
     return out
   }, [tasks, runningIds])
 
+  // Fetch diff summaries for tasks where they're meaningful: anything with a
+  // worktree that hasn't shipped or been trashed. We key the effect on the
+  // sorted ids so realtime card moves don't re-fire it on every render.
+  const summaryIdsKey = useMemo(() => {
+    return tasks
+      .filter((t) => !t.shipped_at && !t.deleted_at && t.worktree_path)
+      .map((t) => t.id)
+      .sort()
+      .join(",")
+  }, [tasks])
+  useEffect(() => {
+    if (!open || summaryIdsKey === "") {
+      setSummaries({})
+      return
+    }
+    const ids = summaryIdsKey.split(",")
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await api("/api/conversations/diff-summary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids }),
+        })
+        if (!res.ok || cancelled) return
+        const json = (await res.json()) as {
+          summaries: Record<string, DiffSummary | null>
+        }
+        if (cancelled) return
+        const next: Record<string, DiffSummary> = {}
+        for (const [id, s] of Object.entries(json.summaries)) {
+          if (s) next[id] = s
+        }
+        setSummaries(next)
+      } catch {
+        // advisory — cards just don't render the diff hint
+      }
+    })()
+    return () => { cancelled = true }
+  }, [open, summaryIdsKey])
+
   if (!open) return null
 
   return (
@@ -202,17 +351,31 @@ export const Board = observer(function Board({ open, onClose }: Props) {
 
       <div className="flex-1 min-h-0 overflow-x-auto">
         <div className="flex gap-3 p-4 min-h-full">
-          {COLUMN_ORDER.map((key) => (
-            <BoardColumn
-              key={key}
-              columnKey={key}
-              tasks={grouped[key]}
-              onOpen={(id) => {
-                workspace.setActive(id)
-                onClose()
-              }}
-            />
-          ))}
+          {COLUMN_ORDER.map((key) => {
+            const dropAction = drag ? transitionFor(drag.from, key) : null
+            const isDropTarget = !!drag && drag.from !== key && !!dropAction
+            const isInvalidTarget = !!drag && drag.from !== key && !dropAction
+            return (
+              <BoardColumn
+                key={key}
+                columnKey={key}
+                tasks={grouped[key]}
+                summaries={summaries}
+                isDropTarget={isDropTarget}
+                isInvalidTarget={isInvalidTarget}
+                onOpen={(id) => {
+                  workspace.setActive(id)
+                  onClose()
+                }}
+                onCardDragStart={(id) => setDrag({ taskId: id, from: key })}
+                onCardDragEnd={() => setDrag(null)}
+                onColumnDrop={(taskId, from) => {
+                  setDrag(null)
+                  void handleDrop(taskId, from, key)
+                }}
+              />
+            )
+          })}
         </div>
       </div>
     </div>
@@ -222,16 +385,61 @@ export const Board = observer(function Board({ open, onClose }: Props) {
 function BoardColumn({
   columnKey,
   tasks,
+  summaries,
+  isDropTarget,
+  isInvalidTarget,
   onOpen,
+  onCardDragStart,
+  onCardDragEnd,
+  onColumnDrop,
 }: {
   columnKey: ColumnKey
   tasks: BoardTask[]
+  summaries: Record<string, DiffSummary>
+  isDropTarget: boolean
+  isInvalidTarget: boolean
   onOpen: (id: string) => void
+  onCardDragStart: (taskId: string) => void
+  onCardDragEnd: () => void
+  onColumnDrop: (taskId: string, from: ColumnKey) => void
 }) {
   const meta = COLUMN_META[columnKey]
   const { Icon } = meta
+  const [over, setOver] = useState(false)
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!isDropTarget) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = "move"
+    if (!over) setOver(true)
+  }
+  const handleDragLeave = () => setOver(false)
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setOver(false)
+    if (!isDropTarget) return
+    const data = e.dataTransfer.getData("application/x-board-task")
+    if (!data) return
+    try {
+      const { taskId, from } = JSON.parse(data) as { taskId: string; from: ColumnKey }
+      onColumnDrop(taskId, from)
+    } catch {
+      /* malformed payload — ignore */
+    }
+  }
+
   return (
-    <div className="w-72 shrink-0 flex flex-col min-h-0 rounded-lg border bg-muted/30">
+    <div
+      className={cn(
+        "w-72 shrink-0 flex flex-col min-h-0 rounded-lg border bg-muted/30 transition-colors",
+        isDropTarget && "ring-1 ring-primary/40",
+        over && isDropTarget && "ring-2 ring-primary bg-primary/5",
+        isInvalidTarget && "opacity-50",
+      )}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="px-3 py-2 border-b flex items-center gap-2 sticky top-0 bg-muted/50 rounded-t-lg">
         <Icon className={cn("size-3.5", meta.tone, columnKey === "running" && "animate-spin")} />
         <span className="text-xs font-medium">{meta.label}</span>
@@ -244,7 +452,15 @@ function BoardColumn({
           </div>
         ) : (
           tasks.map((t) => (
-            <BoardCard key={t.id} task={t} columnKey={columnKey} onOpen={onOpen} />
+            <BoardCard
+              key={t.id}
+              task={t}
+              columnKey={columnKey}
+              summary={summaries[t.id]}
+              onOpen={onOpen}
+              onDragStart={() => onCardDragStart(t.id)}
+              onDragEnd={onCardDragEnd}
+            />
           ))
         )}
       </div>
@@ -255,11 +471,17 @@ function BoardColumn({
 const BoardCard = observer(function BoardCard({
   task,
   columnKey,
+  summary,
   onOpen,
+  onDragStart,
+  onDragEnd,
 }: {
   task: BoardTask
   columnKey: ColumnKey
+  summary: DiffSummary | undefined
   onOpen: (id: string) => void
+  onDragStart: () => void
+  onDragEnd: () => void
 }) {
   const confirm = useConfirm()
   const cost = Number(task.loop_cost_usd ?? 0)
@@ -296,11 +518,29 @@ const BoardCard = observer(function BoardCard({
     }
   }
 
+  // Shipped tasks are terminal — disable drag entirely so the cursor
+  // doesn't suggest the card can be moved.
+  const draggable = columnKey !== "shipped"
+  const handleDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.effectAllowed = "move"
+    e.dataTransfer.setData(
+      "application/x-board-task",
+      JSON.stringify({ taskId: task.id, from: columnKey }),
+    )
+    onDragStart()
+  }
+
   return (
     <button
       type="button"
       onClick={() => onOpen(task.id)}
-      className="text-left rounded-md border bg-card hover:border-primary/50 hover:bg-card/80 transition-colors p-2.5 flex flex-col gap-1.5 cursor-pointer"
+      draggable={draggable}
+      onDragStart={handleDragStart}
+      onDragEnd={onDragEnd}
+      className={cn(
+        "text-left rounded-md border bg-card hover:border-primary/50 hover:bg-card/80 transition-colors p-2.5 flex flex-col gap-1.5 cursor-pointer",
+        draggable && "active:cursor-grabbing",
+      )}
     >
       <div className="flex items-start gap-1 min-w-0">
         <div className="text-sm font-medium truncate flex-1 min-w-0">{task.title}</div>
@@ -319,6 +559,16 @@ const BoardCard = observer(function BoardCard({
       <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
         <span className="font-mono">{task.loop_iteration}/{task.max_iterations}</span>
         <span className="font-mono">${cost.toFixed(3)}{maxCost > 0 ? `/$${maxCost.toFixed(2)}` : ""}</span>
+        {summary && summary.filesChanged > 0 && (
+          <span
+            className="font-mono inline-flex items-center gap-1.5 ml-auto"
+            title={`${summary.filesChanged} file${summary.filesChanged === 1 ? "" : "s"} changed vs ${task.base_ref ?? "base"}`}
+          >
+            <span>{summary.filesChanged}f</span>
+            <span className="text-emerald-600 dark:text-emerald-400">+{summary.additions}</span>
+            <span className="text-rose-600 dark:text-rose-400">−{summary.deletions}</span>
+          </span>
+        )}
       </div>
 
       {(canPauseResume || canInteract) && (

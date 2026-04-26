@@ -31,18 +31,18 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · 🚫 blocked
 - ✅ Supabase JS client + auth context
 - ✅ GitHub + Google sign-in UI buttons
 - ✅ Auth gate in `App.tsx`
-- ⬜ Enable GitHub OAuth provider in Supabase dashboard
-- ⬜ Enable Google OAuth provider in Supabase dashboard
-- ⬜ Wire conversations sidebar to live Supabase data
-- ⬜ Persist user + assistant messages per conversation
-- ⬜ Restore conversation history on page reload
+- ⬜ Enable GitHub OAuth provider in Supabase dashboard *(manual step)*
+- ⬜ Enable Google OAuth provider in Supabase dashboard *(manual step)*
+- ✅ Wire conversations sidebar to live Supabase data — `subscribeConversations()` + Realtime channel in [Workspace.model.ts](../src/models/Workspace.model.ts)
+- ✅ Persist user + assistant messages per conversation — `from("messages").insert(...)` in `startRunner` + route handlers
+- ✅ Restore conversation history on page reload — `loadMessages()` in [Conversation.model.ts](../src/models/Conversation.model.ts) with `loaded` flag
 - ✅ Backend: verify Supabase JWT on every `/api/*` route (middleware); JWT also validated on `/api/terminal` WebSocket upgrade
 - ✅ Client: `api()` + `sseUrl()` helpers in [src/lib/api.ts](../src/lib/api.ts) — fetch sends `Authorization: Bearer`, EventSource/WebSocket carry `?access_token=`
 - ✅ All server routes read `userId` from `c.get("userId")` (JWT claim), not request body — body-spoofing attacks closed
 - ✅ **RLS is the ACL layer.** Per-request user-scoped Supabase client (`c.get("sb")`) forwards the caller's JWT so `auth.uid() = user_id` policies evaluate on every query. Service-role client (`sbSystem`) reserved for deliberate cross-user work: agent message persistence mid-turn, boot reconcile, reaper, lifecycle logs. Routes no longer hand-roll `user_id !== userId` checks.
 - ✅ `/api/terminal` WebSocket accepts a `conversationId` (not a client-supplied `cwd`). Server verifies the conversation belongs to the authed user and derives cwd via `cwdForConversation()` — no more breakout to arbitrary host paths.
-- ⬜ Backend: capture GitHub `provider_token` on sign-in, store for repo cloning
-- ⬜ Generate TypeScript types from schema (`supabase gen types`)
+- ⬜ Backend: capture GitHub `provider_token` on sign-in, store for repo cloning *(`user_integrations` table exists but is wired only for runner providers like Railway today — GitHub flow not built)*
+- ⬜ Generate TypeScript types from schema (`supabase gen types`) — [src/lib/database.types.ts](../src/lib/database.types.ts) is still the placeholder
 
 ## Phase 3 — Projects (host cwd)
 
@@ -64,7 +64,7 @@ Design: [WORKTREES.md](WORKTREES.md) · Tracker: [WORKTREES-PROGRESS.md](WORKTRE
 - ✅ Phase 4a — task schema (`0007_tasks.sql`: `kind`, `auto_loop_*`, `loop_*`, `max_*`)
 - ✅ Phase 4b — evaluator-optimizer loop in `startRunner` (worker → fresh read-only evaluator → stop conditions → next turn)
 - ✅ Phase 4c — task header strip with pause/resume/stop, iteration banners, Chats/Tasks sidebar split, `+ Task` dialog, Merge/PR buttons, mid-turn nudges via `canUseTool`, "Spin off as task" from any chat
-- 🟡 Phase 5 — kanban board meta-view shipped (5 columns + live state derivation + card actions); drag-and-drop + diff summary on cards deferred
+- ✅ Phase 5 — kanban board meta-view (5 columns + live state derivation + card actions); HTML5 drag-and-drop between columns mapped to lifecycle actions (pause/resume/restore/trash/ship) with confirm dialogs on destructive drops; per-card diff summary (files / +/-) via batched `POST /api/conversations/diff-summary`
 - ✅ Phase 6 (reliability core) — boot reconcile + symlink repair + auto-orphan cleanup + `git worktree prune` + unified `[worktree]` lifecycle logs; disk-usage indicator + manual prune UI still pending
 
 ## Phase 3b — Container / microVM isolation ⏸️ POSTPONED
@@ -106,6 +106,39 @@ Revisit when we actually need multi-tenant isolation. Schema keeps `sandbox_id` 
 - ⬜ WhatsApp inbound via sendhub's `wa-cloudflare` → proxy to this backend
 - ⬜ CLI slash commands mapped to options (`/plan`, `/bypass`, `/cd`)
 - ⬜ Long-running agent tasks with progress updates to chat
+
+## Git log — expandable commit detail ⬜
+
+Design: [GIT-LOG.md](GIT-LOG.md) · Anchored in [PRODUCT-SIGNAL.md](PRODUCT-SIGNAL.md). The git log becomes the review-and-orchestrate surface (every commit is a "what if I ran from here?" handle).
+
+### Phase 1 — read-only expand (file list only) ⬜
+- ⬜ `GET /api/git/commit?conversationId=&sha=` — file list with per-file status + +/- (subject/body/branches stubbed for later phases)
+- ⬜ `GET /api/git/show?conversationId=&sha=&path=` — file content + diff at sha
+- ⬜ Inline accordion expand in `git-log-panel.tsx` (one row at a time)
+- ⬜ Expanded row: file list only (status badge + path + +/-)
+- ⬜ Workspace `pinnedCommit` state + `openFileAtCommit(path, sha)` action
+- ⬜ `file-panel.tsx` handles commit-pinned mode (banner + back-to-working-tree)
+- ⬜ Mobile: file panel Sheet renders commit-pinned mode
+
+### Phase 2 — orchestration handles ⬜
+- ⬜ "Open originating chat" (commit→conversation lookup; start with worktree+time heuristic)
+- ⬜ "Continue from here" — new conversation/worktree branched at this SHA
+- ⬜ "Fork from here" — same as continue, marked as parallel attempt
+- ⬜ "Revert" — `git revert <sha>` in active worktree, opens diff for review
+
+### Phase 3 — pushed / PR / merge state ⬜
+- ⬜ `isPushed`, `isMerged`, `pr` fields in `/api/git/commit` response
+- ⬜ State chips in expanded header (branch, pushed, merged-into, PR link)
+- ⬜ Per-sha cache invalidated on push/fetch
+
+### Phase 4 — comparison & cherry-pick ⬜
+- ⬜ Multi-select (cmd-click) in the log
+- ⬜ Compare-two-SHAs view in the file panel
+- ⬜ "Cherry-pick into…" picker over user's worktrees
+
+### Phase 5 — explain & summarise ⬜
+- ⬜ "Explain this commit" — short headless run with diff in context
+- ⬜ Cached per-sha
 
 ---
 

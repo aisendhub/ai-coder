@@ -1109,6 +1109,43 @@ app.get("/api/changes", async (c) => {
   }
 })
 
+// Batched diff summaries for the kanban board. One round-trip returns
+// {filesChanged, additions, deletions} for every task that has a worktree
+// and a base ref — running/review tasks. Backlog (no worktree), shipped
+// (already merged), and trashed conversations are returned as null so the
+// caller can skip rendering them.
+//
+// Body: { ids: string[] }  (max 100; UUIDs validated)
+// Response: { summaries: { [id]: { filesChanged, additions, deletions } | null } }
+app.post("/api/conversations/diff-summary", async (c) => {
+  const sb = c.get("sb")
+  const body = await c.req.json<{ ids?: unknown }>().catch(() => ({}))
+  const rawIds = Array.isArray(body.ids) ? body.ids : []
+  const ids = rawIds
+    .filter((v): v is string => typeof v === "string" && /^[0-9a-f-]{36}$/i.test(v))
+    .slice(0, 100)
+  if (ids.length === 0) return c.json({ summaries: {} })
+
+  // RLS filters to conversations the caller owns; non-owned ids drop out.
+  const { data: convs } = await sb
+    .from("conversations")
+    .select("id, worktree_path, base_ref, shipped_at, deleted_at")
+    .in("id", ids)
+  if (!convs) return c.json({ summaries: {} })
+
+  type Summary = { filesChanged: number; additions: number; deletions: number }
+  const summaries: Record<string, Summary | null> = {}
+  await Promise.all(
+    convs.map(async (conv) => {
+      summaries[conv.id] = null
+      if (conv.shipped_at || conv.deleted_at) return
+      if (!conv.worktree_path || !conv.base_ref) return
+      summaries[conv.id] = await diffShortstat(conv.worktree_path, conv.base_ref)
+    })
+  )
+  return c.json({ summaries })
+})
+
 // Recent commits for the conversation's cwd. Uses ASCII unit/record separators
 // so we don't fight subject lines that contain arbitrary punctuation.
 app.get("/api/git/log", async (c) => {
@@ -1577,6 +1614,37 @@ app.get("/api/tree", async (c) => {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
+
+// Aggregate diff stats vs a base ref. Used by the kanban board to render a
+// per-card "12 files · +234 / -56" hint without pulling the full file list.
+// Returns null if git isn't usable in this cwd.
+async function diffShortstat(
+  cwd: string,
+  baseRef: string,
+): Promise<{ filesChanged: number; additions: number; deletions: number } | null> {
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["diff", "--shortstat", baseRef, "--"],
+      { cwd, maxBuffer: 1024 * 1024 },
+    )
+    // Match shapes:
+    //   "1 file changed, 2 insertions(+), 3 deletions(-)"
+    //   "5 files changed, 10 insertions(+)"  (no deletions section)
+    //   "5 files changed, 10 deletions(-)"   (no insertions section)
+    const m = stdout.match(
+      /(\d+)\s+files?\s+changed(?:,\s+(\d+)\s+insertions?\(\+\))?(?:,\s+(\d+)\s+deletions?\(-\))?/,
+    )
+    if (!m) return { filesChanged: 0, additions: 0, deletions: 0 }
+    return {
+      filesChanged: parseInt(m[1], 10),
+      additions: parseInt(m[2] ?? "0", 10),
+      deletions: parseInt(m[3] ?? "0", 10),
+    }
+  } catch {
+    return null
+  }
+}
 
 // For worktree-backed conversations: union of
 //   1. `git diff --name-status <baseRef>` — committed + staged + modified
