@@ -183,11 +183,11 @@ export class ServiceList extends BaseList<typeof Service> {
   // `opts.silent` skips the loading flag toggle. Background polls use it
   // so header spinners don't flash on the 5s cadence. Explicit user-
   // initiated refreshes (none today) would omit the flag.
-  async refresh(userId: string, opts: { silent?: boolean } = {}): Promise<void> {
+  async refresh(_userId: string, opts: { silent?: boolean } = {}): Promise<void> {
     if (!opts.silent) this.setLoading(true)
     try {
       const res = await api(
-        `/api/services?userId=${encodeURIComponent(userId)}`
+        `/api/services`
       )
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -209,10 +209,10 @@ export class ServiceList extends BaseList<typeof Service> {
 
   // ── Integrations (Phase 5) ─────────────────────────────────────────────────
 
-  async refreshRailwayIntegration(userId: string): Promise<void> {
+  async refreshRailwayIntegration(_userId: string): Promise<void> {
     try {
       const res = await api(
-        `/api/integrations/railway?userId=${encodeURIComponent(userId)}`
+        `/api/integrations/railway`
       )
       if (!res.ok) return
       const body = (await res.json()) as RailwayIntegration
@@ -222,11 +222,11 @@ export class ServiceList extends BaseList<typeof Service> {
     }
   }
 
-  async connectRailway(userId: string, token: string): Promise<void> {
+  async connectRailway(_userId: string, token: string): Promise<void> {
     const res = await api("/api/integrations/railway/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, token }),
+      body: JSON.stringify({ token }),
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -248,9 +248,9 @@ export class ServiceList extends BaseList<typeof Service> {
     })
   }
 
-  async disconnectRailway(userId: string): Promise<void> {
+  async disconnectRailway(_userId: string): Promise<void> {
     const res = await api(
-      `/api/integrations/railway?userId=${encodeURIComponent(userId)}`,
+      `/api/integrations/railway`,
       { method: "DELETE" }
     )
     if (!res.ok) {
@@ -296,11 +296,11 @@ export class ServiceList extends BaseList<typeof Service> {
     return this.find(dto.id)!
   }
 
-  async stop(userId: string, id: string): Promise<void> {
+  async stop(_userId: string, id: string): Promise<void> {
     const res = await api(`/api/services/${id}/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({}),
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -315,7 +315,7 @@ export class ServiceList extends BaseList<typeof Service> {
   // propose a fix. Server handles the watch-and-inject asynchronously; this
   // resolves as soon as the background task is queued.
   async verifyRun(
-    userId: string,
+    _userId: string,
     conversationId: string,
     serviceId: string,
     opts: { watchMs?: number } = {}
@@ -323,7 +323,7 @@ export class ServiceList extends BaseList<typeof Service> {
     const res = await api(`/api/conversations/${conversationId}/verify-run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, serviceId, watchMs: opts.watchMs }),
+      body: JSON.stringify({ serviceId, watchMs: opts.watchMs }),
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -331,10 +331,10 @@ export class ServiceList extends BaseList<typeof Service> {
     }
   }
 
-  async remove(userId: string, id: string): Promise<void> {
+  async remove(_userId: string, id: string): Promise<void> {
     this.closeLogs(id)
     const res = await api(
-      `/api/services/${id}?userId=${encodeURIComponent(userId)}`,
+      `/api/services/${id}`,
       { method: "DELETE" }
     )
     if (!res.ok && res.status !== 404) {
@@ -345,7 +345,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   subscribeLogs(
-    userId: string,
+    _userId: string,
     id: string,
     onLine: (line: LogLine) => void,
     onStatus?: (dto: ServiceDto) => void
@@ -356,7 +356,7 @@ export class ServiceList extends BaseList<typeof Service> {
     // the EventSource is constructed, the abort flag short-circuits setup.
     let aborted = false
     void (async () => {
-      const url = await sseUrl(`/api/services/${id}/logs?userId=${encodeURIComponent(userId)}`)
+      const url = await sseUrl(`/api/services/${id}/logs`)
       if (aborted) return
       const es = new EventSource(url)
       this.logStreams.set(id, es)
@@ -410,13 +410,13 @@ export class ServiceList extends BaseList<typeof Service> {
   // ── Manifest CRUD ──────────────────────────────────────────────────────────
 
   async detectLlmManifest(
-    userId: string,
+    _userId: string,
     projectId: string
   ): Promise<LlmManifestDetection> {
     const res = await api(`/api/projects/${projectId}/manifest/detect-llm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({}),
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -426,14 +426,14 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async fetchProjectManifest(
-    userId: string,
+    _userId: string,
     projectId: string,
     conversationId?: string | null
   ): Promise<ProjectManifestView> {
     // Pass conversationId so the server's heuristic detect runs in the
     // worktree (not the base project cwd) — otherwise anything the agent
     // built inside the worktree is invisible to the detector.
-    const params = new URLSearchParams({ userId })
+    const params = new URLSearchParams()
     if (conversationId) params.set("conversationId", conversationId)
     const res = await api(
       `/api/projects/${projectId}/manifest?${params.toString()}`
@@ -446,14 +446,14 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async saveProjectManifest(
-    userId: string,
+    _userId: string,
     projectId: string,
     manifest: RunManifestDto
   ): Promise<void> {
     const res = await api(`/api/projects/${projectId}/manifest`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, manifest }),
+      body: JSON.stringify({ manifest }),
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -461,9 +461,9 @@ export class ServiceList extends BaseList<typeof Service> {
     }
   }
 
-  async clearProjectManifest(userId: string, projectId: string): Promise<void> {
+  async clearProjectManifest(_userId: string, projectId: string): Promise<void> {
     const res = await api(
-      `/api/projects/${projectId}/manifest?userId=${encodeURIComponent(userId)}`,
+      `/api/projects/${projectId}/manifest`,
       { method: "DELETE" }
     )
     if (!res.ok) {
@@ -473,11 +473,11 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async fetchConversationManifest(
-    userId: string,
+    _userId: string,
     conversationId: string
   ): Promise<ConversationManifestView> {
     const res = await api(
-      `/api/conversations/${conversationId}/manifest?userId=${encodeURIComponent(userId)}`
+      `/api/conversations/${conversationId}/manifest`
     )
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -487,7 +487,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async saveConversationOverride(
-    userId: string,
+    _userId: string,
     conversationId: string,
     override: Partial<RunManifestDto>
   ): Promise<void> {
@@ -496,7 +496,7 @@ export class ServiceList extends BaseList<typeof Service> {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, override }),
+        body: JSON.stringify({ override }),
       }
     )
     if (!res.ok) {
@@ -506,11 +506,11 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async clearConversationOverride(
-    userId: string,
+    _userId: string,
     conversationId: string
   ): Promise<void> {
     const res = await api(
-      `/api/conversations/${conversationId}/manifest-override?userId=${encodeURIComponent(userId)}`,
+      `/api/conversations/${conversationId}/manifest-override`,
       { method: "DELETE" }
     )
     if (!res.ok) {
@@ -526,11 +526,11 @@ export class ServiceList extends BaseList<typeof Service> {
   // during rollout, so existing panel paths still work.
 
   async listProjectServices(
-    userId: string,
+    _userId: string,
     projectId: string
   ): Promise<ProjectServiceDto[]> {
     const res = await api(
-      `/api/projects/${projectId}/services?userId=${encodeURIComponent(userId)}`
+      `/api/projects/${projectId}/services`
     )
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -541,14 +541,14 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async createProjectService(
-    userId: string,
+    _userId: string,
     projectId: string,
     service: ProjectServiceWriteDto
   ): Promise<ProjectServiceDto> {
     const res = await api(`/api/projects/${projectId}/services`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, service }),
+      body: JSON.stringify({ service }),
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -558,7 +558,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async updateProjectService(
-    userId: string,
+    _userId: string,
     projectId: string,
     name: string,
     service: ProjectServiceWriteDto
@@ -568,7 +568,7 @@ export class ServiceList extends BaseList<typeof Service> {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, service }),
+        body: JSON.stringify({ service }),
       }
     )
     if (!res.ok) {
@@ -579,11 +579,11 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async detectProjectServices(
-    userId: string,
+    _userId: string,
     projectId: string,
     conversationId?: string | null
   ): Promise<{ cwd: string; candidates: DetectedServiceCandidate[] }> {
-    const params = new URLSearchParams({ userId })
+    const params = new URLSearchParams()
     if (conversationId) params.set("conversationId", conversationId)
     const res = await api(
       `/api/projects/${projectId}/services/detect?${params.toString()}`
@@ -596,7 +596,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async detectServicesWithLLM(
-    userId: string,
+    _userId: string,
     projectId: string,
     conversationId?: string | null
   ): Promise<LlmServicesDetectionView> {
@@ -604,7 +604,6 @@ export class ServiceList extends BaseList<typeof Service> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        userId,
         conversationId: conversationId ?? undefined,
       }),
     })
@@ -616,12 +615,12 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async deleteProjectServiceRow(
-    userId: string,
+    _userId: string,
     projectId: string,
     name: string
   ): Promise<void> {
     const res = await api(
-      `/api/projects/${projectId}/services/${encodeURIComponent(name)}?userId=${encodeURIComponent(userId)}`,
+      `/api/projects/${projectId}/services/${encodeURIComponent(name)}`,
       { method: "DELETE" }
     )
     if (!res.ok) {
@@ -633,12 +632,12 @@ export class ServiceList extends BaseList<typeof Service> {
   // Per-conversation, per-service manifest overrides. Sparse — null when
   // the task has no override for this service.
   async fetchServiceOverride(
-    userId: string,
+    _userId: string,
     conversationId: string,
     serviceName: string
   ): Promise<Partial<RunManifestDto> | null> {
     const res = await api(
-      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override?userId=${encodeURIComponent(userId)}`
+      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override`
     )
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -649,7 +648,7 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async saveServiceOverride(
-    userId: string,
+    _userId: string,
     conversationId: string,
     serviceName: string,
     override: Partial<RunManifestDto>
@@ -659,7 +658,7 @@ export class ServiceList extends BaseList<typeof Service> {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, override }),
+        body: JSON.stringify({ override }),
       }
     )
     if (!res.ok) {
@@ -669,12 +668,12 @@ export class ServiceList extends BaseList<typeof Service> {
   }
 
   async clearServiceOverride(
-    userId: string,
+    _userId: string,
     conversationId: string,
     serviceName: string
   ): Promise<void> {
     const res = await api(
-      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override?userId=${encodeURIComponent(userId)}`,
+      `/api/conversations/${conversationId}/services/${encodeURIComponent(serviceName)}/override`,
       { method: "DELETE" }
     )
     if (!res.ok && res.status !== 404) {

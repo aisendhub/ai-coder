@@ -52,12 +52,12 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
     })
   }
 
-  async refresh(userId: string, projectId: string): Promise<void> {
+  async refresh(_userId: string, projectId: string): Promise<void> {
     this.loading = true
     this.lastError = null
     try {
       const res = await api(
-        `/api/projects/${projectId}/services?userId=${encodeURIComponent(userId)}`
+        `/api/projects/${projectId}/services`
       )
       const json = await unwrap<{ services: ProjectServiceDto[] }>(res)
       runInAction(() => {
@@ -79,14 +79,14 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
   }
 
   async create(
-    userId: string,
+    _userId: string,
     projectId: string,
     write: ProjectServiceWriteDto
   ): Promise<ProjectService> {
     const res = await api(`/api/projects/${projectId}/services`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, service: write }),
+      body: JSON.stringify({ service: write }),
     })
     const dto = await unwrap<ProjectServiceDto>(res)
     runInAction(() => this.upsertDto(dto))
@@ -94,7 +94,7 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
   }
 
   async update(
-    userId: string,
+    _userId: string,
     projectId: string,
     name: string,
     write: ProjectServiceWriteDto
@@ -104,7 +104,7 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, service: write }),
+        body: JSON.stringify({ service: write }),
       }
     )
     const dto = await unwrap<ProjectServiceDto>(res)
@@ -112,9 +112,9 @@ export class ProjectServiceList extends BaseList<typeof ProjectService> {
     return this.findByName(dto.name)!
   }
 
-  async remove(userId: string, projectId: string, name: string): Promise<void> {
+  async remove(_userId: string, projectId: string, name: string): Promise<void> {
     const res = await api(
-      `/api/projects/${projectId}/services/${encodeURIComponent(name)}?userId=${encodeURIComponent(userId)}`,
+      `/api/projects/${projectId}/services/${encodeURIComponent(name)}`,
       { method: "DELETE" }
     )
     if (!res.ok && res.status !== 404) {
