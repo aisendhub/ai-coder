@@ -3,6 +3,7 @@
 What we're building, why, and the shape of the thing.
 
 Related strategy docs:
+- [PRODUCT-SIGNAL.md](PRODUCT-SIGNAL.md) — north-star for every UI decision: async supervision, parallel AI, user as orchestrator.
 - [NAMING.md](NAMING.md) — three-product family (Worktrees, Hangar, Windtunnel) and launch order.
 - [MARKET.md](MARKET.md) — competitor valuations, consumer vs developer market, and penetrability analysis that backs the launch order.
 
