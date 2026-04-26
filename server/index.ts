@@ -3664,10 +3664,12 @@ async function emitSupervisorExhaustedNotice(
   }
 }
 
-function runtimeErrorStatus(code: RuntimeError["code"]): 403 | 404 | 409 | 429 | 500 | 503 {
+function runtimeErrorStatus(code: RuntimeError["code"]): 400 | 403 | 404 | 409 | 429 | 500 | 503 {
   switch (code) {
     case "user_cap_reached": return 429
     case "port_range_exhausted": return 503
+    case "port_in_use": return 409
+    case "port_invalid": return 400
     case "runner_unavailable": return 503
     case "not_found": return 404
     case "not_owner": return 403
@@ -3962,11 +3964,20 @@ app.post("/api/services/start", async (c) => {
   }
 
   try {
-    // Preferred port priority: conv-level assigned_port (legacy, survives one
-    // release) → service-row assigned_port (the forward path) → manifest
-    // port (agent inferred / user typed). Registry falls through to
-    // auto-allocate in its sandbox range if all three are taken.
-    const preferredPort = ctx.assignedPort ?? effective.port ?? null
+    // Port preference is split in two:
+    //   strictPort = the user (or their per-task override) explicitly set
+    //                this in the manifest. Strictly enforced — fails with a
+    //                clear error if the port is taken. We will NOT silently
+    //                swap to a different port; users who hardcode 3000 want
+    //                3000 (or to know it's busy), not a magic substitution.
+    //   stickyPort = sticky from a previous run (project_services.assigned_port
+    //                or the legacy conversations.assigned_port). Tried first
+    //                so localhost:<port> URLs stay stable across restarts;
+    //                falls back to auto-allocate from the sandbox range if
+    //                taken. body.overrides.port also counts as "the user just
+    //                set this port" if present.
+    const userSetPort = body.overrides?.port ?? ctx.override?.port ?? ctx.serviceRow?.port ?? null
+    const stickyPort = ctx.assignedPort ?? null
     const snap = await startService(
       effective,
       {
@@ -3976,7 +3987,7 @@ app.post("/api/services/start", async (c) => {
         worktreePath: scopeWorktreePath,
         label: body.label ?? null,
       },
-      { preferredPort, runnerId: body.runnerId }
+      { strictPort: userSetPort, stickyPort, runnerId: body.runnerId }
     )
     // Persist assigned_port so localhost:<port> stays stable across restarts.
     // Write to the service row (forward path); also mirror to conversations
@@ -4216,14 +4227,11 @@ app.get("/api/projects/:id/services/detect", async (c) => {
   const projectId = c.req.param("id")
   const userId = c.get("userId")
   const conversationId = c.req.query("conversationId") || undefined
-  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
-  if (!project) return c.json({ error: "project not found" }, 404)
-
   // Resolve cwd: prefer the conversation's worktree when present so a task's
   // monorepo view shows what the user has actually built in it.
   const { data: project } = await sb
     .from("projects")
-    .select("cwd")
+    .select("id, cwd")
     .eq("id", projectId)
     .single()
   if (!project) return c.json({ error: "project not found" }, 404)
@@ -4268,12 +4276,9 @@ app.post("/api/projects/:id/services/detect-llm", async (c) => {
   const projectId = c.req.param("id")
   const body = await c.req.json<{ userId?: string; conversationId?: string }>().catch(() => ({}))
   const userId = c.get("userId")
-  const { data: project } = await sb.from("projects").select("id").eq("id", projectId).single()
-  if (!project) return c.json({ error: "project not found" }, 404)
-
   const { data: project } = await sb
     .from("projects")
-    .select("cwd")
+    .select("id, cwd")
     .eq("id", projectId)
     .single()
   if (!project) return c.json({ error: "project not found" }, 404)
