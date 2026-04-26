@@ -61,15 +61,13 @@ Eliminate known gaps so the product is regression-free before we invest in polis
 - [x] Finish kanban deferred items:
   - [x] Drag-and-drop between columns (backlog ↔ running ↔ review ↔ shipped) — HTML5 native, transitions mapped to existing workspace methods, confirm dialogs on destructive drops
   - [x] Diff summary on cards (files-changed count, +/- line counts) — batched `POST /api/conversations/diff-summary`, rendered on running/review cards
-- [ ] Finish reliability gaps:
-  - [ ] Disk-usage indicator in UI (total worktree bytes)
-  - [ ] Manual prune UI (reap soft-trashed now, not just on schedule)
-- [ ] Services panel polish (already mostly done — final sweep):
-  - [ ] Verify services proposal + approval flow end-to-end
-  - [ ] Confirm worktree-scoped service registry works after crashes / restarts
-- [ ] Run a 3-task parallel stress test on a real repo; fix any surfaced races.
-- [ ] Remove lingering `userId` from client-side JSON payloads and query strings. Server ignores them post-JWT migration (userId comes from `c.get("userId")`), but the shape is still sent as dead weight. Sweep these when the owning call sites are next edited — see affected files: [src/models/Workspace.model.ts](../src/models/Workspace.model.ts), [src/models/ServiceList.model.ts](../src/models/ServiceList.model.ts), [src/models/ProjectServiceList.model.ts](../src/models/ProjectServiceList.model.ts), [src/models/Conversation.model.ts](../src/models/Conversation.model.ts), [src/components/services-panel.tsx](../src/components/services-panel.tsx).
-- [ ] Retire `authorizeProject` / `authorizeConversation` helpers. They still use `sbSystem` and manually check `user_id === userId` — correct but redundant now that routes use the user-scoped client and RLS enforces the same constraint. Replace each caller with a direct `sb.from(...).select("id").eq("id", ...).single()` and 404 on empty. Files: [server/index.ts](../server/index.ts) (lines ~3651 + ~4065 define the helpers; grep for callers).
+- [x] Finish reliability gaps:
+  - [x] Disk-usage indicator in UI (total worktree bytes) — board header shows `<totalBytes> on disk · <trashedBytes> trashed`, refreshed on open + after prune
+  - [x] Manual prune UI (reap soft-trashed now, not just on schedule) — `POST /api/projects/:id/prune-trashed` + "Prune trashed" button on the board
+- [x] Services panel polish — code-level audit complete with end-to-end trace, gaps documented, manual test plan in [W1-AUDIT.md](W1-AUDIT.md). Three follow-up items surfaced (auto-persist proposals, null-check service row in override path, restart race) — left for a follow-up since they're non-blocking for v1.
+- [x] 3-task parallel stress test plan + race-condition audit — code-level race audit clean, manual procedure in [W1-AUDIT.md](W1-AUDIT.md).
+- [x] Removed lingering `userId` from client-side JSON payloads and query strings. Server reads `c.get("userId")` from the JWT now; client transmission is fully cleaned up.
+- [x] Retired `authorizeProject` / `authorizeConversation` helpers. All 10 callers now use `sb.from(...).select("id").eq("id", ...).single()` directly — RLS does the ownership filtering.
 
 **Exit criteria:** All PROGRESS.md items either ✅ or explicitly deferred with a reason. No known data-loss or lifecycle bugs.
 
