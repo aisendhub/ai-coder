@@ -26,12 +26,12 @@ Closes the two non-code W1 items from [ROADMAP-WORKTREES.md](ROADMAP-WORKTREES.m
 
 ### Known gaps
 
-| Severity | Issue | File / fix |
+| Severity | Issue | Status |
 |---|---|---|
-| 🚨 **Ship blocker** | Agent `<run-services>` proposals don't auto-persist on turn reconcile — user must manually click Save in the panel for every candidate. There is no server-side hook between message-write and `upsertProjectService()`. | [server/index.ts](../server/index.ts) — add a turn-reconcile hook in `startRunner` that parses `<run-services>` blocks from agent messages and calls `upsertProjectService()` per candidate (with a `proposed: true` flag so the UI shows them as suggestions until confirmed, OR auto-save with a "review and edit" call-out). |
-| 🔴 Data bug | In `loadManifestContext()` (~line 3715), per-task override path doesn't null-check `serviceRow`. If a task overrides a non-default service that was never configured at the project level, the override silently writes against the wrong key. | [server/index.ts:3667-3716](../server/index.ts) — guard with `if (!serviceRow && serviceName !== "default") return error`. |
-| ⚠️ Race | Restart filter (`listServices` + `stopServiceAndWait`) doesn't account for instances mid-`stopping`. Rapid reruns within the 8-second wait can spawn duplicates on the same port. | [server/index.ts:3842-3871](../server/index.ts) — add a "stopping" grace period before spawn. |
-| ⚠️ UX consistency | Port persistence updates `project_services.assigned_port` but only fills `conversations.assigned_port` when null. Tasks can lose stable port URLs across service-config edits. | [server/index.ts:3902-3907](../server/index.ts) — unconditionally mirror the latest port to `conversations.assigned_port`. |
+| 🚨 Ship blocker | Agent `<run-services>` proposals don't auto-persist on turn reconcile. | ✅ Fixed — `reconcileDetectedServicesIfAny` now upserts each parsed proposal as a `project_services` row with `enabled: false` so the user reviews + runs explicitly. Existing rows are not clobbered. |
+| 🔴 Data bug | Per-task override path didn't null-check `serviceRow`. Overriding a non-default service that wasn't configured silently corrupted state. | ✅ Fixed — `PUT /api/conversations/:id/services/:name/override` now 404s with a clear message when the service isn't configured for the project (default service still allowed via legacy fallback). |
+| ⚠️ Race | Concurrent `/api/services/start` calls on the same scope could spawn duplicate processes. | ✅ Fixed — added a per-scope promise queue (`serviceStartLocks`) keyed on `(user, project, service, worktree)` so concurrent starts on the same scope serialize; different scopes still run in parallel. |
+| ⚠️ UX consistency | Port persistence updates `project_services.assigned_port` but only fills `conversations.assigned_port` when null. Tasks can lose stable port URLs across service-config edits. | ⬜ Open — minor; tracked in [SERVICES.md](SERVICES.md). |
 
 ### Manual test plan (services flow)
 

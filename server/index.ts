@@ -849,7 +849,7 @@ async function startRunner(args: {
 // models drift off-spec, and emit an advisory SSE event so any client
 // that's already open can react without waiting for Supabase realtime.
 async function reconcileDetectedServicesIfAny(
-  _conversationId: string,
+  conversationId: string,
   assistantText: string,
   emit: (event: string, data: unknown) => void
 ): Promise<void> {
@@ -871,12 +871,75 @@ async function reconcileDetectedServicesIfAny(
 
   const count = multi?.length ?? (single ? 1 : 0)
   console.log(
-    `[services.proposed] assistant proposed ${count} service(s); ` +
-    `client will surface the pick-list from the message text.`
+    `[services.proposed] assistant proposed ${count} service(s); auto-persisting`
   )
+
+  // Auto-persist proposals into project_services so the panel doesn't force
+  // the user to click Save N times. Persisted with enabled=false so nothing
+  // auto-starts; the user reviews, optionally edits, and clicks Run when
+  // ready (or deletes the row to dismiss). See SERVICES.md.
+  let persisted = 0
+  let persistFailed = 0
+  if (sbSystem && conversationId) {
+    try {
+      const { data: conv } = await sbSystem
+        .from("conversations")
+        .select("project_id")
+        .eq("id", conversationId)
+        .single()
+      const projectId = conv?.project_id as string | undefined
+      if (projectId) {
+        const candidates: Array<{ name: string; manifest: Partial<RunManifest>; order: number }> = []
+        if (multi) {
+          multi.forEach((p, i) => {
+            // Drop proposals with no usable name or start command — saving
+            // them would create dead rows the user can't run anyway.
+            if (!p.name || !p.start) return
+            candidates.push({
+              name: p.name,
+              manifest: p,
+              order: typeof p.order_index === "number" ? p.order_index : i,
+            })
+          })
+        } else if (single) {
+          if (single.start) candidates.push({ name: "default", manifest: single, order: 0 })
+        }
+
+        for (const c of candidates) {
+          try {
+            // Don't clobber a service the user has already configured. The
+            // upsert would overwrite their edits otherwise.
+            const existing = await getProjectService(sbSystem, projectId, c.name)
+            if (existing) continue
+            const write: ProjectServiceWrite = {
+              ...writeFromManifest(c.name, c.manifest),
+              enabled: false,
+              order_index: c.order,
+            }
+            await upsertProjectService(sbSystem, projectId, write)
+            persisted++
+          } catch (err) {
+            persistFailed++
+            console.warn(
+              `[services.proposed] persist failed for "${c.name}":`,
+              (err as Error).message
+            )
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(
+        "[services.proposed] auto-persist lookup failed:",
+        (err as Error).message
+      )
+    }
+  }
+
   emit("services.proposed", {
     count,
     multi: !!multi,
+    persisted,
+    persistFailed,
   })
 }
 
@@ -3757,6 +3820,26 @@ function sanitizeManifest(raw: unknown): RunManifest | null {
   return out
 }
 
+// Per-scope serialization for /api/services/start. Concurrent starts on the
+// same (user, project, service, worktree) tuple race: both calls list
+// existing instances, both stop them, both spawn — the second spawn either
+// hits a port collision or leaks a zombie. Funneling through a per-scope
+// promise queue means restart-spam can't fork the registry.
+const serviceStartLocks = new Map<string, Promise<unknown>>()
+
+function withStartLock<T>(scopeKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = serviceStartLocks.get(scopeKey) ?? Promise.resolve()
+  const next = prev.then(fn, fn) // run regardless of prior outcome
+  serviceStartLocks.set(scopeKey, next)
+  // Drop the entry once the chain settles so the map doesn't grow unbounded.
+  void next.finally(() => {
+    if (serviceStartLocks.get(scopeKey) === next) {
+      serviceStartLocks.delete(scopeKey)
+    }
+  })
+  return next as Promise<T>
+}
+
 function sanitizeOverride(raw: unknown): ManifestOverride | null {
   const full = sanitizeManifest({ ...(raw as object), start: (raw as { start?: string })?.start ?? "x" })
   if (!full) return null
@@ -3790,6 +3873,14 @@ app.post("/api/services/start", async (c) => {
 
   const ctx = await loadManifestContext(userId, projectId, conversationId, serviceName)
   if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
+
+  // Scope-level serialization: see serviceStartLocks comment above. We key
+  // on the same 4-tuple the registry uses so concurrent starts on the same
+  // scope queue, while different scopes run in parallel.
+  const scopeKey = `${userId}:${projectId}:${serviceName}:${ctx.worktreePath ?? "null"}`
+  return withStartLock(scopeKey, () => doStart())
+  async function doStart(): Promise<Response> {
+    if (!ctx.ok) return c.json({ error: ctx.error }, ctx.status)
 
   // Prefer cached service config; fall back to on-the-fly detection only for
   // the default service (non-default services must be explicitly configured
@@ -3937,6 +4028,7 @@ app.post("/api/services/start", async (c) => {
     }
     return c.json({ error: (err as Error).message }, 500)
   }
+  } // end doStart()
 })
 
 // Read the project's manifest state: what's cached (stored default), what
@@ -4451,8 +4543,33 @@ app.put("/api/conversations/:id/services/:name/override", async (c) => {
   const serviceName = c.req.param("name")
   const body = await c.req.json<{ userId?: string; override?: unknown }>().catch(() => ({}))
   const userId = c.get("userId")
-  const { data: conv } = await sb.from("conversations").select("id").eq("id", conversationId).single()
+  const { data: conv } = await sb
+    .from("conversations")
+    .select("id, project_id")
+    .eq("id", conversationId)
+    .single()
   if (!conv) return c.json({ error: "conversation not found" }, 404)
+
+  // Non-default services MUST have a project_services row before overrides
+  // can be written. Without this guard the override gets persisted to a
+  // service that doesn't exist — silent data corruption (the override
+  // either sits dead in JSONB or applies to a future service of the same
+  // name). The "default" service has the legacy run_manifest fallback so
+  // it's allowed to receive overrides without an explicit row.
+  if (serviceName !== "default") {
+    if (!conv.project_id) {
+      return c.json({ error: "conversation has no project" }, 422)
+    }
+    const existing = await getProjectService(sb, conv.project_id as string, serviceName)
+    if (!existing) {
+      return c.json(
+        {
+          error: `service '${serviceName}' is not configured for this project — create it before saving an override`,
+        },
+        404
+      )
+    }
+  }
 
   const override = sanitizeOverride(body.override)
   if (!override) return c.json({ error: "invalid override — need at least one manifest field" }, 400)
