@@ -21,7 +21,13 @@ export type EnvLayers = {
   conversation: Map<string, EnvVar>         // from conversation_env_vars
   project: Map<string, EnvVar>              // from project_env_vars
   system: Record<string, string>            // computed metadata
-  discovery: Record<string, string>         // computed sibling-service vars
+  /** Live sibling running services in this scope, keyed by service name.
+   *  Used to resolve ${{svc.URL|HOST|PORT}} references at spawn time.
+   *  NOT auto-injected as env vars — the app's env stays exactly what the
+   *  user set (plus system metadata + PORT), no invented names like
+   *  API_URL polluting the env. To wire one service to another, the user
+   *  (or LLM) writes API_URL=${{api.URL}} explicitly. */
+  siblings: Map<string, { host: string; port: number }>
 }
 
 export type EnvVar = {
@@ -43,7 +49,7 @@ export type EnvResolveResult = {
   /** Final flat env to pass to child_process.spawn. Secrets decrypted. */
   env: Record<string, string>
   /** Per-key provenance (which layer set each key). For UI/debug. */
-  provenance: Record<string, "service" | "conversation" | "project" | "system" | "discovery">
+  provenance: Record<string, "service" | "conversation" | "project" | "system">
   /** ${{svc.VAR}} references that couldn't be resolved. Empty on success. */
   unresolvedRefs: string[]
 }
@@ -51,12 +57,6 @@ export type EnvResolveResult = {
 const REF_RE = /\$\{\{([^}]+)\}\}/g
 const VALID_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const VALID_SERVICE_NAME_RE = /^[a-zA-Z0-9_-]+$/
-
-/** Build a service-discovery var-name fragment from a service name.
- *  "web" → "WEB"; "my-api" → "MY_API"; matches Render/Heroku convention. */
-export function discoveryNameFor(serviceName: string): string {
-  return serviceName.toUpperCase().replace(/[^A-Z0-9]/g, "_")
-}
 
 /** Build the PORT-related env block to inject at spawn time. Always sets
  *  PORT and HOST; adds framework aliases (VITE_PORT, NUXT_PORT, etc.) per
@@ -150,35 +150,24 @@ export async function loadEnvLayers(
   // portEnvFor(stack, port) below — registry calls it with the allocated
   // port and merges the result on top of manifest.env.
 
-  // Service discovery — every running sibling in the same scope contributes
-  // <NAME>_URL, <NAME>_HOST, <NAME>_PORT. Same-scope = same project + same
-  // worktree (chats share null bucket). Excludes self so a service doesn't
-  // get vars pointing at its own previous instance.
-  //
-  // We use the unprefixed convention (the same shape Render auto-injects)
-  // because the whole value of auto-discovery is that apps can read these
-  // without knowing about our tool — `process.env.API_URL` is what real
-  // code already uses. Discovery is the LOWEST-precedence layer so user-
-  // set env vars (e.g. API_URL pointing at remote staging) override it
-  // cleanly. To opt back into the local discovery URL, the user just
-  // unsets their override.
-  const discovery: Record<string, string> = {}
-  const siblings = listServices({
+  // Sibling running services in the same scope (project + worktree). Used
+  // to resolve ${{svc.URL|HOST|PORT}} references — NOT injected into the
+  // env. Apps see exactly what the user set, plus PORT and system metadata.
+  // Excludes self so a service can't reference its own previous instance.
+  const siblings = new Map<string, { host: string; port: number }>()
+  const running = listServices({
     ownerId: ctx.ownerId,
     projectId: ctx.projectId,
     worktreePath: ctx.worktreePath,
   })
-  for (const sib of siblings) {
+  for (const sib of running) {
     if (sib.serviceName === ctx.serviceName) continue
     if (!sib.port) continue
     if (sib.status !== "running" && sib.status !== "starting") continue
-    const tag = discoveryNameFor(sib.serviceName)
-    discovery[`${tag}_HOST`] = "localhost"
-    discovery[`${tag}_PORT`] = String(sib.port)
-    discovery[`${tag}_URL`] = `http://localhost:${sib.port}`
+    siblings.set(sib.serviceName, { host: "localhost", port: sib.port })
   }
 
-  return { service: serviceEnv, conversation, project, system, discovery }
+  return { service: serviceEnv, conversation, project, system, siblings }
 }
 
 /** Merge layers in precedence order, decrypt secrets, and resolve ${{}}
@@ -189,16 +178,12 @@ export function resolveEnv(layers: EnvLayers): EnvResolveResult {
   const provenance: EnvResolveResult["provenance"] = {}
 
   // Precedence (lowest first; later writes override earlier):
-  //   discovery → project → conversation → service → system
+  //   project → conversation → service → system
   //
-  // Discovery (sibling <NAME>_URL etc.) is LOWEST so users can override —
-  // e.g. set API_URL=https://staging.example.com to bypass the local
-  // sibling. System metadata (WORKTREES_*) is HIGHEST so users can't
-  // shadow the ground-truth project/conversation/branch info we inject.
-  for (const [k, v] of Object.entries(layers.discovery)) {
-    out[k] = v
-    provenance[k] = "discovery"
-  }
+  // No "discovery" layer — sibling URLs/ports are resolved on-demand by the
+  // ${{svc.URL|HOST|PORT}} reference syntax, not auto-injected. The app's
+  // env is exactly what the user set + system metadata + PORT (handled by
+  // the registry on top of this).
   for (const [k, v] of layers.project) {
     out[k] = decryptIfSecret(v)
     provenance[k] = "project"
@@ -275,16 +260,16 @@ function lookupReference(
   if (svc === "self") {
     return resolved[key] ?? null
   }
-  // ${{svc.URL|HOST|PORT}} = look up in the unprefixed discovery vars
-  // (e.g. ${{api.URL}} → API_URL). Discovery vars use the same naming
-  // scheme apps already expect, so the reference syntax just maps onto
-  // the env vars rather than into a special namespace.
-  const tag = discoveryNameFor(svc)
-  const discoveryKey = `${tag}_${key}`
-  if (discoveryKey in layers.discovery) return layers.discovery[discoveryKey]
-  // We only support the discovery shorthand (URL/HOST/PORT) for sibling
-  // services. Looking up arbitrary env keys on another service is out of
-  // scope for v1 — would need cross-service env reads, which open a different
-  // can of worms (race conditions, ordering).
-  return null
+  // ${{svc.URL|HOST|PORT}} = look up directly in the live sibling registry
+  // captured in layers.siblings. We only expose URL/HOST/PORT — looking up
+  // arbitrary env keys on another service is out of scope (race conditions,
+  // ordering, leakage of sibling secrets).
+  const sib = layers.siblings.get(svc)
+  if (!sib) return null
+  switch (key) {
+    case "URL":  return `http://${sib.host}:${sib.port}`
+    case "HOST": return sib.host
+    case "PORT": return String(sib.port)
+    default:     return null
+  }
 }

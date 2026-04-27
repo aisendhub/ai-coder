@@ -535,21 +535,23 @@ Start-command rules:
 - Rails: \`rails server -p $PORT\` or \`bin/dev -p $PORT\`.
 - If a service lives in a subdir, prefix \`cd <subdir> && \`.
 
-Service-to-service refs: every running sibling auto-injects
-\`<NAME>_URL\`, \`<NAME>_HOST\`, \`<NAME>_PORT\` into other services in
-the same scope (project + worktree). So if you have \`api\` running, the
-\`web\` service automatically gets \`API_URL\`, \`API_HOST\`, \`API_PORT\`
-in its env — \`fetch(process.env.API_URL)\` just works. No explicit
-reference needed for the common case.
+Service-to-service refs: write them EXPLICITLY in the env block. Nothing
+about other services is auto-injected — the app sees only what its own
+env declares (plus PORT and a few WORKTREES_* metadata vars).
 
-If you need composition (e.g. \`API_URL=https://\${{api.HOST}}:\${{api.PORT}}/v1\`)
-use Railway-style \`\${{svc.URL|HOST|PORT}}\` syntax in env values; the
-host resolves them at spawn time against the live registry.
+When one service needs another (e.g. \`web\` → \`api\`), set the env value
+with the Railway-style \`\${{svc.URL|HOST|PORT}}\` syntax:
 
-If the user has set their own \`API_URL\` (project or worktree env), it
-overrides the auto-injected one — discovery is the LOWEST-precedence
-layer. So an app pointing at remote staging stays pointing at remote
-staging even when a local \`api\` service is running.
+  \`API_URL=\${{api.URL}}\`           → http://localhost:<api's port>
+  \`API_HOST=\${{api.HOST}}\`         → localhost
+  \`API_PORT=\${{api.PORT}}\`         → <api's port as string>
+  \`API_BASE=http://localhost:\${{api.PORT}}/v1\`   (composition works)
+
+The host resolves these against the live registry at spawn time — so a
+worktree's \`web\` always reaches the SAME worktree's \`api\` (correctly
+isolated from other worktrees), and the port is whatever was actually
+allocated for that run. The user keeps control: if they set
+\`API_URL=https://staging.example.com\` literally, that wins.
 
 Names: short identifier (lowercase letters, digits, \`_\`, \`-\`; max
 40 chars). Prefer "default" for the single root service; "web", "api",

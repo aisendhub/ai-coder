@@ -36,14 +36,15 @@ Every UX decision in this doc traces back to making these four axes legible. The
 
 **Layers in precedence order (later overrides earlier):**
 
-1. **Discovery vars** (runtime, auto-injected) — `<NAME>_URL/HOST/PORT` for every running sibling. *Lowest precedence so users can override:* set `API_URL=https://staging` to point past the local sibling.
-2. **Project defaults** — committed to repo as `.ai-coder/env.example` (or similar). Non-secret only. Documents what env keys the project expects. Optional.
-3. **Project shared** — gitignored, shared across all chats and worktrees on this project. *DB-stored*, not file-stored, so multi-user teams sync via Supabase RLS. Table: `project_env_vars`.
-4. **Worktree-scoped** — overrides for a specific worktree (= conversation). Table: `conversation_env_vars`. Cleaned up via FK CASCADE when the conversation hard-deletes.
-5. **Service-scoped** — per-service overrides at start time. `project_services.env` (JSONB). Per-task variants land in `conversations.service_overrides[svc].env`.
-6. **System metadata** (runtime, reserved) — `WORKTREES_PROJECT_ID`, `WORKTREES_CONVERSATION_ID`, `WORKTREES_BRANCH`, `WORKTREES_BASE_REF`. *Highest precedence — user can't shadow ground truth.*
+1. **Project defaults** — committed to repo as `.ai-coder/env.example` (or similar). Non-secret only. Documents what env keys the project expects. Optional.
+2. **Project shared** — gitignored, shared across all chats and worktrees on this project. *DB-stored*, not file-stored, so multi-user teams sync via Supabase RLS. Table: `project_env_vars`.
+3. **Worktree-scoped** — overrides for a specific worktree (= conversation). Table: `conversation_env_vars`. Cleaned up via FK CASCADE when the conversation hard-deletes.
+4. **Service-scoped** — per-service overrides at start time. `project_services.env` (JSONB). Per-task variants land in `conversations.service_overrides[svc].env`.
+5. **System metadata** (runtime, reserved) — `WORKTREES_PROJECT_ID`, `WORKTREES_CONVERSATION_ID`, `WORKTREES_BRANCH`, `WORKTREES_BASE_REF`. *Highest precedence — user can't shadow ground truth.*
 
-The PORT-related env (PORT, HOST, framework aliases like VITE_PORT) is layered on top of all of this in a separate registry pass — see [Port semantics + framework aliases](#port-semantics--framework-aliases).
+After the merge, **`${{svc.URL|HOST|PORT}}` references in any value get resolved** against the live sibling-services registry — see [Service-to-service injection](#service-to-service-injection). No extra env vars get added; the substitution happens in-place on values the user already wrote.
+
+The PORT-related env (`PORT`, `HOST`, framework aliases like `VITE_PORT`) is layered on top of all of this in a separate registry pass — see [Port semantics + framework aliases](#port-semantics--framework-aliases).
 
 **Why three persisted layers (not five like Railway, not one like Fly)?**
 - Project shared = the 90% case. Most env is "DATABASE_URL = ..." that every service needs.
@@ -74,42 +75,33 @@ A new tab in the services panel: **Env**. Shows the merged result with badges pe
 
 The classic problem: web depends on api, api on postgres. How does web know api's URL when ports are dynamic?
 
-### The recommendation: Railway syntax + auto-injected discovery vars
+### The recommendation: explicit Railway-style references, no env-var pollution
 
-**1. Auto-inject for every running service** (the 90% case):
+**No auto-injected sibling discovery vars.** Apps see exactly the env they declare (plus `PORT` for the current service and a few `WORKTREES_*` metadata vars). We deliberately don't synthesize `API_URL`/`API_HOST`/`API_PORT` because:
 
-When service `web` starts, sibling services in the same scope (running in the same project + worktree) get these env vars auto-populated:
+- Apps only know what they declare — `process.env.API_URL` should be set by the user (or the LLM proposing the manifest), not invented by us.
+- Silent injection produces "where did this env var come from?" debugging pain.
+- Per-worktree port allocation already requires a substitution mechanism for cross-service refs; that mechanism is the explicit reference syntax below. No reason to also have a magic-name pathway.
 
-```
-WEB_URL=http://localhost:4127
-WEB_HOST=localhost
-WEB_PORT=4127
-```
-
-Naming: `<UPPER_NAME>_<URL|HOST|PORT>`. Recompute on every service start within the same scope so subscribers see fresh values.
-
-This is the **Render / Heroku convention** — unprefixed because the whole point of auto-discovery is that real apps can read it without knowing about Worktrees. `process.env.API_URL` is what existing code already does. Most users never need anything more.
-
-**Discovery is the LOWEST-precedence layer**, so user-set values always win. If a user sets `API_URL=https://staging.example.com` in project env vars, that wins over the local sibling URL — pointing the app at remote staging keeps working even if a local `api` service starts. To opt back into local discovery, the user just unsets their override.
-
-**2. Explicit reference syntax for composition** (the 10% case):
-
-In any user-set env value, `${{svc.VAR}}` resolves at process-spawn time:
+**Explicit reference syntax** — any env value can use `${{svc.URL|HOST|PORT}}`:
 
 ```
-API_URL=https://${{api.HOST}}:${{api.PORT}}/v1
-NEXT_PUBLIC_API=${{api.URL}}
+API_URL=${{api.URL}}                                # → http://localhost:<api's port>
+API_HOST=${{api.HOST}}                              # → localhost
+API_PORT=${{api.PORT}}                              # → <api's port as string>
+API_BASE=http://localhost:${{api.PORT}}/v1          # composition works
 DATABASE_URL=postgres://user:pass@${{db.HOST}}:${{db.PORT}}/myapp
 ```
 
-References resolve against the *live registry* — so rotating a service's port flows automatically. This is Railway's killer feature. We implement it identically.
+Resolved at process-spawn against the **live registry** for the current scope (project + worktree). So a worktree's `web` always points at the SAME worktree's `api` — never at another worktree's running instance. Each worktree's allocated port flows through automatically.
 
 **Resolution rules:**
-- `${{svc.URL}}`, `${{svc.HOST}}`, `${{svc.PORT}}` — the auto-discovery vars above.
-- `${{svc.VAR}}` — looks up `VAR` in the referenced service's env block (after that service's own env is resolved).
-- Self-reference `${{VAR}}` — looks up in the current service's env (use sparingly).
-- Cycles — detected at spawn time, returns 422 with the cycle path.
+- `${{svc.URL}}`, `${{svc.HOST}}`, `${{svc.PORT}}` — the only allowed shorthand. Looks up the running sibling.
+- `${{self.VAR}}` — looks up `VAR` in the current service's resolved env (use for composition within a service, sparingly).
+- Cross-service env reads (e.g. `${{api.SOME_KEY}}`) — **not supported**. Out of scope; opens race-condition + secret-leakage cans of worms.
 - Missing target — spawn fails with `${{api.URL}} → no service named 'api' is running in scope`.
+
+**User overrides are trivial.** The user setting `API_URL=https://staging.example.com` literally just *sets* `API_URL=https://staging.example.com`. Nothing was auto-injected, so there's nothing to override. To go back to the local sibling, change to `${{api.URL}}`.
 
 ### Why not Cloudflare-style bindings (typed handles)?
 
@@ -271,14 +263,14 @@ Pulled into one table for reference. Detailed analysis lives in the research not
 
 ### What we steal
 
-- **Railway's `${{svc.VAR}}` runtime references** — adopt verbatim.
-- **Render's auto-injected `<SVC>_URL`** — auto-discovery for the 90% case.
+- **Railway's `${{svc.VAR}}` runtime references** — adopt verbatim. The substitution path that handles per-worktree port differences without polluting the env.
 - **Cloudflare/Fly's write-only secrets** — non-negotiable, every long-lived platform converges here.
 - **Vercel's checkbox-per-env tagging UI** — though we don't have multiple envs, we'll use the same UI shape for "applies to project" / "applies to this worktree" / "applies to this service."
-- **Fly's `.internal` DNS** — deferred but earmarked for v2.
+- **Fly's `.internal` DNS** — deferred but earmarked for v2 (only meaningful once worktrees move to containers with separate network namespaces).
 
 ### What we reject
 
+- **Render-style auto-injected `<SVC>_URL`** — apps shouldn't see env vars they didn't declare. Cross-service refs are explicit via `${{svc.URL}}`; no magic names appear in the env.
 - **Per-env splits (prod/preview/dev)** — out of scope for a local dev tool.
 - **Cloudflare's non-inheritable env blocks** — bug masquerading as feature.
 - **Render's order-of-creation precedence** — footgun.
