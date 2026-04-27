@@ -22,6 +22,7 @@ import {
   Plus,
 } from "lucide-react"
 import { api } from "@/lib/api"
+import { EnvTrigger } from "@/components/env-drawer"
 
 import {
   Sheet,
@@ -951,6 +952,7 @@ export const ServicesPanel = observer(function ServicesPanel({
         <Server className="size-4" />
         <div className="text-sm font-medium">Services</div>
         <div className="flex-1" />
+        <EnvTrigger />
         <RunnerSelect value={runnerId} onChange={setRunnerId} />
         {/* Always render the same Add + Run-all pair to keep header
             layout stable while the services list is still loading.
