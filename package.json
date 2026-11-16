@@ -9,6 +9,7 @@
     "db:setup": "bash scripts/local-db-setup.sh",
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
+    "server:restart": "bash scripts/restart-server.sh",
     "start": "concurrently -n server,web -c magenta,cyan \"npm:start:server\" \"npm:start:web\"",
     "start:server": "PORT=3082 tsx server/index.ts",
     "start:web": "BACKEND_PORT=3082 vite --port 3083 --strictPort",

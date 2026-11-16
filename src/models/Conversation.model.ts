@@ -7,6 +7,13 @@ import type { Attachment, AttachmentMeta } from "@/lib/attachment"
 import { runAgentResponseHooks } from "@/lib/agent-response-hooks"
 import { api } from "@/lib/api"
 
+// A turn with no server output for this long is treated as hung. The server
+// has its own provider stall/turn guards; this one covers the cases where the
+// request never reaches a runner at all (server down, stream wedged, proxy
+// dropping the socket without closing it).
+const TURN_STALL_TIMEOUT_MS = 90_000
+const TURN_STALL_CHECK_MS = 5_000
+
 class MessageList extends BaseList<typeof Message> {
   get ItemType() {
     return Message
@@ -495,6 +502,17 @@ export class Conversation extends BaseModel {
     const controller = new AbortController()
     this.abortController = controller
 
+    // Watchdog: if the server sends nothing at all for a while, give up
+    // instead of spinning forever behind a stop button. Any byte from the
+    // stream counts as activity.
+    let timedOut = false
+    let lastActivity = Date.now()
+    const watchdog = window.setInterval(() => {
+      if (Date.now() - lastActivity < TURN_STALL_TIMEOUT_MS) return
+      timedOut = true
+      controller.abort()
+    }, TURN_STALL_CHECK_MS)
+
     try {
       const res = await api("/api/chat", {
         method: "POST",
@@ -515,6 +533,7 @@ export class Conversation extends BaseModel {
       }
       if (!res.body) throw new Error("no body")
 
+      lastActivity = Date.now()
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
@@ -525,6 +544,7 @@ export class Conversation extends BaseModel {
           console.log("[runTurn] SSE stream done")
           break
         }
+        lastActivity = Date.now()
         buffer += decoder.decode(value, { stream: true })
         const parts = buffer.split("\n\n")
         buffer = parts.pop() ?? ""
@@ -602,7 +622,17 @@ export class Conversation extends BaseModel {
       }
     } catch (err) {
       console.log("[runTurn] caught error:", (err as Error)?.name, (err as Error)?.message)
-      if ((err as Error)?.name !== "AbortError") {
+      if (timedOut) {
+        const message = `No response from the server for ${Math.round(
+          TURN_STALL_TIMEOUT_MS / 1000
+        )}s — stopped the turn. The server may be stuck or offline; restart it and try again.`
+        runInAction(() => {
+          this.lastError = message
+        })
+        updateAssistant((m) => {
+          m.text += `\n⚠️ ${message}`
+        })
+      } else if ((err as Error)?.name !== "AbortError") {
         const message = err instanceof Error ? err.message : String(err)
         runInAction(() => {
           this.lastError = message
@@ -612,6 +642,7 @@ export class Conversation extends BaseModel {
         })
       }
     } finally {
+      window.clearInterval(watchdog)
       this.abortController = null
       // Drain queue – if another message is waiting, hand off directly
       // without clearing the streaming flag so listeners know the AI is

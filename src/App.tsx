@@ -19,6 +19,8 @@ import { TerminalPanel } from "@/components/terminal-panel"
 import { AccessRequestsPanel } from "@/components/access-requests-panel"
 import { FileTreePanel } from "@/components/file-tree-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
+import { ServerOfflineBanner } from "@/components/server-offline-banner"
+import { useServerHealth } from "@/hooks/use-server-health"
 import { GitLogSection } from "@/components/git-log-panel"
 import { ChatsSection } from "@/components/chats-section"
 import { FullscreenOverlay } from "@/components/fullscreen-overlay"
@@ -115,8 +117,13 @@ function AuthGate() {
 
 function Workspace() {
   const isMobile = useIsMobile()
-  if (isMobile) return <MobileLayout />
-  return <DesktopLayout />
+  const { online, checking, check } = useServerHealth()
+  return (
+    <>
+      {!online && <ServerOfflineBanner checking={checking} onRetry={check} />}
+      {isMobile ? <MobileLayout /> : <DesktopLayout />}
+    </>
+  )
 }
 
 function DesktopLayout() {
@@ -156,11 +163,19 @@ function DesktopLayout() {
   const [codeCollapsed, setCodeCollapsed] = useState(false)
   const [servicesCollapsed, setServicesCollapsed] = useState(false)
   const navRef = useRef<ImperativePanelHandle>(null)
+  const codeRef = useRef<ImperativePanelHandle>(null)
   const toggleNav = () => {
     const panel = navRef.current
     if (!panel) return
     if (panel.isCollapsed()) panel.expand()
     else panel.collapse()
+  }
+  // Clicking the collapsed right rail (or its icon) pulls the panel back out.
+  const expandCodePanel = () => {
+    const panel = codeRef.current
+    if (!panel) return
+    if (panel.isCollapsed()) panel.expand()
+    else panel.resize(32)
   }
   return (
     <ChatStateProvider>
@@ -262,6 +277,7 @@ function DesktopLayout() {
             <>
               <ResizableHandle />
               <ResizablePanel
+                ref={codeRef}
                 id="code"
                 order={5}
                 defaultSize={32}
@@ -276,6 +292,7 @@ function DesktopLayout() {
                 <div className="h-full min-h-0 overflow-hidden border-l">
                   <CodePanel
                     collapsed={codeCollapsed}
+                    onExpand={expandCodePanel}
                     onClose={() => setRightOpen(false)}
                     gitLogPromoted={gitLogPromoted}
                     gitLogFullscreen={gitLogFullscreen}

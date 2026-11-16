@@ -39,3 +39,12 @@ export async function openExternal(url: string): Promise<void> {
   }
   window.open(url, "_blank", "noopener,noreferrer")
 }
+
+/** Restart the local API server. Only the desktop shell can do this; in a
+ *  browser the caller falls back to telling the user to run the npm script. */
+export async function restartServer(): Promise<string> {
+  if (!isDesktopShell()) {
+    throw new Error("restart is only available in the desktop app")
+  }
+  return invoke<string>("restart_server")
+}

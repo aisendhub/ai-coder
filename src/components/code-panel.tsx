@@ -26,6 +26,8 @@ import { api, sseUrl } from "@/lib/api"
 // away (there's nothing to size against). Open-states persist across reloads.
 type CodePanelProps = {
   collapsed?: boolean
+  /** Pull the panel back out from the collapsed rail (click the rail/icon). */
+  onExpand?: () => void
   onClose?: () => void
   // Section promotion/fullscreen state, owned by App.tsx so the promoted
   // copy and the ghosted stub stay in sync.
@@ -39,6 +41,7 @@ type CodePanelProps = {
 
 export const CodePanel = observer(function CodePanel({
   collapsed = false,
+  onExpand,
   onClose,
   gitLogPromoted = false,
   gitLogFullscreen = false,
@@ -69,7 +72,7 @@ export const CodePanel = observer(function CodePanel({
 
   if (collapsed) {
     // Narrow rail — accordions don't make sense. Show just the Changes rail.
-    return <ChangesSection collapsed onClose={onClose} />
+    return <ChangesSection collapsed onExpand={onExpand} onClose={onClose} />
   }
 
   const gitLogMenuProps = {
@@ -175,11 +178,13 @@ async function dispatchPrompt(prompt: string) {
 const ChangesSection = observer(function ChangesSection({
   collapsed = false,
   onClose,
+  onExpand,
   expanded = true,
   onToggleExpanded,
 }: {
   collapsed?: boolean
   onClose?: () => void
+  onExpand?: () => void
   expanded?: boolean
   onToggleExpanded?: () => void
 } = {}) {
@@ -343,19 +348,30 @@ const ChangesSection = observer(function ChangesSection({
   if (collapsed) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center py-2 gap-1">
-        <FileCode className="size-4 text-muted-foreground" />
+        <button
+          type="button"
+          onClick={onExpand}
+          aria-label="Expand changes"
+          title="Expand changes"
+          className="size-7 rounded-md hover:bg-accent flex items-center justify-center cursor-w-resize"
+        >
+          <FileCode className="size-4 text-muted-foreground" />
+        </button>
         <div className="text-[10px] tabular-nums text-muted-foreground">
           {files.length}
         </div>
         <div className="my-1 h-px w-6 bg-border" />
         {files.slice(0, 12).map((f) => (
-          <div
+          <button
             key={f.path}
+            type="button"
+            onClick={onExpand}
             title={`${f.status}: ${f.path}`}
-            className="size-7 rounded-md hover:bg-accent flex items-center justify-center"
+            aria-label={`Expand changes (${f.path})`}
+            className="size-7 rounded-md hover:bg-accent flex items-center justify-center cursor-w-resize"
           >
             <StatusIcon status={f.status} />
-          </div>
+          </button>
         ))}
       </div>
     )
