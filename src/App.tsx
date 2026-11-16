@@ -275,7 +275,11 @@ function DesktopLayout() {
           )}
           {rightOpen && (
             <>
-              <ResizableHandle />
+              {/* Collapsed to the rail, the panel is only ~4% wide, so widen
+                  the grab area until it is dragged back out. */}
+              <ResizableHandle
+                className={codeCollapsed ? "[&::after]:w-4 cursor-col-resize" : undefined}
+              />
               <ResizablePanel
                 ref={codeRef}
                 id="code"
