@@ -6,7 +6,7 @@ import {
   type KeyboardEvent,
 } from "react"
 import { observer } from "mobx-react-lite"
-import { Paperclip, Send, Square, Wrench, Brain, Check, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon, Gauge, Flag, Loader2, Pause, Play, Clock, GitMerge } from "lucide-react"
+import { Paperclip, Send, Square, Wrench, Brain, Check, CheckCircle2, AlertTriangle, X, FileText, Image as ImageIcon, Gauge, Flag, Loader2, Pause, Play, Clock, GitMerge, ChevronDown, ChevronUp } from "lucide-react"
 import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -37,6 +37,10 @@ export const ChatPanel = observer(function ChatPanel() {
   const { recordFileTouch } = useChatState()
   const bottomRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const prevActiveId = useRef<string | null>(null)
+  const prevAssistantId = useRef<string | null>(null)
+  const autoTopAssistantId = useRef<string | null>(null)
+  const userScrolledAway = useRef(false)
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
   // Per-turn change records keyed by assistant message id. Drives the
   // WorkStripe rendered under each assistant bubble. See docs/WORK-STATE.md.
@@ -62,14 +66,48 @@ export const ChatPanel = observer(function ChatPanel() {
     return () => clearTimeout(t)
   }, [highlightedMessageId, conversation?.messages.items.length])
 
-  // Auto-scroll instantly on conversation open, new messages, or streaming content.
+  // Scroll behaviour:
+  // - On opening a conversation, show the latest history (bottom).
+  // - When a new assistant turn starts producing content, put the TOP of that
+  //   response at the top of the scroll area so the user starts reading from
+  //   the beginning. Do not keep following the bottom while it streams.
   const activeId = conversation?.id
   const messageCount = conversation?.messages.items.length ?? 0
   const lastText = conversation?.lastAssistant?.text.length ?? 0
   const lastEvents = conversation?.lastAssistant?.events.length ?? 0
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" })
-  }, [activeId, messageCount, lastText, lastEvents])
+    const lastAssistant = conversation?.lastAssistant
+    if (activeId !== prevActiveId.current) {
+      prevActiveId.current = activeId ?? null
+      prevAssistantId.current = lastAssistant?.id ?? null
+      autoTopAssistantId.current = null
+      userScrolledAway.current = false
+      bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" })
+      return
+    }
+    if (!lastAssistant) return
+
+    const hasContent =
+      lastAssistant.text.length > 0 || lastAssistant.events.length > 0
+    if (lastAssistant.id !== prevAssistantId.current) {
+      prevAssistantId.current = lastAssistant.id
+      autoTopAssistantId.current = lastAssistant.id
+      userScrolledAway.current = false
+    }
+    // Keep the TOP of the new response pinned to the top of the scroll area
+    // while it grows. Once the user scrolls (wheel/touch), stop so they can
+    // read at their own pace.
+    if (
+      hasContent &&
+      autoTopAssistantId.current === lastAssistant.id &&
+      !userScrolledAway.current
+    ) {
+      const el = listRef.current?.querySelector<HTMLElement>(
+        `[data-message-id="${lastAssistant.id}"]`
+      )
+      el?.scrollIntoView({ behavior: "instant", block: "start" })
+    }
+  }, [activeId, messageCount, lastText, lastEvents, conversation?.lastAssistant?.id])
 
   // Wire tool_use events into the file-touch tracker for the side panel
   useEffect(() => {
@@ -127,7 +165,16 @@ export const ChatPanel = observer(function ChatPanel() {
     <div className="flex flex-col h-full min-h-0">
       {conversation?.kind === "task" && <TaskHeader conversation={conversation} />}
       <ScrollArea className="flex-1 min-h-0">
-        <div ref={listRef} className="mx-auto w-full max-w-243 px-10 py-6 flex flex-col gap-4">
+        <div
+          ref={listRef}
+          className="mx-auto w-full max-w-243 px-10 py-6 flex flex-col gap-4 [overflow-anchor:none]"
+          onWheel={() => {
+            userScrolledAway.current = true
+          }}
+          onTouchMove={() => {
+            userScrolledAway.current = true
+          }}
+        >
           <EmptyState />
           {conversation?.messages.items.map((m, i, all) => {
             const isLast = i === all.length - 1
@@ -247,11 +294,13 @@ const MessageBubble = observer(function MessageBubble({
 
   return (
     <div className="self-stretch w-full flex flex-col gap-2">
-      {message.events
-        .filter((e) => e.kind !== "text")
-        .map((e, idx) => (
-          <ActivityRow key={idx} event={e} />
-        ))}
+      {groupEvents(message.events.filter((e) => e.kind !== "text")).map((e, idx) =>
+        e.kind === "thinking" ? (
+          <ThinkingBlock key={e.key} text={e.text} />
+        ) : (
+          <ActivityRow key={`event-${idx}`} event={e} />
+        )
+      )}
       {(message.text || (isStreaming && !hasContent)) && (
         <div className="rounded-2xl bg-muted px-4 py-2">
           {message.text ? (
@@ -475,6 +524,88 @@ function Meter({ label, value, pct }: { label: string; value: string; pct: numbe
       <div className="h-1 w-16 rounded-full bg-muted overflow-hidden">
         <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
       </div>
+    </div>
+  )
+}
+
+type EventGroup =
+  | Exclude<StreamEvent, { kind: "thinking" }>
+  | { kind: "thinking"; text: string; key: string }
+
+/** Put all reasoning in a message into one collapsed section. The provider
+ *  streams reasoning as many small events (and may interleave tool calls);
+ *  rendering one row per delta produced the wall of separate "thought" lines. */
+function groupEvents(events: StreamEvent[]): EventGroup[] {
+  const thinking = events
+    .filter((event): event is Extract<StreamEvent, { kind: "thinking" }> =>
+      event.kind === "thinking"
+    )
+    .map((event) => event.text)
+    .join("")
+  const rest = events.filter(
+    (event): event is Exclude<StreamEvent, { kind: "thinking" }> =>
+      event.kind !== "thinking"
+  )
+  return thinking
+    ? [{ kind: "thinking", text: thinking, key: "thinking" }, ...rest]
+    : rest
+}
+
+const THINKING_LINE_HEIGHT = 20
+
+function ThinkingBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const lines = text.split("\n").length
+  const long = lines > 3 || text.length > 240
+  const large = lines > 5 || text.length > 480
+
+  if (!long) {
+    return (
+      <div className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1">
+        <Brain className="size-3.5 mt-0.5 shrink-0" />
+        <div className="whitespace-pre-wrap leading-5">{text}</div>
+      </div>
+    )
+  }
+
+  const collapsedHeight = (large ? 5 : 3) * THINKING_LINE_HEIGHT
+
+  return (
+    <div className="rounded-md border-l-2 border-muted bg-muted/20 pl-3 pr-1 py-1">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-2 text-xs text-muted-foreground"
+      >
+        <Brain className="size-3.5 shrink-0" />
+        <span className="italic">Thinking</span>
+        <span className="ml-auto inline-flex items-center gap-1 text-[10px]">
+          {expanded ? "Collapse" : "Expand"}
+          {expanded ? (
+            <ChevronUp className="size-3.5" />
+          ) : (
+            <ChevronDown className="size-3.5" />
+          )}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="mt-1 whitespace-pre-wrap text-xs italic leading-5 text-muted-foreground">
+          {text}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          aria-label="Expand thinking"
+          className="relative mt-1 block w-full overflow-hidden text-left"
+          style={{ height: collapsedHeight }}
+        >
+          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap text-xs italic leading-5 text-muted-foreground">
+            {text}
+          </div>
+        </button>
+      )}
     </div>
   )
 }
