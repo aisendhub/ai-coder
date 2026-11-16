@@ -32,6 +32,19 @@ import { useConversationTurns } from "@/hooks/use-conversation-turns"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
+/** Nearest ancestor that actually scrolls, so we can drive and observe it
+ *  directly instead of relying on frame callbacks that pause in background
+ *  tabs. */
+function getScroller(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null
+  while (node) {
+    const { overflowY } = getComputedStyle(node)
+    if (overflowY === "auto" || overflowY === "scroll") return node
+    node = node.parentElement
+  }
+  return null
+}
+
 export const ChatPanel = observer(function ChatPanel() {
   const conversation = workspace.active
   const { recordFileTouch } = useChatState()
@@ -39,8 +52,9 @@ export const ChatPanel = observer(function ChatPanel() {
   const listRef = useRef<HTMLDivElement>(null)
   const prevActiveId = useRef<string | null>(null)
   const prevAssistantId = useRef<string | null>(null)
-  const autoTopAssistantId = useRef<string | null>(null)
   const userScrolledAway = useRef(false)
+  const expectedScrollTop = useRef<number | null>(null)
+  const scrollerRef = useRef<HTMLElement | null>(null)
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
   // Per-turn change records keyed by assistant message id. Drives the
   // WorkStripe rendered under each assistant bubble. See docs/WORK-STATE.md.
@@ -77,37 +91,76 @@ export const ChatPanel = observer(function ChatPanel() {
   const lastEvents = conversation?.lastAssistant?.events.length ?? 0
   useEffect(() => {
     const lastAssistant = conversation?.lastAssistant
+    const scroller = getScroller(listRef.current)
+    scrollerRef.current = scroller
+
+    // Scroll programmatically, then remember where we landed so the scroll
+    // listener can tell our own movement from the user's.
+    const scroll = (el: HTMLElement | null | undefined, block: ScrollLogicalPosition) => {
+      if (!el) return
+      el.scrollIntoView({ behavior: "instant", block })
+      expectedScrollTop.current = scroller?.scrollTop ?? null
+    }
+
     if (activeId !== prevActiveId.current) {
       prevActiveId.current = activeId ?? null
       prevAssistantId.current = lastAssistant?.id ?? null
-      autoTopAssistantId.current = null
       userScrolledAway.current = false
-      bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" })
+      scroll(bottomRef.current, "end")
       return
     }
     if (!lastAssistant) return
 
-    const hasContent =
-      lastAssistant.text.length > 0 || lastAssistant.events.length > 0
     if (lastAssistant.id !== prevAssistantId.current) {
       prevAssistantId.current = lastAssistant.id
-      autoTopAssistantId.current = lastAssistant.id
       userScrolledAway.current = false
     }
-    // Keep the TOP of the new response pinned to the top of the scroll area
-    // while it grows. Once the user scrolls (wheel/touch), stop so they can
-    // read at their own pace.
-    if (
-      hasContent &&
-      autoTopAssistantId.current === lastAssistant.id &&
-      !userScrolledAway.current
-    ) {
-      const el = listRef.current?.querySelector<HTMLElement>(
-        `[data-message-id="${lastAssistant.id}"]`
+
+    const wrapper = listRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${lastAssistant.id}"]`
+    )
+    const hasText = lastAssistant.text.length > 0
+    const hasActivity = lastAssistant.events.length > 0
+
+    if (hasText) {
+      // The answer has started, so the activity card has collapsed in this
+      // same render. Pin the TOP of the answer to the top of the viewport and
+      // keep it there while the answer grows downward. Re-pinning on every
+      // delta is idempotent and corrects drift from layout changes above.
+      if (!userScrolledAway.current) {
+        scroll(
+          wrapper?.querySelector<HTMLElement>("[data-assistant-text]"),
+          "start"
+        )
+      }
+      return
+    }
+
+    // Still working (thinking / tools). Follow the bottom of the activity
+    // card until the user scrolls away.
+    if (hasActivity && !userScrolledAway.current) {
+      scroll(
+        wrapper?.querySelector<HTMLElement>("[data-activity-card]"),
+        "end"
       )
-      el?.scrollIntoView({ behavior: "instant", block: "start" })
     }
   }, [activeId, messageCount, lastText, lastEvents, conversation?.lastAssistant?.id])
+
+  // Treat any scroll we did not perform as the user taking over, so streaming
+  // never yanks the viewport away from where they are reading.
+  useEffect(() => {
+    const scroller = scrollerRef.current ?? getScroller(listRef.current)
+    if (!scroller) return
+    const onScroll = () => {
+      const expected = expectedScrollTop.current
+      if (expected == null) return
+      if (Math.abs(scroller.scrollTop - expected) > 8) {
+        userScrolledAway.current = true
+      }
+    }
+    scroller.addEventListener("scroll", onScroll, { passive: true })
+    return () => scroller.removeEventListener("scroll", onScroll)
+  }, [activeId])
 
   // Wire tool_use events into the file-touch tracker for the side panel
   useEffect(() => {
@@ -294,15 +347,12 @@ const MessageBubble = observer(function MessageBubble({
 
   return (
     <div className="self-stretch w-full flex flex-col gap-2">
-      {groupEvents(message.events.filter((e) => e.kind !== "text")).map((e, idx) =>
-        e.kind === "thinking" ? (
-          <ThinkingBlock key={e.key} text={e.text} />
-        ) : (
-          <ActivityRow key={`event-${idx}`} event={e} />
-        )
-      )}
+      <ActivityCard message={message} isStreaming={isStreaming} />
       {(message.text || (isStreaming && !hasContent)) && (
-        <div className="rounded-2xl bg-muted px-4 py-2">
+        <div
+          data-assistant-text
+          className="rounded-2xl bg-muted px-4 py-2"
+        >
           {message.text ? (
             <Markdown>
               {isStreaming ? message.text + "▍" : message.text}
@@ -312,7 +362,6 @@ const MessageBubble = observer(function MessageBubble({
           )}
         </div>
       )}
-      {isStreaming && hasContent && !message.text && <ThinkingDots />}
     </div>
   )
 })
@@ -528,58 +577,62 @@ function Meter({ label, value, pct }: { label: string; value: string; pct: numbe
   )
 }
 
-type EventGroup =
-  | Exclude<StreamEvent, { kind: "thinking" }>
-  | { kind: "thinking"; text: string; key: string }
+/** One collapsible card for every non-text event in an assistant message:
+ *  thinking, tool calls, tool results and loop status. The final answer is
+ *  rendered separately below it. */
+const THINKING_LINE_HEIGHT = 20
 
-/** Put all reasoning in a message into one collapsed section. The provider
- *  streams reasoning as many small events (and may interleave tool calls);
- *  rendering one row per delta produced the wall of separate "thought" lines. */
-function groupEvents(events: StreamEvent[]): EventGroup[] {
-  const thinking = events
+const ActivityCard = observer(function ActivityCard({
+  message,
+  isStreaming,
+}: {
+  message: Message
+  isStreaming: boolean
+}) {
+  const thinking = message.events
     .filter((event): event is Extract<StreamEvent, { kind: "thinking" }> =>
       event.kind === "thinking"
     )
     .map((event) => event.text)
     .join("")
-  const rest = events.filter(
-    (event): event is Exclude<StreamEvent, { kind: "thinking" }> =>
-      event.kind !== "thinking"
-  )
-  return thinking
-    ? [{ kind: "thinking", text: thinking, key: "thinking" }, ...rest]
-    : rest
-}
+  const rest = message.events.filter((event) => event.kind !== "thinking")
+  const hasText = message.text.length > 0
+  // Open while the agent is working, collapsed once the answer starts (or the
+  // turn ends) so the result is the focus and can anchor at the top. Derived,
+  // not an effect: the answer arriving and the card collapsing must land in
+  // the same commit as the scroll that anchors the result.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
+  const expanded = userExpanded ?? (isStreaming && !hasText)
 
-const THINKING_LINE_HEIGHT = 20
+  if (!thinking && rest.length === 0) return null
 
-function ThinkingBlock({ text }: { text: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const lines = text.split("\n").length
-  const long = lines > 3 || text.length > 240
-  const large = lines > 5 || text.length > 480
+  const thinkingLines = thinking ? thinking.split("\n") : []
+  const tallPreview =
+    thinkingLines.length > 5 || thinking.length > 480
+  const previewHeight = (tallPreview ? 5 : 3) * THINKING_LINE_HEIGHT
 
-  if (!long) {
-    return (
-      <div className="flex items-start gap-2 text-xs text-muted-foreground italic border-l-2 border-muted pl-3 py-1">
-        <Brain className="size-3.5 mt-0.5 shrink-0" />
-        <div className="whitespace-pre-wrap leading-5">{text}</div>
-      </div>
-    )
-  }
-
-  const collapsedHeight = (large ? 5 : 3) * THINKING_LINE_HEIGHT
+  const toolCount = rest.filter((event) => event.kind === "tool_use").length
+  const summary = [
+    thinking ? "Thinking" : null,
+    toolCount > 0 ? `${toolCount} tool${toolCount === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ")
 
   return (
-    <div className="rounded-md border-l-2 border-muted bg-muted/20 pl-3 pr-1 py-1">
+    <div data-activity-card className="rounded-xl border bg-muted/20">
       <button
         type="button"
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => setUserExpanded(!expanded)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-2 text-xs text-muted-foreground"
+        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground"
       >
         <Brain className="size-3.5 shrink-0" />
-        <span className="italic">Thinking</span>
+        <span className="font-medium">Activity</span>
+        {summary ? <span>· {summary}</span> : null}
+        {isStreaming && !hasText ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : null}
         <span className="ml-auto inline-flex items-center gap-1 text-[10px]">
           {expanded ? "Collapse" : "Expand"}
           {expanded ? (
@@ -590,25 +643,34 @@ function ThinkingBlock({ text }: { text: string }) {
         </span>
       </button>
       {expanded ? (
-        <div className="mt-1 whitespace-pre-wrap text-xs italic leading-5 text-muted-foreground">
-          {text}
+        <div className="px-3 pb-3 space-y-2">
+          {thinking ? (
+            <div className="border-l-2 border-muted pl-3 text-xs italic leading-5 text-muted-foreground whitespace-pre-wrap">
+              {thinking}
+            </div>
+          ) : null}
+          {rest.map((event, idx) => (
+            <ActivityRow key={idx} event={event} />
+          ))}
         </div>
-      ) : (
+      ) : thinking ? (
+        // Collapsed preview: the last 3 lines of reasoning (5 when it is
+        // long), clipped with no scrollbar. Clicking it expands the card.
         <button
           type="button"
-          onClick={() => setExpanded(true)}
-          aria-label="Expand thinking"
-          className="relative mt-1 block w-full overflow-hidden text-left"
-          style={{ height: collapsedHeight }}
+          onClick={() => setUserExpanded(true)}
+          aria-label="Expand activity"
+          className="flex w-full flex-col justify-end overflow-hidden px-3 pb-2 text-left"
+          style={{ height: previewHeight }}
         >
-          <div className="absolute inset-x-0 bottom-0 whitespace-pre-wrap text-xs italic leading-5 text-muted-foreground">
-            {text}
+          <div className="whitespace-pre-wrap text-xs italic leading-5 text-muted-foreground">
+            {thinking}
           </div>
         </button>
-      )}
+      ) : null}
     </div>
   )
-}
+})
 
 function ActivityRow({ event }: { event: StreamEvent }) {
   if (event.kind === "thinking") {
