@@ -1,0 +1,671 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "LoginSessionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "client_id",
+        "client_secret",
+        "session_key",
+        "provider",
+        "redirect_uri"
+      ],
+      "properties": {
+        "client_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "client_secret": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "session_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "redirect_uri": {
+          "$ref": "#/$defs/RedirectUri"
+        }
+      }
+    },
+    "LoginSessionResponse": {
+      "type": "object",
+      "required": [
+        "authorization_url",
+        "expires_in"
+      ],
+      "properties": {
+        "authorization_url": {
+          "$ref": "#/$defs/RedirectUri"
+        },
+        "expires_in": {
+          "type": "integer",
+          "const": 600
+        }
+      }
+    },
+    "LoginResultRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "client_id",
+        "client_secret",
+        "session_key",
+        "redirect_uri"
+      ],
+      "properties": {
+        "client_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "client_secret": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "session_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "redirect_uri": {
+          "$ref": "#/$defs/RedirectUri"
+        }
+      }
+    },
+    "LoginResult": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "succeeded",
+            "failed"
+          ]
+        },
+        "profile": {
+          "$ref": "#/$defs/Profile"
+        },
+        "error": {
+          "type": "string",
+          "enum": [
+            "access_denied",
+            "invalid_provider_response",
+            "provider_unavailable"
+          ]
+        }
+      }
+    },
+    "Provider": {
+      "type": "string",
+      "enum": [
+        "google",
+        "github",
+        "email"
+      ]
+    },
+    "RedirectUri": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048,
+      "x-validation": "redirect",
+      "description": "Exact registered HTTPS URL or HTTP loopback; no credentials, query or fragment."
+    },
+    "TokenRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grant_type",
+        "client_id",
+        "client_secret",
+        "code",
+        "redirect_uri",
+        "code_verifier"
+      ],
+      "properties": {
+        "grant_type": {
+          "type": "string",
+          "const": "authorization_code"
+        },
+        "client_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "client_secret": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "redirect_uri": {
+          "$ref": "#/$defs/RedirectUri"
+        },
+        "code_verifier": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._~-]{43,128}$"
+        }
+      }
+    },
+    "TokenResponse": {
+      "type": "object",
+      "required": [
+        "access_token",
+        "token_type",
+        "expires_in",
+        "scope"
+      ],
+      "properties": {
+        "access_token": {
+          "type": "string",
+          "pattern": "^aop_[A-Za-z0-9_-]{43}$"
+        },
+        "token_type": {
+          "type": "string",
+          "const": "Bearer"
+        },
+        "expires_in": {
+          "type": "integer",
+          "const": 900
+        },
+        "scope": {
+          "type": "string",
+          "const": "profile"
+        }
+      }
+    },
+    "Profile": {
+      "type": "object",
+      "required": [
+        "subject",
+        "provider",
+        "providerSubject",
+        "name",
+        "username",
+        "email",
+        "emailVerified",
+        "avatarUrl"
+      ],
+      "properties": {
+        "subject": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "providerSubject": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "emailVerified": {
+          "type": "boolean"
+        },
+        "avatarUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ProviderStatus": {
+      "type": "object",
+      "required": [
+        "id",
+        "configured",
+        "enabled",
+        "available"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Provider"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ProviderStatuses": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProviderStatus"
+      }
+    },
+    "ApiError": {
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "Transaction": {
+      "type": "object",
+      "required": [
+        "state",
+        "codeVerifier",
+        "codeChallenge",
+        "createdAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "codeVerifier": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._~-]{43,128}$"
+        },
+        "codeChallenge": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "createdAt": {
+          "type": "integer"
+        },
+        "expiresAt": {
+          "type": "integer"
+        }
+      }
+    },
+    "BrowserStartLoginParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "authUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "BrowserAuthParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "authUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "AppOrigin": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://[^/?#]+$",
+      "maxLength": 2048,
+      "x-validation": "redirect",
+      "description": "Exact application origin without a path or trailing slash. HTTPS or HTTP loopback only."
+    },
+    "ManagedAuthConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clientId",
+        "clientSecret",
+        "origin"
+      ],
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "clientSecret": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "origin": {
+          "$ref": "#/$defs/AppOrigin"
+        },
+        "authPath": {
+          "type": "string",
+          "pattern": "^/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+$"
+        },
+        "returnTo": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "sessionMaxAge": {
+          "type": "integer"
+        },
+        "sessionSecret": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 2000
+        },
+        "baseUrl": {
+          "type": "string"
+        }
+      }
+    },
+    "ManagedLoginCookie": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "loginAttempt"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "loginAttempt": {
+          "$ref": "#/$defs/LoginAttempt"
+        }
+      }
+    },
+    "ManagedSessionCookie": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "expiresAt"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/Profile"
+        },
+        "expiresAt": {
+          "type": "integer"
+        }
+      }
+    },
+    "SDKConfiguration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clientId"
+      ],
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clientSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "timeoutMs": {
+          "type": "integer"
+        }
+      }
+    },
+    "EmptyParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "StartLoginParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "redirectUri"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "redirectUri": {
+          "$ref": "#/$defs/RedirectUri"
+        }
+      }
+    },
+    "LoginAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionKey",
+        "redirectUri",
+        "expiresAt"
+      ],
+      "properties": {
+        "sessionKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "redirectUri": {
+          "$ref": "#/$defs/RedirectUri"
+        },
+        "expiresAt": {
+          "type": "integer"
+        }
+      },
+      "description": "Private backend login attempt. Store in the initiating browser's server session, never in a URL or frontend storage. expiresAt is Unix seconds."
+    },
+    "StartedLogin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "loginAttempt"
+      ],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/RedirectUri"
+        },
+        "loginAttempt": {
+          "$ref": "#/$defs/LoginAttempt"
+        }
+      }
+    },
+    "CompleteLoginParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "loginAttempt"
+      ],
+      "properties": {
+        "loginAttempt": {
+          "$ref": "#/$defs/LoginAttempt"
+        }
+      }
+    },
+    "PendingLogin": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "pending"
+        }
+      }
+    },
+    "CompletedLogin": {
+      "type": "object",
+      "required": [
+        "status",
+        "profile"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "succeeded"
+        },
+        "profile": {
+          "$ref": "#/$defs/Profile"
+        }
+      }
+    },
+    "FailedLogin": {
+      "type": "object",
+      "required": [
+        "status",
+        "error"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "const": "failed"
+        },
+        "error": {
+          "type": "string",
+          "enum": [
+            "access_denied",
+            "invalid_provider_response",
+            "provider_unavailable"
+          ]
+        }
+      }
+    },
+    "ProfileTokenParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accessToken"
+      ],
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "LoginURLParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "redirectUri",
+        "state",
+        "codeChallenge"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "redirectUri": {
+          "$ref": "#/$defs/RedirectUri"
+        },
+        "state": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 512
+        },
+        "codeChallenge": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        }
+      }
+    },
+    "LoginCallbackParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callbackUrl",
+        "redirectUri",
+        "state",
+        "expiresAt"
+      ],
+      "properties": {
+        "callbackUrl": {
+          "type": "string"
+        },
+        "redirectUri": {
+          "$ref": "#/$defs/RedirectUri"
+        },
+        "state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expiresAt": {
+          "type": "integer"
+        }
+      }
+    },
+    "LoginCallbackCode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "code"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "LoginCallbackError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "error"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 // test change — verify file-panel gutter shows "modified" (amber) not all-added (green)
 // test change — second line to confirm adjacent-line modified detection
 import { useEffect, useRef, useState } from "react"
+import { ShieldX, Clock } from "lucide-react"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import {
@@ -15,6 +16,7 @@ import { CodePanel } from "@/components/code-panel"
 import { FilePanelSlot } from "@/components/file-panel"
 import { ServicesPanel } from "@/components/services-panel"
 import { TerminalPanel } from "@/components/terminal-panel"
+import { AccessRequestsPanel } from "@/components/access-requests-panel"
 import { FileTreePanel } from "@/components/file-tree-panel"
 import { RightPanel as MobileRightPanel } from "@/components/right-panel"
 import { GitLogSection } from "@/components/git-log-panel"
@@ -31,8 +33,10 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
 import { ConfirmProvider } from "@/lib/confirm"
 import { workspace } from "@/models"
+import { api } from "@/lib/api"
 import { useUrlSync } from "@/lib/url-sync"
 import { useTurnNotifications } from "@/hooks/use-turn-notifications"
+import { useAdmin } from "@/hooks/use-admin"
 
 export default function App() {
   if (!isSupabaseConfigured) return <SetupNotice />
@@ -48,14 +52,36 @@ export default function App() {
   )
 }
 
+type AccessStatus = "loading" | "approved" | "none" | "pending" | "denied"
+
 function AuthGate() {
-  const { session, loading, user } = useAuth()
+  const { session, loading, user, signOut } = useAuth()
+  const [access, setAccess] = useState<AccessStatus>("loading")
+
+  // After sign-in, check the user's access status.
+  useEffect(() => {
+    if (!session) { setAccess("loading"); return }
+    api("/api/health-authed")
+      .then(async (r) => {
+        if (r.status === 403) {
+          // Not allowed — check if they already have a pending/denied request
+          const me = await api("/api/access-requests/me").then((r2) => r2.json())
+          setAccess(me?.status ?? "none")
+        } else {
+          const body = await r.json()
+          setAccess(body.access ?? "approved")
+        }
+      })
+      .catch(() => setAccess("approved")) // network error — let normal flows handle
+  }, [session])
+
+  const allowed = access === "approved"
 
   // Wire user → workspace store
   useEffect(() => {
-    if (user?.id) void workspace.signIn(user.id)
+    if (user?.id && allowed) void workspace.signIn(user.id)
     else workspace.signOut()
-  }, [user?.id])
+  }, [user?.id, allowed])
 
   // Bind URL ↔ active conversation
   useUrlSync()
@@ -63,7 +89,7 @@ function AuthGate() {
   // Show toast notifications for background AI turn completions
   useTurnNotifications()
 
-  if (loading) {
+  if (loading || (session && access === "loading")) {
     return (
       <div className="h-svh flex items-center justify-center text-sm text-muted-foreground">
         Loading…
@@ -71,6 +97,19 @@ function AuthGate() {
     )
   }
   if (!session) return <SignIn />
+  if (!allowed) {
+    return (
+      <AccessDenied
+        email={user?.email}
+        avatarUrl={user?.user_metadata?.avatar_url}
+        displayName={user?.user_metadata?.full_name ?? user?.user_metadata?.name}
+        userId={user?.id}
+        accessStatus={access}
+        onStatusChange={setAccess}
+        onSignOut={signOut}
+      />
+    )
+  }
   return <Workspace />
 }
 
@@ -87,6 +126,8 @@ function DesktopLayout() {
   const [terminalOpen, setTerminalOpen] = usePersistentState("ai-coder:panels:terminalOpen", false)
   const [servicesOpen, setServicesOpen] = usePersistentState("ai-coder:panels:servicesOpen", false)
   const [fileTreeOpen, setFileTreeOpen] = usePersistentState("ai-coder:panels:fileTreeOpen", false)
+  const [accessRequestsOpen, setAccessRequestsOpen] = usePersistentState("ai-coder:panels:accessRequestsOpen", false)
+  const { isAdmin, pendingCount } = useAdmin()
   // When the agent's reply drops a <run-services> block, open the services
   // panel automatically so the user sees the pick-list without hunting for
   // it. The panel itself listens for the same event to open the picker +
@@ -191,6 +232,10 @@ function DesktopLayout() {
                 onServicesOpenChange={setServicesOpen}
                 fileTreeOpen={fileTreeOpen}
                 onFileTreeOpenChange={setFileTreeOpen}
+                accessRequestsOpen={accessRequestsOpen}
+                onAccessRequestsOpenChange={setAccessRequestsOpen}
+                isAdmin={isAdmin}
+                pendingAccessRequests={pendingCount}
               />
               <div className="flex-1 min-h-0 overflow-hidden">
                 <ChatPanel />
@@ -304,6 +349,22 @@ function DesktopLayout() {
               </ResizablePanel>
             </>
           )}
+          {isAdmin && accessRequestsOpen && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel
+                id="accessRequests"
+                order={9}
+                defaultSize={22}
+                minSize={18}
+                maxSize={40}
+              >
+                <div className="h-full min-h-0 overflow-hidden border-l">
+                  <AccessRequestsPanel onClose={() => setAccessRequestsOpen(false)} />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
           <FilePanelSlot />
         </ResizablePanelGroup>
         {gitLogFullscreen && (
@@ -371,6 +432,109 @@ function MobileLayout() {
         </SidebarInset>
       </SidebarProvider>
     </ChatStateProvider>
+  )
+}
+
+function AccessDenied({
+  email,
+  avatarUrl,
+  displayName,
+  userId,
+  accessStatus,
+  onStatusChange,
+  onSignOut,
+}: {
+  email?: string | null
+  avatarUrl?: string | null
+  displayName?: string | null
+  userId?: string
+  accessStatus: AccessStatus
+  onStatusChange: (s: AccessStatus) => void
+  onSignOut: () => void
+}) {
+  const [submitting, setSubmitting] = useState(false)
+
+  const requestAccess = async () => {
+    if (!userId || !email) return
+    setSubmitting(true)
+    try {
+      const id = crypto.randomUUID()
+      await api("/api/access-requests", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, email, display_name: displayName, avatar_url: avatarUrl }),
+      })
+      onStatusChange("pending")
+    } catch {
+      /* toast could go here */
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="h-svh flex items-center justify-center p-6">
+      <div className="max-w-md text-sm text-muted-foreground space-y-4 text-center">
+        <div className="flex justify-center">
+          <div className="flex size-12 items-center justify-center rounded-xl bg-destructive/10 text-destructive">
+            {accessStatus === "pending" ? (
+              <Clock className="size-6" />
+            ) : (
+              <ShieldX className="size-6" />
+            )}
+          </div>
+        </div>
+        <div className="space-y-1">
+          <h1 className="text-xl font-semibold text-foreground">
+            {accessStatus === "pending"
+              ? "Access requested"
+              : accessStatus === "denied"
+                ? "Access denied"
+                : "Request access"}
+          </h1>
+          {email && (
+            <p>
+              Signed in as{" "}
+              <code className="text-xs bg-muted px-1.5 py-0.5 rounded">{email}</code>
+            </p>
+          )}
+        </div>
+
+        {accessStatus === "pending" && (
+          <p>
+            Your request has been submitted. The administrator will review it
+            shortly.
+          </p>
+        )}
+        {accessStatus === "denied" && (
+          <p>Your access request was denied by the administrator.</p>
+        )}
+        {accessStatus === "none" && (
+          <>
+            <p>
+              This is a private installation. Click below to request access
+              from the administrator.
+            </p>
+            <button
+              onClick={requestAccess}
+              disabled={submitting}
+              className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm hover:bg-primary/90 disabled:opacity-50"
+            >
+              {submitting ? "Requesting…" : "Request access"}
+            </button>
+          </>
+        )}
+
+        <div>
+          <button
+            onClick={onSignOut}
+            className="px-4 py-2 rounded-md text-sm text-muted-foreground hover:text-foreground underline underline-offset-4"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

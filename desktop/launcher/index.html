@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ai-coder</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f14;
+        --panel: #111820;
+        --border: #22303d;
+        --text: #e6edf3;
+        --muted: #8b9bab;
+        --accent: #63b3ed;
+        --danger: #f6ad55;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: radial-gradient(1200px 600px at 50% -10%, #16212c 0%, var(--bg) 60%);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+      }
+      main {
+        width: 100%;
+        max-width: 560px;
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background: color-mix(in srgb, var(--panel) 92%, transparent);
+        padding: 32px;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      }
+      .logo {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, #1f6feb, #63b3ed);
+        color: #06121f;
+        font-weight: 800;
+        font-size: 20px;
+        margin-bottom: 20px;
+      }
+      h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -0.02em; }
+      p { margin: 0; color: var(--muted); }
+      .status {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin: 24px 0 16px;
+        min-height: 24px;
+      }
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        border-top-color: var(--accent);
+        animation: spin 0.9s linear infinite;
+        flex: none;
+      }
+      .spinner.hidden { display: none; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .row { display: flex; gap: 8px; margin-top: 8px; }
+      input {
+        flex: 1;
+        min-width: 0;
+        background: #0a1017;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        color: var(--text);
+        padding: 10px 12px;
+        font: inherit;
+        outline: none;
+      }
+      input:focus { border-color: var(--accent); }
+      button {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 16px;
+        background: #182431;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary { background: var(--accent); color: #06121f; border-color: var(--accent); font-weight: 650; }
+      button:hover { filter: brightness(1.08); }
+      .hint {
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      code { color: var(--text); background: #0a1017; padding: 1px 5px; border-radius: 5px; }
+      .error { color: var(--danger); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="logo">a</div>
+      <h1>Connect to ai-coder</h1>
+      <p>The desktop shell hosts the UI; the local server runs separately.</p>
+
+      <div class="status">
+        <div class="spinner" id="spinner"></div>
+        <div id="status">Looking for a local ai-coder server…</div>
+      </div>
+
+      <div class="row">
+        <input id="url" spellcheck="false" autocomplete="off" />
+        <button class="primary" id="connect">Connect</button>
+      </div>
+      <div class="row">
+        <button id="retry">Retry auto-detect</button>
+        <button id="use-5173">Use :5173</button>
+        <button id="use-3001">Use :3001</button>
+      </div>
+
+      <div class="hint">
+        Start the stack with <code>npm run dev</code> (Vite <code>:5173</code>) or
+        <code>npm run serve</code> (Hono <code>:3001</code>), then connect.
+        The chosen URL is remembered.
+      </div>
+    </main>
+
+    <script>
+      const DEFAULT_URLS = [
+        "http://localhost:5173",
+        "http://localhost:3001",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3001",
+      ]
+      const STORAGE_KEY = "ai-coder:desktopServerUrl"
+      const statusEl = document.getElementById("status")
+      const spinner = document.getElementById("spinner")
+      const input = document.getElementById("url")
+
+      const saved = (() => {
+        try { return localStorage.getItem(STORAGE_KEY) } catch { return null }
+      })()
+      input.value = saved || DEFAULT_URLS[0]
+
+      function candidates() {
+        const typed = input.value.trim().replace(/\/+$/, "")
+        const value = typed && !DEFAULT_URLS.includes(typed) ? [typed] : []
+        return [...value, ...(saved && saved !== typed ? [saved] : []), ...DEFAULT_URLS]
+      }
+
+      function normalize(raw) {
+        let value = String(raw || "").trim()
+        if (!value) return ""
+        if (!/^https?:\/\//i.test(value)) value = "http://" + value
+        return value.replace(/\/+$/, "")
+      }
+
+      function setStatus(text, isError = false) {
+        statusEl.textContent = text
+        statusEl.className = isError ? "error" : ""
+      }
+
+      async function reachable(base) {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 1200)
+        try {
+          await fetch(base + "/api/health", {
+            mode: "no-cors",
+            cache: "no-store",
+            signal: controller.signal,
+          })
+          return true
+        } catch {
+          return false
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+
+      function connect(base) {
+        const url = normalize(base)
+        if (!url) {
+          setStatus("Enter a server URL.", true)
+          return
+        }
+        try { localStorage.setItem(STORAGE_KEY, url) } catch {}
+        spinner.classList.remove("hidden")
+        setStatus("Connecting to " + url + "…")
+        // `v` busts the WKWebView cache so a reopened shell always gets the
+        // latest UI from the local server.
+        window.location.replace(url + "/?desktop=1&v=" + Date.now())
+      }
+
+      let stopped = false
+      async function autoDetect() {
+        if (stopped) return
+        spinner.classList.remove("hidden")
+        for (const base of candidates()) {
+          if (stopped) return
+          setStatus("Looking for ai-coder at " + base + "…")
+          if (await reachable(base)) {
+            connect(base)
+            return
+          }
+        }
+        spinner.classList.add("hidden")
+        setStatus("No local server found yet. Start it, then retry.", true)
+        setTimeout(autoDetect, 2500)
+      }
+
+      document.getElementById("connect").addEventListener("click", () => {
+        stopped = true
+        connect(input.value)
+      })
+      document.getElementById("retry").addEventListener("click", () => {
+        stopped = false
+        autoDetect()
+      })
+      document.getElementById("use-5173").addEventListener("click", () => {
+        stopped = true
+        connect("http://localhost:5173")
+      })
+      document.getElementById("use-3001").addEventListener("click", () => {
+        stopped = true
+        connect("http://localhost:3001")
+      })
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          stopped = true
+          connect(input.value)
+        }
+      })
+
+      autoDetect()
+    </script>
+  </body>
+</html>

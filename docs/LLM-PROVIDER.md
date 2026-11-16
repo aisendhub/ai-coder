@@ -6,22 +6,67 @@ evaluator, commit-message generator, or service detector.
 
 > Companion: [SYSTEM-PROMPT.md](./SYSTEM-PROMPT.md) — what the system prompt
 > looks like and how `settingSources` / addendums layer on.
+>
+> Forward plan: [OPENCODE-DEFAULT.md](./OPENCODE-DEFAULT.md) — running other
+> models on this provider today (DeepSeek), and migrating to OpenCode V2 as the
+> default runtime later.
 
 ## Today
 
-There is exactly one provider: the Claude Agent SDK
-(`@anthropic-ai/claude-agent-sdk`). Its `query()` function drives both the
-interactive chat runner and the headless one-shot flows.
+There are two registered providers:
+
+- **`claude-code-sdk` (default)** — `@anthropic-ai/claude-agent-sdk`. Its
+  `query()` function drives the chat runner and the headless one-shot flows.
+- **`opencode` (opt-in)** — the OpenCode V2 embedded runtime. It is registered
+  but **not used unless `LLM_PROVIDER=opencode`**. It translates OpenCode's
+  event stream into the same Claude-SDK-shaped messages the runner consumes,
+  and is covered by unit + real-DeepSeek e2e tests.
 
 ```
 server/llm/
-├── provider.ts                # interface + types (no impl)
-├── claude-code-provider.ts    # implementation (passthrough to query())
-└── index.ts                   # getLlmProvider() factory + re-exports
+├── provider.ts                    # interface + types
+├── claude-code-provider.ts        # default implementation (query())
+├── opencode/
+│   ├── provider.ts                # host lifecycle, session/model/abort/permission
+│   ├── events.ts                  # OpenCode events → SDKMessage (pure mapper)
+│   ├── tools.ts                   # canonical tool names/inputs for the UI
+│   ├── models.ts                  # model refs + catalog mapping
+│   └── *.test.ts                  # unit tests (mock events/host)
+└── index.ts                       # getLlmProvider() factory + registry
 ```
 
 Callers depend on `server/llm/index.ts`. They do **not** import from
-`@anthropic-ai/claude-agent-sdk` directly.
+`@anthropic-ai/claude-agent-sdk` or `@opencode/sdk` directly.
+
+### OpenCode runtime details
+
+- **Config** — `OPENCODE_MODEL` (default `deepseek/deepseek-flash`),
+  `OPENCODE_PROVIDER` for bare model ids, `OPENCODE_DATA_DIR` for the embedded
+  database, `OPENCODE_CONFIG_CONTENT` to override the whole OpenCode config.
+- **Model catalog** — `opencodeProvider.listModels(cwd)` maps `ModelInfo` to a
+  UI-neutral `AgentModel` (context/output, cost, capabilities, variants).
+- **Sessions** — `conversations.session_id` holds `ses_…`. A Claude UUID is
+  ignored and a new OpenCode session is created, so switching runtimes cannot
+  corrupt an old transcript.
+- **Tool names** — lowercase OpenCode names are canonicalized at the boundary
+  (`write` → `Write`, `bash` → `Bash`); editing tools also get `file_path`.
+- **Permissions** — `allowedTools` becomes read-only OpenCode permission rules;
+  `permission.asked` is answered through `onPermission` (default `once`).
+- **Abort / steering** — `AbortController` calls `sessions.interrupt`; prompts
+  use `delivery: "queue"`.
+- **Tests**:
+  ```sh
+  npm run test:opencode
+  DEEPSEEK_API_KEY=... OPENCODE_E2E=1 npm run test:e2e
+  ```
+
+## Compatibility layer
+
+The provider interface is still Claude-SDK-shaped (`AgentMessage` is
+`SDKMessage`). OpenCode adapts into it rather than redesigning every call site.
+That keeps the default runtime untouched. The neutral `AgentEvent` refactor in
+[OPENCODE-DEFAULT.md](./OPENCODE-DEFAULT.md) remains the plan for when OpenCode
+becomes the default.
 
 ## The interface
 
@@ -129,6 +174,12 @@ To register a new provider:
 
 ## Adding a non-Claude provider
 
+> **Implemented (2026-11-16):** `server/llm/opencode/` is the first non-Claude
+> provider. It uses Option A below: OpenCode events are translated into
+> `SDKMessage`-shaped messages. It is opt-in (`LLM_PROVIDER=opencode`) and the
+> default remains the Claude Agent SDK. The tradeoff analysis is kept for the
+> next provider / the eventual neutral-contract refactor.
+
 The honest tradeoff: the message stream is currently typed as the Claude SDK's
 `SDKMessage`. A new provider has two options.
 
@@ -197,8 +248,12 @@ new optional fields and the Claude provider wires them through.
 
 | File                                           | Role                                |
 | ---------------------------------------------- | ----------------------------------- |
-| `server/llm/provider.ts`                       | Interface + types. No imports of the SDK at runtime. |
-| `server/llm/claude-code-provider.ts`           | Wraps `query()` from the Claude SDK. The only place SDK behavior lives. |
+| `server/llm/provider.ts`                       | Interface + types. No runtime SDK imports. |
+| `server/llm/claude-code-provider.ts`           | Default runtime: wraps `query()` from the Claude SDK. |
+| `server/llm/opencode/provider.ts`              | Opt-in runtime: embedded OpenCode host, sessions, models, abort, permissions. |
+| `server/llm/opencode/events.ts`                | Pure OpenCode-event → `SDKMessage` mapper. |
+| `server/llm/opencode/tools.ts`                 | Canonical tool names and inputs for the UI. |
+| `server/llm/opencode/models.ts`                | Model refs and catalog mapping. |
 | `server/llm/index.ts`                          | `getLlmProvider()` factory + public re-exports. |
 | `server/llm/system-prompt.ts`                  | Builds the `append` text (host context + project addendum). |
 | `server/index.ts` `startRunner`                | Chat runner — long-running session via the provider. |

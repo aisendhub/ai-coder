@@ -2,6 +2,11 @@
 
 What we're building, why, and the shape of the thing.
 
+> **Auth update (2026-11-16):** login is AnyOAuth (Google/GitHub). Postgres and
+> PostgREST run locally; the backend exchanges the AnyOAuth session for a
+> short-lived PostgREST JWT. The Supabase Auth references below are historical.
+> See [STACK.md](STACK.md) and [OPENCODE-DEFAULT.md](OPENCODE-DEFAULT.md).
+
 Related strategy docs:
 - [PRODUCT-SIGNAL.md](PRODUCT-SIGNAL.md) — north-star for every UI decision: async supervision, parallel AI, user as orchestrator.
 - [NAMING.md](NAMING.md) — three-product family (Worktrees, Hangar, Windtunnel) and launch order.
@@ -33,7 +38,10 @@ It's a browser-first version of Claude Code:
 
 - Replacing VS Code. No file editor, no terminal panel. Just chat + diff summary.
 - Building our own agent loop. We use the Claude Agent SDK directly.
-- Supporting non-Anthropic models.
+- Supporting arbitrary model vendors in the default path. DeepSeek and other
+  Anthropic-compatible endpoints work today through the Claude Agent SDK; a
+  runtime-neutral provider (OpenCode) is planned in
+  [OPENCODE-DEFAULT.md](OPENCODE-DEFAULT.md).
 - Persisting file-level history beyond the sandbox. Git is the record.
 
 ---

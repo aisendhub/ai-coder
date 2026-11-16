@@ -27,6 +27,8 @@ import {
 } from "@/lib/attachment"
 import { EmptyState } from "@/components/empty-state"
 import { useConfirm } from "@/lib/confirm"
+import { WorkStripe } from "@/components/work-stripe"
+import { useConversationTurns } from "@/hooks/use-conversation-turns"
 
 const MAX_TEXTAREA_HEIGHT = 240
 
@@ -36,6 +38,9 @@ export const ChatPanel = observer(function ChatPanel() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
+  // Per-turn change records keyed by assistant message id. Drives the
+  // WorkStripe rendered under each assistant bubble. See docs/WORK-STATE.md.
+  const turnsByMessageId = useConversationTurns(conversation?.id ?? null)
 
   // "Show in chat" from the file-panel comment accordion → scroll to + briefly
   // highlight the anchored chat message. Sticky across late-arriving rows.
@@ -129,16 +134,18 @@ export const ChatPanel = observer(function ChatPanel() {
             const isStreamingThis =
               conversation.streaming && isLast && m.role === "assistant"
             const isHighlighted = highlightedMessageId === m.id
+            const turn = m.role === "assistant" ? turnsByMessageId[m.id] : undefined
             return (
               <div
                 key={m.id}
                 data-message-id={m.id}
                 className={cn(
-                  "flex flex-col transition-shadow rounded-2xl",
+                  "flex flex-col gap-1.5 transition-shadow rounded-2xl",
                   isHighlighted && "ring-2 ring-primary/60 ring-offset-2 ring-offset-background"
                 )}
               >
                 <MessageBubble message={m} isStreaming={isStreamingThis} />
+                {turn && <WorkStripe turn={turn} />}
               </div>
             )
           })}

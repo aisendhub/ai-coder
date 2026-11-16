@@ -22,6 +22,7 @@ class ProjectList extends BaseList<typeof Project> {
 }
 
 const LAST_PROJECT_KEY = "ai-coder:activeProjectId"
+const LAST_CONVERSATION_KEY = "ai-coder:activeConversationId"
 
 // Per-session set of project ids we've already shown the project-switch
 // notice for. Repeated switches between two projects shouldn't toast every
@@ -115,12 +116,25 @@ export class Workspace extends BaseModel {
     const prev = this.active
     prev?.unsubscribe()
     this.activeId = id
+    try {
+      if (id) localStorage.setItem(LAST_CONVERSATION_KEY, id)
+      else localStorage.removeItem(LAST_CONVERSATION_KEY)
+    } catch {
+      // ignore storage errors
+    }
     // The open file is scoped to a conversation's project — drop it on switch.
     this.openFilePath = null
     this.pinnedCommit = null
     const next = this.active
     if (next) {
-      if (!next.loaded) void next.loadMessages()
+      if (!next.loaded) {
+        void next
+          .loadMessages()
+          .then(() => next.attachIfRunning())
+          .catch((err) => console.error("loadMessages failed", err))
+      } else {
+        void next.attachIfRunning()
+      }
       next.subscribe()
       if (this.unreadIds.has(next.id)) {
         const updated = new Set(this.unreadIds)
@@ -185,6 +199,9 @@ export class Workspace extends BaseModel {
 
   async signIn(userId: string) {
     if (this.userId === userId) return
+    // Reset in-memory state for a new user/session. The last-active
+    // conversation hint lives in localStorage and is handled by AuthProvider
+    // on explicit sign-out, not on this transient reset.
     this.signOut()
     runInAction(() => {
       this.userId = userId
@@ -684,6 +701,12 @@ export class Workspace extends BaseModel {
             )
           }
           this.runningServerIds = next
+          // A turn can still be running after a reload (the server runner is
+          // independent of the browser SSE connection). Reattach the active
+          // conversation so the UI revives and continues it.
+          if (this.active && next.has(this.active.id)) {
+            void this.active.attachIfRunning()
+          }
         })
       } catch {
         // ignore

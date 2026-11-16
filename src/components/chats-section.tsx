@@ -9,6 +9,7 @@ import { workspace } from "@/models"
 import { ConversationRow } from "@/components/conversation-row"
 import { SectionMenu } from "@/components/section-menu"
 import { useDeleteConversation } from "@/hooks/use-delete-conversation"
+import { useDiffSummaries } from "@/hooks/use-diff-summaries"
 
 type Props = {
   expanded: boolean
@@ -76,6 +77,15 @@ export const ChatsSection = observer(function ChatsSection({
     const q = query.toLowerCase()
     return list.filter((c) => c.title.toLowerCase().includes(q))
   }, [conversations, query])
+
+  // Pending / +- chips on chat rows. Only fetch ids for chats that could have
+  // changes — a backlog chat with no worktree returns null from the endpoint
+  // anyway, but skipping shipped/deleted keeps the request small.
+  const summaryIds = useMemo(
+    () => chats.filter((c) => !c.shippedAt && c.worktreePath).map((c) => c.id),
+    [chats]
+  )
+  const summaries = useDiffSummaries(summaryIds, expanded && !ghost)
 
   // Ghost stub — lives in the source accordion while the real section is
   // promoted to a side panel. Click to pull it back.
@@ -197,9 +207,24 @@ export const ChatsSection = observer(function ChatsSection({
           <ScrollArea className="flex-1 min-h-0">
             <div className="p-2 flex flex-col gap-0.5">
               {chats.length === 0 ? (
-                <div className="px-2 py-2 text-xs text-muted-foreground">
-                  {query ? "No matches." : "No chats."}
-                </div>
+                query ? (
+                  <div className="px-2 py-2 text-xs text-muted-foreground">No matches.</div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleNewChat()}
+                    disabled={!activeProject}
+                    className="rounded-md border border-dashed bg-card/30 p-3 text-left hover:bg-sidebar-accent/50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs font-medium">
+                      <Plus className="size-3.5" />
+                      Add a chat
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground leading-snug">
+                      Turn-by-turn pair-programming in the project cwd. Edits land on the repo; commit straight from the chat.
+                    </p>
+                  </button>
+                )
               ) : (
                 chats.map((c) => (
                   <ConversationRow
@@ -214,6 +239,7 @@ export const ChatsSection = observer(function ChatsSection({
                     active={c.id === activeId}
                     running={runningIds.has(c.id)}
                     unread={unreadIds.has(c.id)}
+                    summary={summaries[c.id]}
                     onClick={() => {
                       workspace.setActive(c.id)
                       onConversationOpen?.(c.id)

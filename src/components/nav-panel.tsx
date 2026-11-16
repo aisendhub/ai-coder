@@ -301,11 +301,7 @@ export const NavPanel = observer(function NavPanel({
           </>
         )}
       </div>
-      {filtered.length === 0 && !loading ? (
-        <div className="flex-1 min-h-0 px-2 py-3 text-xs text-muted-foreground">
-          {query ? "No matches." : "No conversations yet."}
-        </div>
-      ) : (() => {
+      {(() => {
         const toggleTasks = () => setTasksOpen((v) => !v)
         const toggleChats = () => setChatsOpen((v) => !v)
 
@@ -375,7 +371,24 @@ export const NavPanel = observer(function NavPanel({
           <ScrollArea className="flex-1 min-h-0">
             <div className="p-2 flex flex-col gap-0.5">
               {tasks.length === 0 ? (
-                <div className="px-2 py-2 text-xs text-muted-foreground">No tasks.</div>
+                query ? (
+                  <div className="px-2 py-2 text-xs text-muted-foreground">No matches.</div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleNewTask()}
+                    disabled={!activeProject}
+                    className="rounded-md border border-dashed bg-card/30 p-3 text-left hover:bg-sidebar-accent/50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs font-medium">
+                      <Plus className="size-3.5" />
+                      Add a task
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground leading-snug">
+                      Autonomous work on its own branch. Write a goal, walk away — the loop ships or stops at the cap.
+                    </p>
+                  </button>
+                )
               ) : (
                 tasks.map((c) => (
                   <ConversationRow

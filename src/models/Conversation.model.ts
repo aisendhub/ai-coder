@@ -55,6 +55,12 @@ export class Conversation extends BaseModel {
 
   private abortController: AbortController | null = null
   private realtimeChannel: ReturnType<typeof supabase.channel> | null = null
+  /** Polls DB + /api/runners after a reload while the server-side turn is
+   *  still running. The browser SSE connection is gone; this revives the
+   *  in-flight state without starting a second runner. */
+  private resumeTimer: number | null = null
+  private resumeBusy = false
+  private resumeGeneration = 0
 
   @computed get isFirstMessage(): boolean {
     return this.messages.items.length === 0
@@ -145,6 +151,96 @@ export class Conversation extends BaseModel {
     })
   }
 
+  /** Refresh conversation metadata that can change while a turn runs (session
+   *  id is written when the runtime session starts; title after the first
+   *  prompt). Used by the resume path after a reload. */
+  private async refreshMeta(): Promise<void> {
+    const { data } = await supabase
+      .from("conversations")
+      .select("title, session_id, updated_at")
+      .eq("id", this.id)
+      .single()
+    if (!data) return
+    runInAction(() => {
+      if (data.title) this.title = data.title
+      if (data.session_id) this.sessionId = data.session_id
+      if (data.updated_at) this.updatedAt = data.updated_at
+    })
+  }
+
+  /** After a page reload, the server may still be running this conversation's
+   *  turn. `/api/chat` is detached from the browser SSE connection, so the
+   *  turn survives; this reattaches the UI by polling the persisted transcript
+   *  and `/api/runners` until the runner finishes. It never starts a second
+   *  turn. Safe to call repeatedly. */
+  async attachIfRunning(): Promise<void> {
+    if (this.streaming || this.resumeTimer !== null) return
+    const generation = ++this.resumeGeneration
+    let running: string[]
+    try {
+      const res = await api("/api/runners")
+      if (!res.ok) return
+      running = ((await res.json()) as { runners?: string[] }).runners ?? []
+    } catch {
+      return
+    }
+    if (generation !== this.resumeGeneration) return
+    if (!running.includes(this.id)) return
+
+    await this.refreshMeta().catch(() => {})
+    runInAction(() => {
+      this.streaming = true
+    })
+
+    const tick = async () => {
+      if (this.resumeBusy) return
+      this.resumeBusy = true
+      try {
+        await this.loadMessages()
+        const res = await api("/api/runners")
+        if (!res.ok) return
+        const next = ((await res.json()) as { runners?: string[] }).runners ?? []
+        if (generation === this.resumeGeneration && !next.includes(this.id)) {
+          this.stopResume()
+        }
+      } catch {
+        // transient; the next tick retries
+      } finally {
+        this.resumeBusy = false
+      }
+    }
+
+    void tick()
+    this.resumeTimer = window.setInterval(tick, 1000)
+  }
+
+  /** Stop following a server-side runner. `reload` refreshes the final
+   *  transcript once (use false when switching away from the conversation). */
+  private stopResume(reload = true): void {
+    this.resumeGeneration += 1
+    if (this.resumeTimer !== null) {
+      window.clearInterval(this.resumeTimer)
+      this.resumeTimer = null
+    }
+    runInAction(() => {
+      this.streaming = false
+    })
+    if (!reload) return
+    void this.refreshMeta()
+      .catch(() => {})
+      .then(() => this.loadMessages())
+      .then(() => {
+        const text = this.lastAssistant?.text ?? ""
+        if (text) {
+          window.dispatchEvent(
+            new CustomEvent("ai-coder:turn-done", {
+              detail: { id: this.id, text },
+            })
+          )
+        }
+      })
+  }
+
   /** Subscribe to realtime INSERT/UPDATE on this conversation's messages.
    *  Idempotent: re-subscribing replaces the previous channel. */
   subscribe() {
@@ -175,6 +271,10 @@ export class Conversation extends BaseModel {
   }
 
   unsubscribe() {
+    // Only stop the resume poll. A locally-streaming turn keeps its own
+    // AbortController/SSE reader and must not be marked idle just because the
+    // user switched conversations.
+    if (this.resumeTimer !== null) this.stopResume(false)
     if (this.realtimeChannel) {
       void supabase.removeChannel(this.realtimeChannel)
       this.realtimeChannel = null
@@ -329,6 +429,7 @@ export class Conversation extends BaseModel {
     }).catch((err) => console.error("cancel: stop request failed", err))
     this.abortController?.abort()
     this.abortController = null
+    this.stopResume(false)
     this.queue = []
     this.streaming = false
   }
@@ -524,7 +625,7 @@ export class Conversation extends BaseModel {
         })
         window.dispatchEvent(
           new CustomEvent("ai-coder:turn-done", {
-            detail: { id: this.id, text: assistantText },
+            detail: { id: this.id, text: this.lastAssistant?.text ?? "" },
           })
         )
         // Play a short chime so the user knows the AI finished

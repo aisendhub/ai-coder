@@ -18,6 +18,10 @@ export type WorkerPromptContext = {
   branch: string | null
   baseRef: string | null
   worktreePath: string | null
+  /** Conversation id for the active run. Surfaced to the agent so it can
+   *  attach the Ai-Coder-Conversation trailer when committing. See
+   *  docs/WORK-STATE.md. */
+  conversationId: string | null
 }
 
 /** Builds the host-side append text from the conversation/worktree context.
@@ -30,6 +34,10 @@ export function buildSystemPromptAppend(input: WorkerPromptContext): string {
     return [
       `You are working in: ${input.cwd}`,
       `Use relative paths (e.g. "./src/foo.ts") or absolute paths inside the cwd. Never invent placeholder absolute paths like "/Users/user/...".`,
+      "",
+      ...noAutoCommitSection(),
+      "",
+      ...workSummaryAndTrailerSection(input.conversationId),
     ].join("\n")
   }
   const lines = [
@@ -44,10 +52,46 @@ export function buildSystemPromptAppend(input: WorkerPromptContext): string {
     `- NEVER invent placeholder absolute paths like "/Users/user/" or "/home/user/" — they will fail with permission errors. If unsure, run "pwd" first.`,
     "",
     "Rules for git:",
-    "- You're on a dedicated branch. Commit freely; the orchestrator will merge or open a PR when the user ships the task.",
     "- Do not switch branches or run `git worktree` commands — this worktree is managed by the host.",
+    "",
+    ...noAutoCommitSection(),
+    "",
+    ...workSummaryAndTrailerSection(input.conversationId),
   ]
   return lines.join("\n")
+}
+
+/** Hard rule: the user reviews each turn's diff before deciding to commit.
+ *  Applies to both chat (real cwd) and task worktrees — even though the
+ *  worktree is on a dedicated branch, the user still wants per-turn visibility
+ *  into what changed before any commit lands. */
+function noAutoCommitSection(): string[] {
+  return [
+    "Commits:",
+    "- Do NOT run `git commit`, `git add` followed by `git commit`, or `git push` unless the user explicitly asks for a commit in the current message. Finishing a task is NOT permission to commit.",
+    "- Leave changes unstaged at end of turn so the user can review the diff and decide when to commit.",
+    "- Authorizing phrases (examples): \"commit this\", \"commit and push\", \"make a commit\", \"ship it\". NOT authorizing: \"finish the task\", \"wrap it up\", \"done\", \"go ahead\". Each new commit needs fresh authorization in the current message — prior approvals do not carry forward.",
+  ]
+}
+
+/** Two related instructions: emit a one-line work summary at end-of-turn,
+ *  and stamp the conversation-id trailer on commits. Both feed the chat ↔
+ *  commit attribution surfaces in docs/WORK-STATE.md. */
+function workSummaryAndTrailerSection(conversationId: string | null): string[] {
+  const lines: string[] = [
+    "End-of-turn work summary:",
+    "- If you edited, created, or deleted any files this turn, end your reply with a single line wrapped in <work-summary>...</work-summary> describing what you did in <= 12 words. Example: <work-summary>Wired the kanban filter into the sidebar.</work-summary>.",
+    "- One summary per turn. Place it on its own line at the very end. Skip the tag entirely on turns that didn't touch files.",
+  ]
+  if (conversationId) {
+    lines.push(
+      "",
+      "Commit message trailers:",
+      `- When you create a commit, append this trailer to the message body so the commit can be linked back to this chat: \`Ai-Coder-Conversation: ${conversationId}\`.`,
+      "- Place it in the trailer block (last paragraph, alongside any Co-Authored-By line). Skip the trailer when amending an existing commit that already has it.",
+    )
+  }
+  return lines
 }
 
 // ─── Project addendum loader ─────────────────────────────────────────────────

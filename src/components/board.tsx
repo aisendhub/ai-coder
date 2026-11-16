@@ -22,7 +22,15 @@ import { api } from "@/lib/api"
 import { workspace } from "@/models"
 
 type ConfirmFn = ReturnType<typeof useConfirm>
-type DiffSummary = { filesChanged: number; additions: number; deletions: number }
+type DiffSummary = {
+  filesChanged: number
+  additions: number
+  deletions: number
+  // Newer fields — see docs/WORK-STATE.md. Optional so older server responses
+  // and existing render paths keep working.
+  pending?: boolean
+  commitCount?: number
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`

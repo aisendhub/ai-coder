@@ -1,4 +1,5 @@
 import { claudeCodeProvider } from "./claude-code-provider.ts"
+import { opencodeProvider } from "./opencode/index.ts"
 import type { LlmProvider } from "./provider.ts"
 
 export type {
@@ -11,18 +12,18 @@ export type {
 
 const PROVIDERS: Record<string, LlmProvider> = {
   [claudeCodeProvider.id]: claudeCodeProvider,
+  [opencodeProvider.id]: opencodeProvider,
 }
 
 const DEFAULT_PROVIDER_ID = claudeCodeProvider.id
 
-// Single source of truth for which provider drives the agent. Today the
-// only implementation is `claude-code-sdk`. Set `LLM_PROVIDER` in `.env`
-// to switch when another lands. Unknown ids throw on first call so a
-// typo in env doesn't silently fall back.
+// Single source of truth for which provider drives the agent. The default is
+// `claude-code-sdk`; `opencode` is registered but opt-in via LLM_PROVIDER.
+// Unknown ids throw on first call so a typo in env doesn't silently fall back.
 //
-// Callers should NEVER import `query` from `@anthropic-ai/claude-agent-sdk`
-// directly — go through `getLlmProvider().runAgent(...)`. See
-// docs/LLM-PROVIDER.md.
+// Callers should NEVER import `query` from `@anthropic-ai/claude-agent-sdk` or
+// `OpenCode` from `@opencode/sdk` directly — go through
+// `getLlmProvider().runAgent(...)`. See docs/LLM-PROVIDER.md.
 export function getLlmProvider(): LlmProvider {
   const id = process.env.LLM_PROVIDER?.trim() || DEFAULT_PROVIDER_ID
   const provider = PROVIDERS[id]

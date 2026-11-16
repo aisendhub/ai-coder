@@ -30,8 +30,19 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: `http://localhost:${process.env.BACKEND_PORT ?? "3001"}`,
-        changeOrigin: true,
+        // Keep the browser origin so AnyOAuth's origin check sees
+        // http://localhost:5173 on /api/auth/session.
+        changeOrigin: false,
         ws: true,
+      },
+      "/auth": {
+        target: `http://localhost:${process.env.BACKEND_PORT ?? "3001"}`,
+        changeOrigin: false,
+      },
+      "/rest/v1": {
+        target: process.env.POSTGREST_URL ?? "http://127.0.0.1:5434",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/rest\/v1/, ""),
       },
     },
   },

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ChangesTrigger, TerminalTrigger, FileTreeTrigger } from "@/components/right-panel"
 import { ServicesTrigger } from "@/components/services-panel"
+import { AccessRequestsTrigger } from "@/components/access-requests-panel"
 import { GlobalServicesTrigger } from "@/components/global-services-drawer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { showOsNotification } from "@/hooks/use-turn-notifications"
@@ -22,6 +23,10 @@ type Props = {
   onServicesOpenChange: (open: boolean) => void
   fileTreeOpen: boolean
   onFileTreeOpenChange: (open: boolean) => void
+  accessRequestsOpen?: boolean
+  onAccessRequestsOpenChange?: (open: boolean) => void
+  isAdmin?: boolean
+  pendingAccessRequests?: number
 }
 
 export const TopBar = observer(function TopBar({
@@ -33,6 +38,10 @@ export const TopBar = observer(function TopBar({
   onServicesOpenChange,
   fileTreeOpen,
   onFileTreeOpenChange,
+  accessRequestsOpen,
+  onAccessRequestsOpenChange,
+  isAdmin,
+  pendingAccessRequests,
 }: Props) {
   const active = workspace.active
   const title = active?.title ?? "New chat"
@@ -70,7 +79,7 @@ export const TopBar = observer(function TopBar({
         <div className="flex flex-col min-w-0">
           <div className="text-sm font-medium truncate">{title}</div>
           <div className="text-xs text-muted-foreground truncate font-mono" title={branch ?? undefined}>
-            {branch ?? "Claude Code · connected"}
+            {branch ?? "OpenCode · connected"}
           </div>
         </div>
       </div>
@@ -95,6 +104,13 @@ export const TopBar = observer(function TopBar({
               Create a task pre-filled with this chat's prompts
             </TooltipContent>
           </Tooltip>
+        )}
+        {isAdmin && onAccessRequestsOpenChange && (
+          <AccessRequestsTrigger
+            open={!!accessRequestsOpen}
+            onOpenChange={onAccessRequestsOpenChange}
+            pendingCount={pendingAccessRequests ?? 0}
+          />
         )}
         <NotificationsTrigger />
         <GlobalServicesTrigger />

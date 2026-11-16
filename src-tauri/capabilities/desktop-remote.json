@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-remote",
+  "description": "Allow the local ai-coder web UI to open the system browser for OAuth.",
+  "remote": {
+    "urls": [
+      "http://localhost:5173/*",
+      "http://localhost:3001/*",
+      "http://127.0.0.1:5173/*",
+      "http://127.0.0.1:3001/*"
+    ]
+  },
+  "local": false,
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

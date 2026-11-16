@@ -1,0 +1,53 @@
+{
+  "name": "@anyoauth/node",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "AnyOAuth node SDK",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./auth": {
+      "types": "./auth.d.ts",
+      "import": "./auth.js"
+    },
+    "./express": {
+      "types": "./express.d.ts",
+      "import": "./express.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "schema.json",
+    "README.md",
+    "LICENSE",
+    "sdk.json",
+    "auth.js",
+    "express.js",
+    "auth.d.ts",
+    "express.d.ts",
+    "examples/web",
+    "FRONTENDS.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node test/managed.mjs && node test/check.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AnyOAuth/anyoauth-node.git"
+  },
+  "homepage": "https://github.com/AnyOAuth/anyoauth-node",
+  "bugs": {
+    "url": "https://github.com/AnyOAuth/anyoauth-node/issues"
+  }
+}

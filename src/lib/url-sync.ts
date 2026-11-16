@@ -39,6 +39,24 @@ export function useUrlSync() {
     } else if (!initial && workspace.activeId) {
       // No id in URL but we have an active — reflect it
       window.history.replaceState(null, "", idToPath(workspace.activeId))
+    } else if (!initial && !workspace.activeId) {
+      // Refresh landed on "/" without a conversation id. Restore the last
+      // active chat, if it still exists, once conversations have loaded.
+      let saved: string | null = null
+      try {
+        saved = localStorage.getItem("ai-coder:activeConversationId")
+      } catch {
+        saved = null
+      }
+      if (saved) {
+        const stop = autorun(() => {
+          if (workspace.conversations.find(saved!)) {
+            workspace.setActive(saved!)
+            stop()
+          }
+        })
+        setTimeout(stop, 5_000)
+      }
     }
 
     // Sync activeId → URL

@@ -3,7 +3,9 @@ import "dotenv/config"
 // Dev: use Claude Code subscription OAuth (via `claude /login`) — no API billing.
 // Prod: let ANTHROPIC_API_KEY through so the CLI authenticates with paid API credits.
 // The CLI prefers the env var when set, so unsetting it in dev forces OAuth.
-if (process.env.NODE_ENV !== "production") {
+// Exception: when ANTHROPIC_BASE_URL points at an Anthropic-compatible endpoint
+// (DeepSeek, etc.), keep the key — there is no subscription OAuth over there.
+if (process.env.NODE_ENV !== "production" && !process.env.ANTHROPIC_BASE_URL) {
   delete process.env.ANTHROPIC_API_KEY
 }
 
@@ -11,14 +13,32 @@ import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import { serve } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
+import { createAuth } from "@anyoauth/node/auth"
+import type { Profile } from "@anyoauth/node"
+import { deleteCookie, getCookie, setCookie } from "hono/cookie"
+import {
+  anonToken,
+  ensureAnyOAuthUser,
+  serviceToken,
+  signDesktopSession,
+  signUserToken,
+  verifyDesktopSession,
+  verifyUserToken,
+} from "./local-auth.ts"
 import { getLlmProvider, type AgentUserMessage as SDKUserMessage } from "./llm/index.ts"
 import {
   buildSystemPromptAppend,
   composeSystemPromptAppend,
   loadProjectAddendum,
 } from "./llm/system-prompt.ts"
+import {
+  captureTurnAndCommits,
+  snapshotBeforeTurn,
+  type PreTurnSnapshot,
+} from "./work-state.ts"
+import { stripWorkSummary } from "./git-attribution.ts"
 import type { MessageParam } from "@anthropic-ai/sdk/resources"
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 import { dirname, resolve, basename } from "node:path"
 import { promises as fsp } from "node:fs"
@@ -117,12 +137,29 @@ const PROJECTS_ROOT = resolve(
 //     authed request by the middleware and placed on the Hono context as
 //     `sb`. Use it in route handlers for any user-visible data so ACL is
 //     enforced at the DB layer, not in hand-rolled checks.
-const SUPABASE_URL = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ?? process.env.VITE_SUPABASE_ANON_KEY
+const POSTGREST_URL = process.env.POSTGREST_URL ?? "http://127.0.0.1:5434"
+const SUPABASE_URL = process.env.SUPABASE_URL ?? POSTGREST_URL
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? serviceToken()
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? anonToken()
+
+// PostgREST serves at the root; Supabase clients always prepend /rest/v1.
+// Rewrite in the client fetcher so sbSystem/sbForUser talk to PostgREST
+// directly without an extra local hop.
+const restFetch: typeof fetch = (input, init) => {
+  const raw =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url
+  const url = raw.replace(/\/rest\/v1(?=\/|$|\?)/, "")
+  return fetch(url, init)
+}
+
 const sbSystem = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      global: { fetch: restFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     })
   : null
@@ -130,9 +167,142 @@ const sbSystem = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
 function sbForUser(accessToken: string) {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    global: {
+      fetch: restFetch,
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
     auth: { persistSession: false, autoRefreshToken: false },
   })
+}
+
+// AnyOAuth owns the login. The callback creates/updates the local
+// `auth.users` row; /api/auth/session mints the PostgREST JWT.
+const ANYOAUTH_ORIGIN =
+  process.env.ANYOAUTH_ORIGIN ?? "http://localhost:5173"
+const anyauth =
+  process.env.ANYOAUTH_CLIENT_ID && process.env.ANYOAUTH_CLIENT_SECRET
+    ? createAuth({
+        clientId: process.env.ANYOAUTH_CLIENT_ID,
+        clientSecret: process.env.ANYOAUTH_CLIENT_SECRET,
+        origin: ANYOAUTH_ORIGIN,
+        returnTo: "/auth/desktop/complete",
+        sessionMaxAge: 60 * 60 * 24,
+        onLogin: async (profile) => {
+          await ensureAnyOAuthUser(profile)
+        },
+      })
+    : null
+
+if (!anyauth) {
+  console.warn(
+    "[warn] ANYOAUTH_CLIENT_ID/SECRET not set; login endpoints disabled"
+  )
+}
+
+// ── Desktop auth handoff ────────────────────────────────────────────────────
+// The desktop shell opens the system browser for OAuth. The system browser
+// completes the AnyOAuth callback, then lands on /auth/desktop/complete with a
+// short-lived nonce cookie. That page marks the handoff complete; the webview
+// polls /api/auth/desktop/status and exchanges the one-time token for a
+// signed session cookie of its own.
+const DESKTOP_LOGIN_COOKIE = "ai_coder_desktop_login"
+const DESKTOP_SESSION_COOKIE = "ai_coder_desktop_session"
+const DESKTOP_HANDOFF_TTL_MS = 5 * 60 * 1000
+
+type DesktopHandoff = {
+  status: "pending" | "complete"
+  expiresAt: number
+  profile?: Profile
+  token?: string
+}
+
+const desktopHandoffs = new Map<string, DesktopHandoff>()
+
+function pruneDesktopHandoffs(): void {
+  const now = Date.now()
+  for (const [nonce, entry] of desktopHandoffs) {
+    if (entry.expiresAt <= now) desktopHandoffs.delete(nonce)
+  }
+}
+
+function desktopCookie(c: any, maxAge: number, value: string) {
+  setCookie(c, DESKTOP_LOGIN_COOKIE, value, {
+    httpOnly: true,
+    sameSite: "Lax",
+    path: "/",
+    secure: new URL(c.req.url).protocol === "https:",
+    maxAge,
+  })
+}
+
+function desktopSessionCookie(c: any, value: string, maxAge: number) {
+  setCookie(c, DESKTOP_SESSION_COOKIE, value, {
+    httpOnly: true,
+    sameSite: "Lax",
+    path: "/",
+    secure: new URL(c.req.url).protocol === "https:",
+    maxAge,
+  })
+}
+
+/** Open the system browser from the local server. This is the desktop shell's
+ *  primary path: it does not depend on Tauri IPC being allowed for the remote
+ *  web origin. */
+function openSystemBrowser(url: string): boolean {
+  try {
+    if (process.platform === "darwin") {
+      const child = spawn("open", [url], { detached: true, stdio: "ignore" })
+      child.unref()
+      return true
+    }
+    if (process.platform === "win32") {
+      const child = spawn("cmd", ["/c", "start", "", url], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      })
+      child.unref()
+      return true
+    }
+    const child = spawn("xdg-open", [url], { detached: true, stdio: "ignore" })
+    child.unref()
+    return true
+  } catch (err) {
+    console.warn("[desktop] could not open system browser", err)
+    return false
+  }
+}
+
+function desktopCompletePage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ai-coder desktop sign-in</title>
+<style>
+  body { margin:0; min-height:100svh; display:grid; place-items:center; background:#0b0f14; color:#e6edf3; font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { width:min(440px, 90vw); border:1px solid #22303d; border-radius:16px; background:#111820; padding:30px; }
+  .mark { width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(135deg,#1f6feb,#63b3ed);color:#06121f;font-weight:800;margin-bottom:16px; }
+  h1 { font-size:19px; margin:0 0 6px; }
+  p { color:#8b9bab; margin:0; }
+  code { color:#e6edf3; }
+</style>
+</head>
+<body><main>
+  <div class="mark">a</div>
+  <h1>Signed in</h1>
+  <p>You can close this tab and return to <code>ai-coder</code>. The desktop app will finish signing in automatically.</p>
+</main></body></html>`
+}
+
+function desktopExpiredPage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>ai-coder desktop sign-in</title>
+<style>body{margin:0;min-height:100svh;display:grid;place-items:center;background:#0b0f14;color:#e6edf3;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{width:min(440px,90vw);border:1px solid #22303d;border-radius:16px;background:#111820;padding:30px}h1{font-size:19px;margin:0 0 6px}p{color:#8b9bab;margin:0}</style>
+</head>
+<body><main><h1>Sign-in expired</h1><p>Return to ai-coder and start the sign-in again.</p></main></body></html>`
 }
 
 if (!sbSystem) console.warn("[warn] Supabase service-role not configured; persistence disabled")
@@ -274,9 +444,22 @@ function getWatcher(cwd: string): WatcherEntry {
       /(^|[/\\])dist([/\\]|$)/,
       /(^|[/\\])\.next([/\\]|$)/,
       /(^|[/\\])\.cache([/\\]|$)/,
+      // Chromium leaves Unix sockets in profile dirs; fs.watch cannot watch
+      // them and chokidar emits an unhandled 'error' that kills the server.
+      /(^|[/\\])(SingletonSocket|SingletonCookie|SingletonLock)$/,
     ],
+    followSymlinks: false,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+  })
+  // Never let a filesystem watcher error take down the API process. This was
+  // observed on a Chromium SingletonSocket inside a project tree.
+  watcher.on("error", (err) => {
+    console.warn(
+      "[watcher] error",
+      cwd,
+      err instanceof Error ? err.message : String(err)
+    )
   })
   let debounce: NodeJS.Timeout | null = null
   const notify = (path: string) => {
@@ -384,13 +567,19 @@ async function startRunner(args: {
     // Pull worktree metadata once so the worker's system-prompt append can
     // tell the agent where it's working. Keeps Claude from guessing
     // placeholder paths like /Users/user/ for underspecified filenames.
-    let convMeta: { kind: string | null; branch: string | null; base_ref: string | null; worktree_path: string | null } = {
-      kind: null, branch: null, base_ref: null, worktree_path: null,
+    let convMeta: {
+      kind: string | null
+      branch: string | null
+      base_ref: string | null
+      worktree_path: string | null
+      project_id: string | null
+    } = {
+      kind: null, branch: null, base_ref: null, worktree_path: null, project_id: null,
     }
     if (sbSystem) {
       const { data } = await sbSystem
         .from("conversations")
-        .select("kind, branch, base_ref, worktree_path")
+        .select("kind, branch, base_ref, worktree_path, project_id")
         .eq("id", conversationId)
         .single()
       if (data) convMeta = data as typeof convMeta
@@ -401,6 +590,7 @@ async function startRunner(args: {
       branch: convMeta.branch,
       baseRef: convMeta.base_ref,
       worktreePath: convMeta.worktree_path,
+      conversationId,
     })
     // Layer per-project instructions from `<cwd>/.ai-coder/instructions.md`
     // after the host append so they can refine (or override) generic rules.
@@ -450,6 +640,11 @@ async function startRunner(args: {
         let lastFlushAt = 0
         let workerCostUsd = 0
         let workerSessionId: string | null = currentResume ?? null
+        // Snapshot of HEAD + dirty paths just before the worker starts, so the
+        // post-iteration capture can derive *what this turn changed* rather
+        // than a noisy union of pre-existing pending edits + new changes.
+        // See docs/WORK-STATE.md and server/work-state.ts.
+        let preTurnSnapshot: PreTurnSnapshot | null = null
         // Set by the canUseTool callback (or end-of-turn safety net) when a
         // user nudge has been flushed. Triggers immediate re-entry below.
         let nudgeInterruptText: string | null = null
@@ -538,6 +733,14 @@ async function startRunner(args: {
             pendingFlush = false
           }
         }
+
+        // Snapshot HEAD + dirty paths BEFORE the worker runs so the post-
+        // iteration capture can attribute only this turn's changes (not
+        // already-pending edits or commits from prior iterations).
+        preTurnSnapshot = await snapshotBeforeTurn(cwd).catch((err) => {
+          console.warn("[work-state] snapshotBeforeTurn failed", err)
+          return null
+        })
 
         try {
           // Build the prompt — either a plain string or an AsyncIterable with
@@ -707,6 +910,35 @@ async function startRunner(args: {
           erroredThisTurn = true
         } finally {
           await flushPersist(true)
+          // Capture per-turn change set + record any new commits with chat
+          // attribution. Best-effort; never throws. See docs/WORK-STATE.md.
+          if (sbSystem && assistantDbId && preTurnSnapshot && convMeta.project_id) {
+            await captureTurnAndCommits({
+              sb: sbSystem,
+              cwd,
+              conversationId,
+              projectId: convMeta.project_id,
+              messageId: assistantDbId,
+              pre: preTurnSnapshot,
+              branch: convMeta.branch,
+              assistantText,
+            })
+            // <work-summary> is metadata, not user-facing prose. Capture
+            // already extracted it; now scrub the tag from the row the chat
+            // renders. Idempotent: stripWorkSummary is a no-op when absent.
+            const cleaned = stripWorkSummary(assistantText)
+            if (cleaned !== assistantText) {
+              try {
+                await sbSystem
+                  .from("messages")
+                  .update({ text: cleaned })
+                  .eq("id", assistantDbId)
+                assistantText = cleaned
+              } catch (err) {
+                console.warn("[work-state] strip work-summary failed", err)
+              }
+            }
+          }
         }
 
         // ── Nudge interrupt: highest priority re-entry ─────────────────────
@@ -1007,28 +1239,222 @@ async function reconcileMergeIfCompleted(conversationId: string): Promise<void> 
 // ─────────────────────────────────────────────────────────────────────────────
 
 type UserSb = NonNullable<ReturnType<typeof sbForUser>>
-type AuthEnv = { Variables: { userId: string; sb: UserSb } }
+type AuthEnv = { Variables: { userId: string; sb: UserSb; isAdmin: boolean } }
 
 const app = new Hono<AuthEnv>()
+
+// ── Desktop login (system browser) ─────────────────────────────────────────
+// The desktop shell opens this URL in the default browser. It sets a short
+// nonce cookie, then hands off to the normal AnyOAuth login route.
+app.get("/auth/desktop/login/:provider", (c) => {
+  const provider = c.req.param("provider")
+  if (provider !== "google" && provider !== "github") {
+    return c.json({ error: "unsupported provider" }, 400)
+  }
+  const nonce = c.req.query("nonce") ?? ""
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(nonce)) {
+    return c.json({ error: "invalid nonce" }, 400)
+  }
+  pruneDesktopHandoffs()
+  if (!desktopHandoffs.has(nonce)) {
+    desktopHandoffs.set(nonce, {
+      status: "pending",
+      expiresAt: Date.now() + DESKTOP_HANDOFF_TTL_MS,
+    })
+  }
+  desktopCookie(c, Math.floor(DESKTOP_HANDOFF_TTL_MS / 1000), nonce)
+  return c.redirect(`/auth/login/${provider}`, 303)
+})
+
+// AnyOAuth redirects here after the callback (returnTo). In a normal browser
+// there is no desktop nonce, so we simply continue to the app. In the desktop
+// flow, mark the nonce complete and show a "return to the app" page.
+app.get("/auth/desktop/complete", async (c) => {
+  if (!anyauth) return c.redirect("/", 303)
+  const profile = await anyauth.getProfile(c.req.raw).catch(() => null)
+  const nonce = getCookie(c, DESKTOP_LOGIN_COOKIE)
+  if (nonce) deleteCookie(c, DESKTOP_LOGIN_COOKIE, { path: "/" })
+  if (!profile || !nonce) return c.redirect("/", 303)
+
+  pruneDesktopHandoffs()
+  const entry = desktopHandoffs.get(nonce)
+  if (!entry || entry.expiresAt <= Date.now()) {
+    return c.html(desktopExpiredPage(), 400)
+  }
+  entry.status = "complete"
+  entry.profile = profile
+  entry.token = crypto.randomUUID()
+  return c.html(desktopCompletePage())
+})
+
+// ── AnyOAuth login ──────────────────────────────────────────────────────────
+// The SDK owns /auth/login/:provider, /auth/callback, /auth/profile and
+// /auth/logout. Cookies are HttpOnly and SameSite=Lax.
+app.all("/auth/*", async (c) => {
+  if (!anyauth) return c.json({ error: "anyoauth_not_configured" }, 503)
+  return anyauth.handle(c.req.raw)
+})
+
+// Exchange the AnyOAuth session cookie for a short-lived PostgREST JWT. The
+// frontend calls this on load and whenever a data request returns 401.
+app.get("/api/auth/session", async (c) => {
+  // 1) Normal browser flow: AnyOAuth cookie.
+  const anyProfile = anyauth
+    ? await anyauth.getProfile(c.req.raw).catch(() => null)
+    : null
+  if (anyProfile) {
+    const user = await ensureAnyOAuthUser(anyProfile)
+    return c.json({
+      token: signUserToken(user),
+      expiresIn: 3600,
+      user: {
+        id: user.id,
+        email: user.email,
+        user_metadata: user.meta,
+      },
+      profile: anyProfile,
+    })
+  }
+
+  // 2) Desktop flow: signed session cookie minted by /api/auth/desktop/exchange.
+  const desktopToken = getCookie(c, DESKTOP_SESSION_COOKIE)
+  if (desktopToken) {
+    const session = await verifyDesktopSession(desktopToken)
+    if (session) {
+      return c.json({
+        token: signUserToken(session.user),
+        expiresIn: 3600,
+        user: {
+          id: session.user.id,
+          email: session.user.email,
+          user_metadata: session.user.meta,
+        },
+        profile: session.profile,
+      })
+    }
+  }
+
+  return c.json({ error: "unauthorized" }, 401)
+})
+
+// ── Desktop auth handoff endpoints ──────────────────────────────────────────
+app.post("/api/auth/desktop/start", async (c) => {
+  const body = await c.req
+    .json<{ provider?: "google" | "github" }>()
+    .catch(() => ({}))
+  const provider = body.provider === "github" ? "github" : "google"
+  pruneDesktopHandoffs()
+  const nonce = crypto.randomUUID().replace(/-/g, "")
+  desktopHandoffs.set(nonce, {
+    status: "pending",
+    expiresAt: Date.now() + DESKTOP_HANDOFF_TTL_MS,
+  })
+  const loginUrl = `/auth/desktop/login/${provider}?nonce=${nonce}`
+  const absolute = new URL(loginUrl, ANYOAUTH_ORIGIN).href
+  const opened = openSystemBrowser(absolute)
+  console.log("[desktop] login started", {
+    provider,
+    nonce: nonce.slice(0, 8),
+    opened,
+  })
+  return c.json({ nonce, loginUrl, opened })
+})
+
+app.get("/api/auth/desktop/status", (c) => {
+  const nonce = c.req.query("nonce") ?? ""
+  pruneDesktopHandoffs()
+  const entry = desktopHandoffs.get(nonce)
+  if (!entry) return c.json({ status: "expired" })
+  if (entry.status === "pending") return c.json({ status: "pending" })
+  return c.json({ status: "complete", token: entry.token })
+})
+
+app.post("/api/auth/desktop/exchange", async (c) => {
+  const body = await c.req
+    .json<{ token?: string }>()
+    .catch(() => ({}))
+  const token = body.token
+  if (!token) return c.json({ error: "token required" }, 400)
+
+  let found: { nonce: string; entry: DesktopHandoff } | null = null
+  for (const [nonce, entry] of desktopHandoffs) {
+    if (entry.status === "complete" && entry.token === token) {
+      found = { nonce, entry }
+      break
+    }
+  }
+  if (!found || !found.entry.profile) {
+    return c.json({ error: "invalid or expired token" }, 400)
+  }
+
+  const profile = found.entry.profile
+  const user = await ensureAnyOAuthUser(profile)
+  const desktopSession = signDesktopSession(user, profile)
+  desktopSessionCookie(c, desktopSession, 60 * 60 * 24 * 30)
+  desktopHandoffs.delete(found.nonce)
+  return c.json({
+    token: signUserToken(user),
+    expiresIn: 3600,
+    user: {
+      id: user.id,
+      email: user.email,
+      user_metadata: user.meta,
+    },
+    profile,
+  })
+})
+
+app.post("/api/auth/desktop/logout", (c) => {
+  deleteCookie(c, DESKTOP_SESSION_COOKIE, { path: "/" })
+  return c.body(null, 204)
+})
+
+// ── PostgREST proxy ─────────────────────────────────────────────────────────
+// Supabase JS always prepends /rest/v1. PostgREST serves at the root, so the
+// app origin exposes /rest/v1/* and forwards it. In dev Vite proxies this
+// directly; in production Hono handles it.
+app.all("/rest/v1/*", async (c) => {
+  const incoming = new URL(c.req.url)
+  const target = new URL(
+    incoming.pathname.replace(/^\/rest\/v1/, "") + incoming.search,
+    POSTGREST_URL
+  )
+  const headers = new Headers(c.req.raw.headers)
+  headers.delete("host")
+  headers.delete("content-length")
+  const init: RequestInit = { method: c.req.method, headers }
+  if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+    init.body = await c.req.arrayBuffer()
+  }
+  const res = await fetch(target, init)
+  const out = new Headers(res.headers)
+  out.delete("content-encoding")
+  out.delete("content-length")
+  return new Response(res.body, { status: res.status, headers: out })
+})
 
 app.get("/api/health", (c) =>
   c.json({
     ok: true,
+    provider: getLlmProvider().id,
     workspace: WORKSPACE_DIR,
     projectsRoot: PROJECTS_ROOT,
     runners: runners.size,
   })
 )
 
-// Require a valid Supabase JWT on every /api/* route except /api/health.
-// Token can arrive as Authorization: Bearer <jwt> (preferred) or as
-// ?access_token=<jwt> in the query string — the latter is the standard
-// workaround for EventSource, which can't set request headers.
-// JWT-in-URL leaks to access logs and browser history; Supabase access
-// tokens are ~1h TTL so blast radius is small, but anything more sensitive
-// should move to fetch-based SSE so it can use the header path.
+// Require a valid local PostgREST JWT on every /api/* route except health and
+// the AnyOAuth session exchange. Token can arrive as Authorization: Bearer
+// <jwt> (preferred) or as ?access_token=<jwt> in the query string — the latter
+// is the standard workaround for EventSource, which can't set request headers.
 app.use("/api/*", async (c, next) => {
-  if (c.req.path === "/api/health") return next()
+  if (
+    c.req.path === "/api/health" ||
+    c.req.path === "/api/auth/session" ||
+    c.req.path.startsWith("/api/auth/desktop/")
+  ) {
+    return next()
+  }
   if (!sbSystem) return c.json({ error: "persistence disabled" }, 503)
 
   const auth = c.req.header("Authorization") ?? ""
@@ -1036,8 +1462,35 @@ app.use("/api/*", async (c, next) => {
   const token = bearer || c.req.query("access_token") || ""
   if (!token) return c.json({ error: "unauthorized" }, 401)
 
-  const { data, error } = await sbSystem.auth.getUser(token)
-  if (error || !data.user) return c.json({ error: "unauthorized" }, 401)
+  let user: Awaited<ReturnType<typeof verifyUserToken>>
+  try {
+    user = await verifyUserToken(token)
+  } catch {
+    return c.json({ error: "unauthorized" }, 401)
+  }
+
+  // Admin gate: when ADMIN_EMAIL is set, restrict access to the admin and
+  // users with an approved access request.  Access-request endpoints are
+  // exempt so unapproved users can submit / poll their own request.
+  const adminEmail = process.env.ADMIN_EMAIL
+  const isAdmin = !adminEmail || user.email === adminEmail
+  const isAccessRequestPath =
+    c.req.path === "/api/access-requests" ||
+    c.req.path === "/api/access-requests/me" ||
+    c.req.path === "/api/health-authed"
+
+  if (!isAdmin && !isAccessRequestPath) {
+    // Check DB for an approved access request
+    const { data: ar } = await sbSystem!
+      .from("access_requests")
+      .select("status")
+      .eq("user_id", user.id)
+      .eq("status", "approved")
+      .maybeSingle()
+    if (!ar) return c.json({ error: "forbidden" }, 403)
+  }
+
+  c.set("isAdmin", isAdmin)
 
   // User-scoped client forwards this JWT on every query, so Postgres sees
   // auth.uid() = user.id and RLS filters rows automatically. This is the
@@ -1046,9 +1499,120 @@ app.use("/api/*", async (c, next) => {
   const userSb = sbForUser(token)
   if (!userSb) return c.json({ error: "persistence disabled" }, 503)
 
-  c.set("userId", data.user.id)
+  c.set("userId", user.id)
   c.set("sb", userSb)
   await next()
+})
+
+// Lightweight authed endpoint — returns admin flag + access status for the
+// current user so the client can show the right screen.
+app.get("/api/health-authed", async (c) => {
+  const isAdmin = c.get("isAdmin")
+  if (isAdmin) return c.json({ ok: true, isAdmin: true, access: "approved" })
+
+  // Non-admin: look up their access request status
+  const { data: ar } = await sbSystem!
+    .from("access_requests")
+    .select("status")
+    .eq("user_id", c.get("userId"))
+    .maybeSingle()
+
+  return c.json({
+    ok: !!(ar?.status === "approved"),
+    isAdmin: false,
+    access: ar?.status ?? "none",
+  })
+})
+
+// ── Access requests ────────────────────────────────────────────────────
+
+// Current user's own access request (or null).
+app.get("/api/access-requests/me", async (c) => {
+  const { data } = await sbSystem!
+    .from("access_requests")
+    .select("id, email, display_name, avatar_url, status, requested_at, resolved_at")
+    .eq("user_id", c.get("userId"))
+    .maybeSingle()
+  return c.json(data)
+})
+
+// Submit an access request (client-generated id per project convention).
+app.post("/api/access-requests", async (c) => {
+  const body = await c.req.json<{
+    id?: string
+    email: string
+    display_name?: string
+    avatar_url?: string
+  }>()
+  const id = body.id ?? crypto.randomUUID()
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: "invalid id" }, 400)
+
+  const { data, error } = await sbSystem!
+    .from("access_requests")
+    .upsert(
+      {
+        id,
+        user_id: c.get("userId"),
+        email: body.email,
+        display_name: body.display_name ?? null,
+        avatar_url: body.avatar_url ?? null,
+        status: "pending",
+        requested_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" }
+    )
+    .select()
+    .single()
+
+  if (error) {
+    // 23505 = unique_violation → idempotent retry
+    if (error.code === "23505") {
+      const { data: existing } = await sbSystem!
+        .from("access_requests")
+        .select()
+        .eq("user_id", c.get("userId"))
+        .single()
+      return c.json(existing)
+    }
+    return c.json({ error: error.message }, 500)
+  }
+  return c.json(data, 201)
+})
+
+// List all access requests (admin only).
+app.get("/api/access-requests", async (c) => {
+  if (!c.get("isAdmin")) return c.json({ error: "forbidden" }, 403)
+
+  const status = c.req.query("status") // optional filter
+  let q = sbSystem!
+    .from("access_requests")
+    .select("id, user_id, email, display_name, avatar_url, status, requested_at, resolved_at")
+    .order("requested_at", { ascending: false })
+  if (status) q = q.eq("status", status)
+
+  const { data, error } = await q
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json(data)
+})
+
+// Approve or deny an access request (admin only).
+app.patch("/api/access-requests/:id", async (c) => {
+  if (!c.get("isAdmin")) return c.json({ error: "forbidden" }, 403)
+
+  const { status } = await c.req.json<{ status: "approved" | "denied" }>()
+  if (status !== "approved" && status !== "denied") {
+    return c.json({ error: "status must be 'approved' or 'denied'" }, 400)
+  }
+
+  const { data, error } = await sbSystem!
+    .from("access_requests")
+    .update({ status, resolved_at: new Date().toISOString() })
+    .eq("id", c.req.param("id"))
+    .select()
+    .single()
+
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json(data)
 })
 
 // SSE for git changes — scoped to a conversation's project cwd.
@@ -1196,17 +1760,72 @@ app.post("/api/conversations/diff-summary", async (c) => {
     .in("id", ids)
   if (!convs) return c.json({ summaries: {} })
 
-  type Summary = { filesChanged: number; additions: number; deletions: number }
+  // Pull commit counts for the same id set in one query. RLS on commits
+  // funnels through projects.user_id so this only returns the caller's rows.
+  // See docs/WORK-STATE.md.
+  const { data: commitRows } = await sb
+    .from("commits")
+    .select("conversation_id")
+    .in("conversation_id", ids)
+  const commitCountByConv = new Map<string, number>()
+  for (const row of commitRows ?? []) {
+    if (!row.conversation_id) continue
+    commitCountByConv.set(row.conversation_id, (commitCountByConv.get(row.conversation_id) ?? 0) + 1)
+  }
+
+  type Summary = {
+    filesChanged: number
+    additions: number
+    deletions: number
+    pending: boolean
+    commitCount: number
+  }
   const summaries: Record<string, Summary | null> = {}
   await Promise.all(
     convs.map(async (conv) => {
       summaries[conv.id] = null
       if (conv.shipped_at || conv.deleted_at) return
       if (!conv.worktree_path || !conv.base_ref) return
-      summaries[conv.id] = await diffShortstat(conv.worktree_path, conv.base_ref)
+      const stats = await diffShortstat(conv.worktree_path, conv.base_ref)
+      const commitCount = commitCountByConv.get(conv.id) ?? 0
+      // Pending = uncommitted edits in the worktree OR commits ahead of base
+      // that haven't been merged/shipped. diffShortstat already covers both
+      // (it diffs base_ref..HEAD + dirty), so filesChanged > 0 captures it.
+      // Commit-count alone isn't sufficient: a shipped task with deleted
+      // worktree may still have rows in `commits` from before ship.
+      summaries[conv.id] = {
+        filesChanged: stats.filesChanged,
+        additions: stats.additions,
+        deletions: stats.deletions,
+        pending: stats.filesChanged > 0,
+        commitCount,
+      }
     })
   )
   return c.json({ summaries })
+})
+
+// Per-turn change records for a conversation. Powers the in-chat work
+// stripes — a thin row between message bubbles showing what each assistant
+// turn changed (files, +/-, one-line summary, committed/pending).
+// See docs/WORK-STATE.md.
+app.get("/api/conversations/:id/turns", async (c) => {
+  const sb = c.get("sb")
+  const conversationId = c.req.param("id")
+  if (!/^[0-9a-f-]{36}$/i.test(conversationId)) {
+    return c.json({ error: "invalid id" }, 400)
+  }
+  // RLS scopes to conversations the caller owns; an unauthorized id returns
+  // an empty array, not 403, so the chat panel can render gracefully.
+  const { data, error } = await sb
+    .from("turn_change_sets")
+    .select(
+      "message_id, conversation_id, files, files_count, truncated, insertions, deletions, summary, committed_in_sha, created_at"
+    )
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true })
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ turns: data ?? [] })
 })
 
 // Recent commits for the conversation's cwd. Uses ASCII unit/record separators
@@ -2080,6 +2699,8 @@ async function fileDiff(cwd: string, f: ChangedFile, baseRef: string | null = nu
 app.post("/api/projects", async (c) => {
   const sb = c.get("sb")
   const body = await c.req.json<{
+    /** Client-generated UUID. See docs/ARCHITECTURE-CLIENT-IDS.md. */
+    id?: string
     userId?: string
     name?: string
     cwd?: string
@@ -2089,6 +2710,8 @@ app.post("/api/projects", async (c) => {
   const userId = c.get("userId")
   if (!name) return c.json({ error: "name required" }, 400)
   if (!cwd) return c.json({ error: "cwd required" }, 400)
+  const id =
+    body.id && /^[0-9a-f-]{36}$/i.test(body.id) ? body.id : crypto.randomUUID()
 
   const absCwd = resolve(cwd)
   const git = await isGitRepo(absCwd)
@@ -2101,6 +2724,7 @@ app.post("/api/projects", async (c) => {
   const { data, error } = await sb
     .from("projects")
     .insert({
+      id,
       user_id: userId,
       name,
       cwd: absCwd,
@@ -2109,7 +2733,18 @@ app.post("/api/projects", async (c) => {
     })
     .select()
     .single()
-  if (error || !data) return c.json({ error: error?.message ?? "insert failed" }, 500)
+  if (error || !data) {
+    // Idempotent retry: return the row the client already created.
+    if ((error as { code?: string })?.code === "23505") {
+      const { data: existing } = await sb
+        .from("projects")
+        .select("*")
+        .eq("id", id)
+        .single()
+      if (existing) return c.json(existing)
+    }
+    return c.json({ error: error?.message ?? "insert failed" }, 500)
+  }
   return c.json(data)
 })
 
@@ -5222,7 +5857,7 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy()
     return
   }
-  // Gate WS upgrade on a valid Supabase JWT, delivered in ?access_token=
+  // Gate WS upgrade on a valid local JWT, delivered in ?access_token=
   // (WebSocket has no way to set Authorization on the handshake request).
   const token = url.searchParams.get("access_token") ?? ""
   if (!token || !sbSystem) {
@@ -5245,13 +5880,14 @@ server.on("upgrade", (req, socket, head) => {
       return
     }
 
-    const { data, error } = await sbClient.auth.getUser(token)
-    if (error || !data.user) {
+    let userId: string
+    try {
+      userId = (await verifyUserToken(token)).id
+    } catch {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n")
       socket.destroy()
       return
     }
-    const userId = data.user.id
 
     // Ownership check: the conversation must belong to the authed user.
     // Derives cwd from the conversation (worktree for tasks, project cwd

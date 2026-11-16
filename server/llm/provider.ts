@@ -52,6 +52,15 @@ export type AgentRunOptions = {
    *  is respected. Headless flows (evaluator, commit-msg, detect-services)
    *  stay isolated. */
   settingSources?: SettingSource[]
+  /** Model id for this run. Claude aliases work, as do provider-specific ids
+   *  when the endpoint is Anthropic-compatible (e.g. `deepseek-flash[1m]`).
+   *  Omit to use the provider/CLI default. */
+  model?: string
+  /** Per-run environment overrides for the agent subprocess. Merged over
+   *  `process.env`. Used to point the Claude CLI at an Anthropic-compatible
+   *  endpoint (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`) without changing
+   *  the process-wide config. Never log these values. */
+  env?: Record<string, string | undefined>
   abortController?: AbortController
   canUseTool?: CanUseTool
   includePartialMessages?: boolean

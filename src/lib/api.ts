@@ -1,22 +1,30 @@
-// Universal fetch wrapper for /api/* endpoints. Attaches the current Supabase
-// JWT as Authorization: Bearer <token>. Use everywhere in place of fetch().
+// Universal fetch wrapper for /api/* endpoints. Attaches the current local
+// PostgREST JWT as Authorization: Bearer <token>. Use everywhere in place of
+// fetch().
 //
 // For EventSource (which can't set headers), use sseUrl() to get a URL with
 // ?access_token= appended.
 
-import { supabase } from "@/lib/supabase"
+import { getToken, refreshToken } from "@/lib/auth-token"
 
-async function currentAccessToken(): Promise<string | null> {
-  const { data } = await supabase.auth.getSession()
-  return data.session?.access_token ?? null
-}
-
-export async function api(input: string, init?: RequestInit): Promise<Response> {
-  const token = await currentAccessToken()
+async function withToken(init?: RequestInit): Promise<RequestInit> {
+  let token = getToken()
+  if (!token) token = await refreshToken()
   const headers = new Headers(init?.headers)
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`)
   }
+  return { ...init, headers }
+}
+
+export async function api(input: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, await withToken(init))
+  if (res.status !== 401) return res
+  // Token may have expired. Refresh once and retry.
+  const token = await refreshToken()
+  if (!token) return res
+  const headers = new Headers(init?.headers)
+  headers.set("Authorization", `Bearer ${token}`)
   return fetch(input, { ...init, headers })
 }
 
@@ -24,7 +32,8 @@ export async function api(input: string, init?: RequestInit): Promise<Response> 
 // The server middleware accepts the token from query string as a fallback to
 // the Authorization header.
 export async function sseUrl(input: string): Promise<string> {
-  const token = await currentAccessToken()
+  let token = getToken()
+  if (!token) token = await refreshToken()
   if (!token) return input
   const u = new URL(input, window.location.origin)
   if (!u.searchParams.has("access_token")) {

@@ -29,6 +29,7 @@ export const claudeCodeProvider: LlmProvider = {
       options: {
         cwd: opts.cwd,
         resume: opts.resumeSessionId,
+        model: opts.model,
         systemPrompt: normalizeSystemPrompt(opts.systemPrompt),
         allowedTools: opts.allowedTools,
         disallowedTools: opts.disallowedTools,
@@ -37,6 +38,10 @@ export const claudeCodeProvider: LlmProvider = {
         includePartialMessages: opts.includePartialMessages ?? false,
         abortController: opts.abortController,
         canUseTool: opts.canUseTool,
+        // `env` replaces the subprocess environment rather than merging, so
+        // spread `process.env` first. Keeps per-run endpoint/key overrides
+        // isolated without mutating global env.
+        env: opts.env ? { ...process.env, ...opts.env } : undefined,
       },
     })
   },

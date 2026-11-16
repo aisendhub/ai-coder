@@ -21,6 +21,14 @@ const STATUS_STYLE: Record<TaskStatus, { label: string; tone: string }> = {
   shipped: { label: "shipped", tone: "text-emerald-600 dark:text-emerald-400" },
 }
 
+export type ConversationRowSummary = {
+  filesChanged: number
+  additions: number
+  deletions: number
+  pending: boolean
+  commitCount: number
+}
+
 export function ConversationRow({
   kind,
   title,
@@ -32,6 +40,7 @@ export function ConversationRow({
   active,
   running,
   unread,
+  summary,
   onClick,
   onDelete,
 }: {
@@ -45,6 +54,9 @@ export function ConversationRow({
   active: boolean
   running: boolean
   unread: boolean
+  /** Optional diff summary — when present, the row shows a pending dot +
+   *  +/- chip. See docs/WORK-STATE.md. */
+  summary?: ConversationRowSummary
   onClick: () => void
   onDelete: () => void
 }) {
@@ -72,7 +84,33 @@ export function ConversationRow({
         ) : null}
       </div>
       <div className="flex-1 min-w-0">
-        <div className={cn("truncate text-sm", unread && !active && "font-semibold")}>{title}</div>
+        <div className={cn("flex items-center gap-1.5 min-w-0", unread && !active && "font-semibold")}>
+          <span className="truncate text-sm">{title}</span>
+          {summary?.pending && !shipped && (
+            <span
+              className="size-1.5 rounded-full bg-amber-500 shrink-0"
+              title={`${summary.filesChanged} pending file${summary.filesChanged === 1 ? "" : "s"}`}
+              aria-label="pending changes"
+            />
+          )}
+          {summary && (summary.filesChanged > 0 || summary.commitCount > 0) && !shipped && (
+            <span
+              className="ml-auto font-mono text-[10px] text-muted-foreground inline-flex items-center gap-1 shrink-0"
+              title={
+                summary.commitCount > 0
+                  ? `${summary.filesChanged} pending · ${summary.commitCount} commit${summary.commitCount === 1 ? "" : "s"}`
+                  : `${summary.filesChanged} pending file${summary.filesChanged === 1 ? "" : "s"}`
+              }
+            >
+              {summary.additions > 0 && (
+                <span className="text-emerald-600 dark:text-emerald-400">+{summary.additions}</span>
+              )}
+              {summary.deletions > 0 && (
+                <span className="text-rose-600 dark:text-rose-400">−{summary.deletions}</span>
+              )}
+            </span>
+          )}
+        </div>
         <div className="text-xs text-muted-foreground flex items-center gap-1 min-w-0">
           {statusStyle && (
             <>

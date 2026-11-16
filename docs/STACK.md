@@ -2,6 +2,17 @@
 
 One-page reference for every moving part: what runs where, how to connect, how to migrate, how to deploy.
 
+> **Local stack (current):** Postgres on `:5433`, PostgREST on `:5434`, AnyOAuth for
+> login. `scripts/local-auth-compat.sql` recreates `auth.users` / `auth.uid()` so
+> the existing migrations and RLS policies still apply. The Supabase project and
+> Railway deployment referenced below no longer resolve; treat those sections as
+> legacy until a new deployment target is chosen.
+>
+> Setup: `npm run db:setup` once, then `npm run dev` (PostgREST + Hono + Vite).
+> Login: AnyOAuth callback `http://localhost:5173/auth/callback`; the backend
+> exchanges the session cookie for a short-lived PostgREST JWT at
+> `/api/auth/session`.
+
 ---
 
 ## 1. Architecture
