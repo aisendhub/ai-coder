@@ -904,7 +904,16 @@ async function startRunner(args: {
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          log("error", { message })
+          log("error", {
+            message,
+            stack: err instanceof Error ? err.stack : undefined,
+            cause:
+              err instanceof Error && err.cause
+                ? err.cause instanceof Error
+                  ? err.cause.stack ?? err.cause.message
+                  : String(err.cause)
+                : undefined,
+          })
           assistantText += assistantText ? `\n⚠️ ${message}` : `⚠️ ${message}`
           emit("error", { message })
           erroredThisTurn = true

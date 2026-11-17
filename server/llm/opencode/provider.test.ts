@@ -440,6 +440,79 @@ test("a stalled event stream is interrupted and rejected", async () => {
   }
 })
 
+test("a spawn failure before any output resets the host and retries once", async () => {
+  const { host } = makeHost(happyEvents)
+  let attempts = 0
+  const provider = createOpenCodeProvider({
+    createHost: async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error("spawn EBADF")
+      return host
+    },
+  })
+
+  const messages = await collect(provider, baseOpts())
+
+  assert.equal(attempts, 2)
+  const result = messages.at(-1) as any
+  assert.equal(result.type, "result")
+  assert.equal(result.subtype, "success")
+})
+
+test("a failure after streaming started is not retried", async () => {
+  const { host } = makeHost([
+    { type: "session.execution.started", data: { sessionID: "ses_fake_session" } },
+    {
+      type: "session.execution.failed",
+      data: {
+        sessionID: "ses_fake_session",
+        error: { name: "ExecutionFailed", message: "spawn EBADF" },
+      },
+    },
+  ])
+  let attempts = 0
+  const provider = createOpenCodeProvider({
+    createHost: async () => {
+      attempts += 1
+      return host
+    },
+  })
+
+  await assert.rejects(() => collect(provider, baseOpts()))
+  assert.equal(attempts, 1)
+})
+
+test("a second turn on the same host does not wait for server.connected", async () => {
+  // The runtime sends `server.connected` once per connection. A second
+  // subscription never sees it, so waiting for it used to hang the turn.
+  let subscriptions = 0
+  const base = makeHost(happyEvents).host
+  const host: OpenCodeHost = {
+    ...base,
+    events: {
+      subscribe(options) {
+        subscriptions += 1
+        const connected = subscriptions === 1
+        return {
+          async *[Symbol.asyncIterator]() {
+            if (connected) yield { type: "server.connected" }
+            for (const event of happyEvents) yield event
+          },
+        }
+      },
+    },
+  }
+  const provider = createOpenCodeProvider({ createHost: async () => host })
+
+  await collect(provider, baseOpts())
+  const messages = await collect(provider, baseOpts())
+
+  assert.equal(subscriptions, 2)
+  const result = messages.at(-1) as any
+  assert.equal(result.type, "result")
+  assert.equal(result.subtype, "success")
+})
+
 test("listModels maps the OpenCode catalog", async () => {
   const { host, calls } = makeHost([])
   const provider = createOpenCodeProvider({ createHost: async () => host })

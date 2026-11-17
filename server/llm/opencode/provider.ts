@@ -1,4 +1,6 @@
+import os from "node:os"
 import path from "node:path"
+import { promises as fsp } from "node:fs"
 import type {
   AgentMessage,
   AgentRunOptions,
@@ -217,6 +219,23 @@ async function defaultCreateHost(): Promise<OpenCodeHost> {
   // native deps) unless `LLM_PROVIDER=opencode` is actually selected.
   const { OpenCode } = await import("@opencode/sdk")
 
+  // Every OpenCode client on the machine shares
+  // `$XDG_STATE_HOME/opencode/service.json` and therefore the same service
+  // process by default. A service started by another app (the CLI/TUI, a
+  // previous long-running server) then answers our turns — and when it is
+  // wedged we see `spawn EBADF` or turns that never produce an event.
+  // Point this process at its own state dir so ai-coder always talks to a
+  // service it started, with its own config and database.
+  const stateHome =
+    process.env.AI_CODER_OPENCODE_STATE_HOME ??
+    path.join(os.homedir(), ".local", "state", "ai-coder")
+  try {
+    await fsp.mkdir(stateHome, { recursive: true })
+  } catch {
+    /* best effort; the runtime creates it too */
+  }
+  process.env.XDG_STATE_HOME = stateHome
+
   const dataDir = process.env.OPENCODE_DATA_DIR
   const configContent =
     process.env.OPENCODE_CONFIG_CONTENT ??
@@ -244,6 +263,11 @@ async function sessionInfo(host: OpenCodeHost, sessionID: string): Promise<any |
     return null
   }
 }
+
+// Hosts whose event connection has already delivered `server.connected`.
+// The marker is per connection, not per subscription, so it must not be
+// awaited again on later turns. See runOpenCode.
+const primedHosts = new WeakSet<object>()
 
 async function* runOpenCode(
   opts: OpenCodeRunOptions,
@@ -306,13 +330,34 @@ async function* runOpenCode(
     [Symbol.asyncIterator]()
 
   // Prime the shared event connection before prompting so the first events
-  // cannot race the subscription. `server.connected` is the ready marker; any
-  // real event that arrives first is buffered.
+  // cannot race the subscription. `server.connected` is the ready marker — but
+  // the runtime sends it once per connection, so a reused host never sends it
+  // again. Waiting for it on the second turn would block forever, so remember
+  // which hosts we have already primed and only wait on a new one.
   const buffered: OpenCodeEvent[] = []
-  const first = await iterator.next()
-  if (!first.done) {
-    const ev = first.value as OpenCodeEvent
-    if (ev.type !== "server.connected") buffered.push(ev)
+  const firstPromise = iterator.next()
+  let pendingFirst: Promise<IteratorResult<OpenCodeEvent>> | null = null
+  if (primedHosts.has(host as object)) {
+    pendingFirst = firstPromise
+  } else {
+    const OPENCODE_CONNECT_PRIME_MS = 4_000
+    const primed = await Promise.race([
+      firstPromise,
+      new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), OPENCODE_CONNECT_PRIME_MS)
+      ),
+    ])
+    if (primed === null) {
+      // Connection is slow or the marker was already consumed: keep reading
+      // in the loop instead of blocking the turn.
+      pendingFirst = firstPromise
+    } else {
+      primedHosts.add(host as object)
+      if (!primed.done) {
+        const ev = primed.value as OpenCodeEvent
+        if (ev.type !== "server.connected") buffered.push(ev)
+      }
+    }
   }
 
   const prompt = await normalizePrompt(opts.prompt)
@@ -370,7 +415,9 @@ async function* runOpenCode(
         const stalled = new Promise<"stalled">((resolve) => {
           stallTimer = setTimeout(() => resolve("stalled"), stallTimeoutMs())
         })
-        next = await Promise.race([iterator.next(), abortPromise, stalled])
+        const read = pendingFirst ?? iterator.next()
+        pendingFirst = null
+        next = await Promise.race([read, abortPromise, stalled])
         if (stallTimer) clearTimeout(stallTimer)
       }
 
@@ -458,7 +505,35 @@ async function* runOpenCode(
 
 export type OpenCodeProvider = LlmProvider & {
   close(): Promise<void>
+  /** Drop the cached host so the next run spawns a fresh runtime. Used when
+   *  the OpenCode service dies or refuses to spawn. */
+  resetHost(): void
   listModels(cwd?: string): Promise<AgentModel[]>
+}
+
+// Failures that mean "the runtime underneath us broke", not "this turn is
+// invalid". A fresh host is worth trying once; anything else surfaces as-is.
+const RECOVERABLE_HOST_ERROR =
+  /spawn (EBADF|EAGAIN|ENOENT)|EPIPE|ECONNRESET|ECONNREFUSED|socket hang up|OpenCode stopped responding/i
+
+async function* withHostRetry(
+  make: () => AsyncGenerator<AgentMessage, void, unknown>,
+  resetHost: () => void
+): AsyncGenerator<AgentMessage, void, unknown> {
+  let yielded = false
+  try {
+    for await (const message of make()) {
+      yielded = true
+      yield message
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    // Only retry when nothing was streamed yet, so the user never sees a
+    // half answer followed by a second one.
+    if (yielded || !RECOVERABLE_HOST_ERROR.test(message)) throw err
+    resetHost()
+    yield* make()
+  }
 }
 
 export function createOpenCodeProvider(deps: {
@@ -472,12 +547,23 @@ export function createOpenCodeProvider(deps: {
     return hostPromise
   }
 
+  const resetHost = () => {
+    const pending = hostPromise
+    hostPromise = null
+    if (!pending) return
+    void pending.then((host) => host.close?.()).catch(() => {})
+  }
+
   return {
     id: "opencode",
     label: "OpenCode",
     runAgent(opts: AgentRunOptions): AsyncIterable<AgentMessage> {
-      return runOpenCode(opts as OpenCodeRunOptions, getHost)
+      return withHostRetry(
+        () => runOpenCode(opts as OpenCodeRunOptions, getHost),
+        resetHost
+      )
     },
+    resetHost,
     async listModels(cwd?: string): Promise<AgentModel[]> {
       const host = await getHost()
       const result = await host.model.list(
