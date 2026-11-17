@@ -27,6 +27,10 @@ export default defineConfig({
   // VITE_PORT overrides the dev-server port for either flow.
   server: {
     port: process.env.VITE_PORT ? Number(process.env.VITE_PORT) : undefined,
+    // Bind IPv4 localhost explicitly. The default can land on ::1 only, which
+    // lets another project's dev server take 127.0.0.1:5173 at the same time,
+    // and then `localhost` resolves to whichever one the client picks.
+    host: process.env.VITE_HOST ?? "127.0.0.1",
     proxy: {
       "/api": {
         target: `http://localhost:${process.env.BACKEND_PORT ?? "3001"}`,
