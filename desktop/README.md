@@ -12,26 +12,20 @@ Tauri window (WKWebView / WebView2 / WebKitGTK)
 
 ## Run
 
-Start the local stack in one terminal:
+Open the app. On launch the shell runs `scripts/ensure-dev.sh`, which starts
+the API (`:3001`) and the web UI (Vite) if they are not already up, then the
+launcher connects.
 
 ```sh
-npm run dev          # Postgres :5433, PostgREST :5434, Hono :3001, Vite :5173
+npm run dev:ensure   # same routine, by hand
+npm run dev          # full interactive stack: Postgres :5433, PostgREST :5434, Hono :3001, Vite :5173
+npm run desktop:dev  # shell in dev mode
 ```
 
-Start the desktop shell in another:
-
-```sh
-npm run desktop:dev
-```
-
-Or start both:
-
-```sh
-npm run desktop:dev:stack
-```
-
-The launcher probes `:5173` first, then `:3001` (and `127.0.0.1` variants). It
-remembers the last working URL. You can also type a URL and press Connect.
+The launcher asks the API (`GET /api/desktop/url`) which URL the web UI ended
+up on — Vite may not get `:5173` if another project's dev server holds it — and
+records it in `~/.local/state/ai-coder/web-url`. It falls back to probing
+`:5173` then `:3001`, and remembers the last working URL.
 
 ## Build
 
@@ -43,9 +37,10 @@ npm run desktop:check        # cargo check only
 
 Artifacts land in `src-tauri/target/release/bundle/` (or `debug/bundle/`).
 
-The built app still expects the local server to be running. That is the
-tradeoff of the thin-shell design: no Node/Postgres packaging, but the app is
-not a one-click standalone install.
+The built app starts the API and web UI itself, but it still does not bundle
+Node, Postgres, or PostgREST: those must be installed locally (the repo's
+`npm run db:setup` covers Postgres/PostgREST). It is not a one-click standalone
+install.
 
 ## Login
 
@@ -73,8 +68,7 @@ If the handoff page is not reached, verify the app URL and the
 
 - No bundled Node runtime, `node-pty`, or OpenCode SQLite.
 - No bundled Postgres/PostgREST.
-- No server lifecycle management, auto-update, code signing, or notarization
-  yet.
+- No auto-update, code signing, or notarization yet.
 - No Tauri IPC in the web page (`withGlobalTauri` is off). The UI is a plain
   web app talking to its own local server.
 

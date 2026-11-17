@@ -8,6 +8,7 @@
     "dev:postgrest": "bash scripts/dev-postgrest.sh",
     "db:setup": "bash scripts/local-db-setup.sh",
     "dev:web": "vite",
+    "dev:ensure": "bash scripts/ensure-dev.sh",
     "dev:server": "tsx watch server/index.ts",
     "server:restart": "bash scripts/restart-server.sh",
     "start": "concurrently -n server,web -c magenta,cyan \"npm:start:server\" \"npm:start:web\"",

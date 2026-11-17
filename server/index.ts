@@ -1443,6 +1443,25 @@ app.get("/api/health", (c) =>
   })
 )
 
+// Where the desktop shell should load the UI from. The web dev server may not
+// get :5173 (another project's Vite can hold it), so the launcher script
+// records the URL it actually started. Unauthenticated and CORS-open: the
+// launcher page asks this before it has an origin the app trusts.
+app.get("/api/desktop/url", async (c) => {
+  c.header("Access-Control-Allow-Origin", "*")
+  c.header("Cache-Control", "no-store")
+  const stateFile = resolve(
+    process.env.AI_CODER_STATE_DIR ??
+      resolve(process.env.HOME ?? "/tmp", ".local/state/ai-coder"),
+    "web-url"
+  )
+  const url = await fsp
+    .readFile(stateFile, "utf8")
+    .then((text) => text.trim())
+    .catch(() => "")
+  return c.json({ url: url || null })
+})
+
 // Require a valid local PostgREST JWT on every /api/* route except health and
 // the AnyOAuth session exchange. Token can arrive as Authorization: Bearer
 // <jwt> (preferred) or as ?access_token=<jwt> in the query string — the latter
@@ -1450,6 +1469,7 @@ app.get("/api/health", (c) =>
 app.use("/api/*", async (c, next) => {
   if (
     c.req.path === "/api/health" ||
+    c.req.path === "/api/desktop/url" ||
     c.req.path === "/api/auth/session" ||
     c.req.path.startsWith("/api/auth/desktop/")
   ) {

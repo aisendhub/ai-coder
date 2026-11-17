@@ -124,9 +124,9 @@
       </div>
 
       <div class="hint">
-        Start the stack with <code>npm run dev</code> (Vite <code>:5173</code>) or
-        <code>npm run serve</code> (Hono <code>:3001</code>), then connect.
-        The chosen URL is remembered.
+        The shell starts the local stack on launch. You can also run
+        <code>npm run dev:ensure</code> by hand, or <code>npm run dev</code> for a
+        full interactive stack.
       </div>
     </main>
 
@@ -137,6 +137,7 @@
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3001",
       ]
+      const API_URL = "http://127.0.0.1:3001"
       const STORAGE_KEY = "ai-coder:desktopServerUrl"
       const statusEl = document.getElementById("status")
       const spinner = document.getElementById("spinner")
@@ -196,10 +197,38 @@
         window.location.replace(url + "/?desktop=1&v=" + Date.now())
       }
 
+      // The API tells us where the UI actually ended up. Vite may not get
+      // :5173 (another project's dev server can hold it), and this port can
+      // differ between launches.
+      async function apiWebUrl() {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 1500)
+        try {
+          const res = await fetch(API_URL + "/api/desktop/url", {
+            cache: "no-store",
+            signal: controller.signal,
+          })
+          if (!res.ok) return null
+          const body = await res.json()
+          return typeof body?.url === "string" && body.url ? body.url : null
+        } catch {
+          return null
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+
       let stopped = false
       async function autoDetect() {
         if (stopped) return
         spinner.classList.remove("hidden")
+
+        const reported = await apiWebUrl()
+        if (reported && (await reachable(reported))) {
+          connect(reported)
+          return
+        }
+
         for (const base of candidates()) {
           if (stopped) return
           setStatus("Looking for ai-coder at " + base + "…")
@@ -208,8 +237,8 @@
             return
           }
         }
-        spinner.classList.add("hidden")
-        setStatus("No local server found yet. Start it, then retry.", true)
+        spinner.classList.remove("hidden")
+        setStatus("Starting the local server…")
         setTimeout(autoDetect, 2500)
       }
 
