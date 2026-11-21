@@ -21,7 +21,7 @@ mkdir -p "$STATE_DIR" "$(dirname "$WEB_LOG")"
 
 # Same descriptor-limit problem for Vite's file watchers when this script runs
 # from the desktop app instead of a terminal.
-ulimit -n "${AI_CODER_NOFILE_LIMIT:-8192}" 2>/dev/null || true
+ulimit -n "${AI_CODER_NOFILE_LIMIT:-60000}" 2>/dev/null || true
 
 api_ok() {
   curl -fsS -m 2 "$API/api/health" >/dev/null 2>&1
