@@ -40,7 +40,7 @@ import { stripWorkSummary } from "./git-attribution.ts"
 import type { MessageParam } from "@anthropic-ai/sdk/resources"
 import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
-import { dirname, resolve, basename } from "node:path"
+import { dirname, resolve, basename, join } from "node:path"
 import { promises as fsp } from "node:fs"
 import chokidar from "chokidar"
 import { EventEmitter } from "node:events"
@@ -436,10 +436,79 @@ const watchers = new Map<string, WatcherEntry>()
 // and every later fs operation (including spawning the agent runtime) fails
 // with EMFILE/EBADF. Oldest watcher is evicted when the cap is reached.
 const MAX_WATCHERS = 8
+// Chokidar on macOS opens a file descriptor per watched directory and walks
+// the whole tree first. On a monorepo with vendored/test/cache trees that runs
+// into tens of thousands of fds, hits the process limit and wedges every later
+// fs operation (EMFILE, then EBADF for agent spawns). Skip projects that are
+// too big to watch; the changes panel falls back to its polling refresh.
+const WATCH_MAX_FILES = 4000
+const WATCH_SKIP_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  ".next",
+  ".nuxt",
+  ".cache",
+  ".turbo",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "vendor",
+  "target",
+  ".pnpm-store",
+  ".yarn",
+  ".svelte-kit",
+  ".output",
+  ".vercel",
+  ".expo",
+  "tmp",
+  "logs",
+])
 
-function getWatcher(cwd: string): WatcherEntry {
+async function shouldWatchProject(cwd: string): Promise<boolean> {
+  try {
+    // Fast path: a git repo can tell us its tracked file count directly.
+    const { stdout } = await execFileP("git", ["ls-files", "-z"], {
+      cwd,
+      maxBuffer: 8 * 1024 * 1024,
+    })
+    return stdout.split("\0").filter(Boolean).length <= WATCH_MAX_FILES
+  } catch {
+    // Not a git repo: count with a bounded walk that stops once it is clear
+    // the project is too big.
+    let count = 0
+    const stack = [cwd]
+    while (stack.length > 0 && count <= WATCH_MAX_FILES) {
+      const dir = stack.pop() as string
+      const entries = await fsp
+        .readdir(dir, { withFileTypes: true })
+        .catch(() => [])
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (!WATCH_SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
+            stack.push(join(dir, entry.name))
+          }
+        } else if (entry.isFile()) {
+          count += 1
+        }
+      }
+    }
+    return count <= WATCH_MAX_FILES
+  }
+}
+
+async function getWatcher(cwd: string): Promise<WatcherEntry | null> {
   const existing = watchers.get(cwd)
   if (existing) return existing
+  if (!(await shouldWatchProject(cwd))) {
+    console.warn(
+      `[watcher] not watching ${cwd}: more than ${WATCH_MAX_FILES} files`
+    )
+    return null
+  }
   if (watchers.size >= MAX_WATCHERS) {
     const oldest = watchers.entries().next()
     if (!oldest.done) {
@@ -450,13 +519,12 @@ function getWatcher(cwd: string): WatcherEntry {
   }
   const bus = new EventEmitter()
   bus.setMaxListeners(100)
+  const ignoredDirs = [...WATCH_SKIP_DIRS]
+    .map((name) => `(^|[/\\\\])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([/\\\\]|$)`)
+    .join("|")
   const watcher = chokidar.watch(cwd, {
     ignored: [
-      /(^|[/\\])\.git([/\\]|$)/,
-      /(^|[/\\])node_modules([/\\]|$)/,
-      /(^|[/\\])dist([/\\]|$)/,
-      /(^|[/\\])\.next([/\\]|$)/,
-      /(^|[/\\])\.cache([/\\]|$)/,
+      new RegExp(ignoredDirs),
       // Chromium leaves Unix sockets in profile dirs; fs.watch cannot watch
       // them and chokidar emits an unhandled 'error' that kills the server.
       /(^|[/\\])(SingletonSocket|SingletonCookie|SingletonLock)$/,
@@ -1667,7 +1735,23 @@ app.get("/api/changes/stream", (c) => {
       return
     }
     const cwd = await cwdForConversation(conversationId)
-    const { bus } = getWatcher(cwd)
+    const entry = await getWatcher(cwd)
+    if (!entry) {
+      // Too large to watch: keep the stream open with heartbeats so the client
+      // falls back to its own refresh instead of reconnecting in a loop.
+      await stream.writeSSE({ event: "ready", data: JSON.stringify({ watched: false }) })
+      const idle = setInterval(() => {
+        void stream.writeSSE({ event: "ping", data: "{}" })
+      }, 25_000)
+      await new Promise<void>((resolveStream) => {
+        stream.onAbort(() => {
+          clearInterval(idle)
+          resolveStream()
+        })
+      })
+      return
+    }
+    const { bus } = entry
     const onChanged = (data: { path: string; at: number }) => {
       void stream.writeSSE({ event: "changed", data: JSON.stringify(data) })
     }
@@ -2181,13 +2265,15 @@ function invalidateBlameForCwd(cwd: string, relPath: string) {
 // entries for the matching file. Idempotent — safe to call on every request.
 function ensureBlameWatcher(cwd: string) {
   if (blameWatchedCwds.has(cwd)) return
-  const { bus } = getWatcher(cwd)
-  bus.on("changed", ({ path: changedPath }: { path: string; at: number }) => {
-    // chokidar emits absolute paths; blame is keyed by path relative to cwd.
-    const rel = changedPath.startsWith(cwd + "/") ? changedPath.slice(cwd.length + 1) : changedPath
-    invalidateBlameForCwd(cwd, rel)
-  })
   blameWatchedCwds.add(cwd)
+  void getWatcher(cwd).then((entry) => {
+    if (!entry) return
+    entry.bus.on("changed", ({ path: changedPath }: { path: string; at: number }) => {
+      // chokidar emits absolute paths; blame is keyed by path relative to cwd.
+      const rel = changedPath.startsWith(cwd + "/") ? changedPath.slice(cwd.length + 1) : changedPath
+      invalidateBlameForCwd(cwd, rel)
+    })
+  })
 }
 
 function parseBlamePorcelain(stdout: string): BlameLine[] {
