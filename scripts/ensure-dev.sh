@@ -19,6 +19,10 @@ PORTS=(5173 5174 5175 5176 5177 5178 5179 5180)
 
 mkdir -p "$STATE_DIR" "$(dirname "$WEB_LOG")"
 
+# Same descriptor-limit problem for Vite's file watchers when this script runs
+# from the desktop app instead of a terminal.
+ulimit -n "${AI_CODER_NOFILE_LIMIT:-8192}" 2>/dev/null || true
+
 api_ok() {
   curl -fsS -m 2 "$API/api/health" >/dev/null 2>&1
 }

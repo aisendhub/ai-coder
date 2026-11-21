@@ -36,6 +36,11 @@ fi
 
 mkdir -p "$(dirname "$LOG")"
 
+# A GUI-launched process inherits a low soft descriptor limit (often 256 on
+# macOS), which the project file watchers exhaust immediately. Raise it before
+# the server starts so watching a big repo cannot wedge the whole API.
+ulimit -n "${AI_CODER_NOFILE_LIMIT:-8192}" 2>/dev/null || true
+
 # `tsx watch` from this repo no longer owns a working server: stop it so it
 # cannot fight the replacement for the port, then restart with a watcher of
 # our own so editing server files still reloads.

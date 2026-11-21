@@ -431,10 +431,23 @@ async function flushPendingNudges(conversationId: string): Promise<string | null
 
 type WatcherEntry = { bus: EventEmitter; watcher: ReturnType<typeof chokidar.watch> }
 const watchers = new Map<string, WatcherEntry>()
+// One watcher per conversation cwd, kept for the life of the process. Without a
+// cap, browsing big repos in many projects exhausts the file-descriptor limit
+// and every later fs operation (including spawning the agent runtime) fails
+// with EMFILE/EBADF. Oldest watcher is evicted when the cap is reached.
+const MAX_WATCHERS = 8
 
 function getWatcher(cwd: string): WatcherEntry {
   const existing = watchers.get(cwd)
   if (existing) return existing
+  if (watchers.size >= MAX_WATCHERS) {
+    const oldest = watchers.entries().next()
+    if (!oldest.done) {
+      const [oldCwd, old] = oldest.value
+      watchers.delete(oldCwd)
+      void old.watcher.close().catch(() => {})
+    }
+  }
   const bus = new EventEmitter()
   bus.setMaxListeners(100)
   const watcher = chokidar.watch(cwd, {
